@@ -1,0 +1,1372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Osmograph — Fleet MOX Monitoring</title>
+  <style>
+    :root {
+      --bg-0: #080808;
+      --bg-1: #111111;
+      --bg-2: #1a1a1a;
+      --bg-3: #222222;
+      --bg-4: #2a2a2a;
+      --border: #333333;
+      --border-focus: #4ade80;
+      --text-0: #ffffff;
+      --text-1: #e0e0e0;
+      --text-2: #a0a0a0;
+      --text-3: #666666;
+      --green: #4ade80;
+      --green-dim: #22c55e20;
+      --red: #f87171;
+      --red-dim: #ef444420;
+      --yellow: #fbbf24;
+      --yellow-dim: #f59e0b20;
+      --blue: #60a5fa;
+      --blue-dim: #3b82f620;
+      --cyan: #22d3ee;
+      --purple: #a78bfa;
+      --pink: #f472b6;
+      --orange: #fb923c;
+      --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', monospace;
+      --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+      --radius: 6px;
+      --radius-sm: 4px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: var(--font);
+      background: var(--bg-0);
+      color: var(--text-1);
+      overflow: hidden;
+      height: 100vh;
+      font-size: 13px;
+      user-select: none;
+    }
+
+    /* === Layout === */
+    .app {
+      display: grid;
+      grid-template-rows: 40px 32px 1fr 24px;
+      height: 100vh;
+    }
+
+    /* === Title Bar === */
+    .titlebar {
+      background: var(--bg-1);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 12px;
+      -webkit-app-region: drag;
+    }
+    .titlebar .logo {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--green);
+      letter-spacing: 2px;
+      -webkit-app-region: no-drag;
+    }
+    .titlebar .connection-group {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+      -webkit-app-region: no-drag;
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--red);
+      transition: background 0.3s;
+    }
+    .status-dot.ok { background: var(--green); }
+    .status-dot.warn { background: var(--yellow); }
+    .status-dot.crit { background: var(--red); animation: pulse 1s infinite; }
+    @keyframes pulse { 50% { opacity: 0.4; } }
+
+    select, input[type="text"], input[type="number"] {
+      background: var(--bg-3);
+      color: var(--text-1);
+      border: 1px solid var(--border);
+      padding: 3px 8px;
+      border-radius: var(--radius-sm);
+      font-size: 11px;
+      font-family: var(--font);
+      outline: none;
+    }
+    select:focus, input:focus { border-color: var(--border-focus); }
+    select { cursor: pointer; }
+
+    button {
+      background: var(--bg-3);
+      color: var(--text-1);
+      border: 1px solid var(--border);
+      padding: 3px 10px;
+      border-radius: var(--radius-sm);
+      font-size: 11px;
+      font-family: var(--font);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover { background: var(--bg-4); }
+    button:active { background: #333; }
+    button.green { background: var(--green); color: #000; border-color: var(--green); font-weight: 600; }
+    button.green:hover { background: #3ddc84; }
+    button.red { background: var(--red); color: #000; border-color: var(--red); font-weight: 600; }
+    button.red:hover { background: #f06060; }
+    button.blue { background: var(--blue); color: #000; border-color: var(--blue); font-weight: 600; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .icon-btn {
+      background: none;
+      border: 1px solid var(--border);
+      color: var(--text-2);
+      padding: 2px 6px;
+      font-size: 13px;
+      line-height: 1;
+    }
+    .icon-btn:hover { color: var(--text-0); background: var(--bg-4); }
+
+    /* === Tab Bar === */
+    .tabbar {
+      background: var(--bg-1);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: stretch;
+      padding: 0 8px;
+      gap: 0;
+    }
+    .tab-btn {
+      background: none;
+      border: none;
+      border-bottom: 2px solid transparent;
+      color: var(--text-3);
+      padding: 0 14px;
+      font-size: 11px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .tab-btn:hover { color: var(--text-2); }
+    .tab-btn.active {
+      color: var(--green);
+      border-bottom-color: var(--green);
+    }
+    .tab-btn .badge {
+      display: inline-block;
+      background: var(--red);
+      color: #000;
+      font-size: 9px;
+      font-weight: 700;
+      padding: 0 4px;
+      border-radius: 8px;
+      margin-left: 4px;
+      min-width: 14px;
+      text-align: center;
+    }
+
+    /* === Main Content Area === */
+    .content {
+      overflow: hidden;
+      position: relative;
+    }
+    .tab-panel {
+      display: none;
+      height: 100%;
+      overflow: hidden;
+    }
+    .tab-panel.active { display: flex; }
+
+    /* === Dashboard Tab === */
+    .dashboard {
+      display: grid;
+      grid-template-columns: 1fr 280px;
+      height: 100%;
+    }
+    .traces-area {
+      display: flex;
+      flex-direction: column;
+      padding: 8px;
+      gap: 8px;
+      overflow: hidden;
+    }
+    .traces-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+    .traces-header h2 {
+      font-size: 11px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .trace-legend {
+      display: flex;
+      gap: 12px;
+    }
+    .trace-legend span {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      font-size: 10px;
+      color: var(--text-2);
+    }
+    .trace-legend .swatch {
+      width: 8px;
+      height: 3px;
+      border-radius: 1px;
+    }
+    .canvas-wrap {
+      flex: 1;
+      position: relative;
+      background: var(--bg-1);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+    canvas#traces {
+      width: 100%;
+      height: 100%;
+    }
+
+    .sidebar {
+      background: var(--bg-1);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow-y: auto;
+      gap: 0;
+    }
+    .sidebar-section {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .sidebar-section h3 {
+      font-size: 10px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+    }
+
+    /* Anomaly Card */
+    .anomaly-card {
+      padding: 10px;
+      border-radius: var(--radius);
+      border-left: 3px solid var(--green);
+      background: var(--bg-2);
+      margin-bottom: 4px;
+    }
+    .anomaly-card.warning { border-left-color: var(--yellow); background: var(--yellow-dim); }
+    .anomaly-card.critical { border-left-color: var(--red); background: var(--red-dim); }
+    .anomaly-card .label { font-size: 12px; font-weight: 600; }
+    .anomaly-card .sub { font-size: 10px; color: var(--text-2); margin-top: 2px; }
+
+    .metric-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 6px;
+    }
+    .metric {
+      background: var(--bg-2);
+      padding: 6px 8px;
+      border-radius: var(--radius-sm);
+    }
+    .metric .k { font-size: 9px; color: var(--text-3); text-transform: uppercase; }
+    .metric .v { font-size: 16px; font-weight: 600; margin-top: 1px; }
+
+    /* Fingerprint Canvas */
+    .fingerprint-wrap {
+      background: var(--bg-2);
+      border-radius: var(--radius);
+      padding: 4px;
+      margin-top: 6px;
+    }
+    canvas#fingerprint {
+      width: 100%;
+      height: 120px;
+    }
+
+    /* === Library Tab === */
+    .library {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      height: 100%;
+    }
+    /* === Compare Tab === */
+    .compare {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+    }
+    .library-main {
+      display: flex;
+      flex-direction: column;
+      padding: 8px;
+      gap: 6px;
+    }
+    .lib-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .lib-toolbar input {
+      flex: 1;
+      min-width: 120px;
+    }
+    .lib-table-wrap {
+      flex: 1;
+      overflow: auto;
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    thead th {
+      position: sticky;
+      top: 0;
+      background: var(--bg-2);
+      color: var(--text-2);
+      font-weight: 500;
+      text-transform: uppercase;
+      font-size: 9px;
+      letter-spacing: 0.5px;
+      padding: 6px 8px;
+      text-align: left;
+      border-bottom: 1px solid var(--border);
+    }
+    tbody td {
+      padding: 5px 8px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-1);
+    }
+    tbody tr:hover { background: var(--bg-2); }
+    tbody tr.selected { background: var(--blue-dim); }
+    .quality-badge {
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 8px;
+      font-size: 9px;
+      font-weight: 600;
+    }
+    .quality-badge.good { background: var(--green-dim); color: var(--green); }
+    .quality-badge.ok { background: var(--yellow-dim); color: var(--yellow); }
+    .quality-badge.bad { background: var(--red-dim); color: var(--red); }
+
+    .library-inspector {
+      background: var(--bg-1);
+      border-left: 1px solid var(--border);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      overflow-y: auto;
+    }
+    .inspector-section {
+      background: var(--bg-2);
+      border-radius: var(--radius);
+      padding: 10px;
+    }
+    .inspector-section h4 {
+      font-size: 9px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+    }
+    canvas#session-fp {
+      width: 100%;
+      height: 140px;
+    }
+
+    /* === Train Tab === */
+    .train { display: flex; flex-direction: column; height: 100%; }
+    .train-layout {
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      flex: 1;
+      min-height: 0;
+      padding: 8px 16px 14px;
+      gap: 12px;
+    }
+    .train-main {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      gap: 8px;
+    }
+    .train-toolbar {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .train-toolbar input[type="text"] { width: 220px; }
+    .train-toolbar input[type="number"] { width: 96px; }
+    .train-table-wrap {
+      flex: 1;
+      min-height: 120px;
+      overflow: auto;
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .train-inspector {
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      overflow-y: auto;
+      font-size: 11px;
+    }
+    .train-inspector h4 { color: var(--text-0); margin: 10px 0 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .train-inspector h4:first-child { margin-top: 0; }
+    .confusion-grid {
+      display: grid;
+      gap: 4px;
+      margin-top: 4px;
+    }
+    .confusion-row { display: grid; grid-template-columns: 90px 1fr; align-items: center; gap: 6px; }
+    .confusion-row > span:first-child { color: var(--text-3); font-size: 10px; }
+    .confusion-bar {
+      height: 8px;
+      background: var(--bg-3);
+      border-radius: var(--radius-sm);
+      position: relative;
+      overflow: hidden;
+    }
+    .confusion-fill {
+      position: absolute;
+      left: 0;
+      top: 0;
+      bottom: 0;
+      background: var(--green-dim);
+      border-right: 1px solid var(--green);
+    }
+    .train-warn {
+      color: var(--yellow);
+      font-size: 10px;
+      padding: 3px 6px;
+      background: var(--yellow-dim);
+      border-radius: var(--radius-sm);
+      margin-top: 4px;
+    }
+    .train-err {
+      color: var(--red);
+      font-size: 10px;
+      padding: 3px 6px;
+      background: var(--red-dim);
+      border-radius: var(--radius-sm);
+      margin-top: 4px;
+    }
+    .train-metric { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
+
+    /* === Live Classifier (Dashboard sidebar proxy) === */
+    .live-probs { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
+    .live-row { display: grid; grid-template-columns: 90px 1fr 36px; align-items: center; gap: 6px; font-size: 11px; }
+    .live-row .p-name { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .live-row .p-track { height: 10px; background: var(--bg-3); border-radius: var(--radius-sm); overflow: hidden; position: relative; }
+    .live-row .p-fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--green); width: 0; transition: width 0.12s linear; }
+    .live-row .p-val { text-align: right; color: var(--text-2); font-family: var(--font-mono); }
+    .live-lock {
+      display: inline-block;
+      margin-top: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      border-radius: var(--radius-sm);
+      background: var(--green-dim);
+      color: var(--green);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .live-lock.unknown { background: var(--yellow-dim); color: var(--yellow); }
+
+    /* === System Tab === */
+    .system {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      height: 100%;
+    }
+    .sys-nav {
+      background: var(--bg-1);
+      border-right: 1px solid var(--border);
+      padding: 8px 0;
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+    .sys-nav-item {
+      padding: 8px 16px;
+      font-size: 12px;
+      color: var(--text-2);
+      cursor: pointer;
+      border-left: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .sys-nav-item:hover { color: var(--text-1); background: var(--bg-2); }
+    .sys-nav-item.active {
+      color: var(--green);
+      border-left-color: var(--green);
+      background: var(--bg-2);
+    }
+    .sys-panel {
+      display: none;
+      padding: 16px;
+      overflow-y: auto;
+    }
+    .sys-panel.active { display: block; }
+    .sys-panel h2 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-0);
+      margin-bottom: 12px;
+    }
+
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-2);
+      margin-bottom: 4px;
+    }
+    .form-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .form-row label {
+      min-width: 120px;
+      font-size: 11px;
+      color: var(--text-2);
+    }
+    .form-row select, .form-row input {
+      flex: 1;
+      max-width: 300px;
+    }
+    .form-row .hint {
+      font-size: 10px;
+      color: var(--text-3);
+    }
+
+    .card {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      margin-bottom: 12px;
+    }
+    .card h3 {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-0);
+      margin-bottom: 8px;
+    }
+    .card p {
+      font-size: 11px;
+      color: var(--text-2);
+      line-height: 1.4;
+    }
+
+    /* OLED Preview */
+    .oled-preview {
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--green);
+      min-height: 80px;
+      margin-top: 8px;
+      white-space: pre;
+      line-height: 1.4;
+    }
+
+    /* Buzzer Pattern Visualizer */
+    .buzzer-pattern {
+      display: flex;
+      gap: 2px;
+      align-items: flex-end;
+      height: 40px;
+      margin-top: 8px;
+    }
+    .buzzer-bar {
+      width: 4px;
+      background: var(--green);
+      border-radius: 1px;
+      transition: height 0.2s;
+    }
+    .buzzer-bar.off { background: var(--bg-3); }
+
+    /* Fleet Device Cards */
+    .fleet-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 12px;
+      padding: 12px;
+    }
+    .device-card {
+      background: var(--bg-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+    }
+    .device-card .dev-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .device-card .dev-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-0);
+    }
+    .device-card .dev-status {
+      font-size: 10px;
+      padding: 2px 8px;
+      border-radius: 8px;
+      font-weight: 600;
+    }
+    .device-card .dev-status.online { background: var(--green-dim); color: var(--green); }
+    .device-card .dev-status.offline { background: var(--bg-3); color: var(--text-3); }
+    .device-card .dev-status.warning { background: var(--yellow-dim); color: var(--yellow); }
+    .sensor-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      margin-top: 8px;
+    }
+    .sensor-slot {
+      background: var(--bg-3);
+      border-radius: var(--radius-sm);
+      padding: 4px 6px;
+      text-align: center;
+    }
+    .sensor-slot .s-name { font-size: 9px; color: var(--text-3); }
+    .sensor-slot .s-val { font-size: 11px; font-weight: 600; margin-top: 1px; }
+    .sensor-slot.empty { opacity: 0.3; }
+
+    /* Burn-In */
+    .burnin-display {
+      font-size: 32px;
+      font-weight: 700;
+      font-family: var(--font-mono);
+      color: var(--cyan);
+      margin: 12px 0;
+    }
+    .progress-track {
+      height: 6px;
+      background: var(--bg-3);
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 8px 0;
+    }
+    .progress-fill {
+      height: 100%;
+      background: var(--cyan);
+      border-radius: 3px;
+      transition: width 0.5s;
+    }
+
+    /* === Footer === */
+    .footer {
+      background: var(--bg-1);
+      border-top: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 10px;
+      font-size: 10px;
+      color: var(--text-3);
+      gap: 14px;
+    }
+    .footer .sep { width: 1px; height: 12px; background: var(--border); }
+    .footer-stat { display: flex; align-items: center; gap: 3px; }
+
+    /* === Scrollbar === */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg-1); }
+    ::-webkit-scrollbar-thumb { background: var(--bg-4); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #444; }
+
+    /* === Phase Recording HUD === */
+    .phase-hud {
+      display: flex; flex-direction: column; gap: 6px;
+      padding: 8px 10px; margin-bottom: 8px;
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); font-size: 12px;
+    }
+    .phase-hud-head { display: flex; align-items: center; justify-content: space-between; }
+    .phase-hud-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--text-2); font-size: 11px; }
+    .phase-bars { display: flex; flex-direction: column; gap: 3px; }
+    .phase-bar { display: flex; align-items: center; gap: 6px; }
+    .phase-bar .p-name { width: 52px; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+    .phase-bar .p-track { flex: 1; height: 6px; background: var(--bg-4); border-radius: 3px; overflow: hidden; }
+    .phase-bar .p-fill { height: 100%; width: 0%; transition: width 0.2s linear; }
+    .phase-bar .p-count { width: 34px; text-align: right; color: var(--text-3); font-size: 10px; }
+
+    /* === Record Modal === */
+    .modal {
+      position: fixed; inset: 0; z-index: 100;
+      background: rgba(0, 0, 0, 0.6);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .modal-box {
+      background: var(--bg-1); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 16px; width: 360px;
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    .modal-box h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
+    .modal-box label { font-size: 11px; color: var(--text-2); display: flex; flex-direction: column; gap: 3px; }
+    .modal-box input {
+      background: var(--bg-2); border: 1px solid var(--border);
+      border-radius: var(--radius-sm); color: var(--text-1);
+      font-size: 12px; padding: 5px 7px;
+    }
+    .phase-times { display: flex; gap: 8px; }
+    .phase-times label { flex: 1; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
+    .modal-actions button { padding: 5px 12px; }
+
+    /* === Progress modal (recording in progress) === */
+    .rec-progress { display: flex; flex-direction: column; gap: 8px; }
+    .rec-progress .rp-instr { color: var(--text-2); font-size: 12px; min-height: 30px; }
+    .rp-actions { display: flex; justify-content: flex-end; gap: 6px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Title Bar -->
+    <header class="titlebar">
+      <span class="logo">OSMOGRAPH</span>
+      <div class="connection-group">
+        <div class="status-dot" id="statusDot"></div>
+        <select id="modeSelect" style="width:70px">
+          <option value="serial">Serial</option>
+          <option value="wifi">WiFi</option>
+          <option value="ble">BLE</option>
+        </select>
+        <select id="portSelect" style="width:140px">
+          <option value="">Select port...</option>
+        </select>
+        <select id="baudSelect" style="width:72px">
+          <option value="115200" selected>115200</option>
+          <option value="921600">921600</option>
+          <option value="230400">230400</option>
+        </select>
+        <input type="text" id="wifiAddr" placeholder="192.168.4.1:8080" autocomplete="off"
+          style="width:130px;display:none;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;color:var(--text-1);font-size:11px;padding:3px 6px" />
+        <select id="bleSelect" style="width:190px;display:none">
+          <option value="">Scan for devices ↻</option>
+        </select>
+        <button class="icon-btn" id="refreshBtn" title="Refresh ports / scan BLE">↻</button>
+        <button class="green" id="connectBtn">Connect</button>
+        <button id="detectBtn" title="Auto-detect board">Detect</button>
+        <button id="recordBtn">● Record</button>
+      </div>
+    </header>
+
+    <!-- Tab Bar -->
+    <nav class="tabbar">
+      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
+      <button class="tab-btn" data-tab="library">Library</button>
+      <button class="tab-btn" data-tab="compare">Compare</button>
+      <button class="tab-btn" data-tab="train">Train</button>
+      <button class="tab-btn" data-tab="fleet">Fleet <span class="badge" id="fleetBadge" style="display:none">0</span></button>
+      <button class="tab-btn" data-tab="system">System</button>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="content">
+      <!-- ===== DASHBOARD ===== -->
+      <div class="tab-panel active" id="panel-dashboard">
+        <div class="dashboard">
+          <div class="traces-area">
+            <div class="traces-header">
+              <h2>Live Sensor Traces</h2>
+              <div class="trace-legend" id="traceLegend"></div>
+            </div>
+            <div class="phase-hud" id="phaseHud" style="display:none">
+              <div class="phase-hud-head">
+                <span id="phasePhase" style="font-weight:bold;font-size:11px;text-transform:uppercase;letter-spacing:1px"></span>
+                <span id="phaseSub" style="color:var(--text-3);font-size:11px"></span>
+              </div>
+              <div class="phase-bars" id="phaseBars"></div>
+              <div class="phase-hud-foot">
+                <span id="phaseInstr" style="color:var(--text-2)"></span>
+                <span id="phaseTotal" style="color:var(--text-3)"></span>
+              </div>
+            </div>
+            <div class="canvas-wrap">
+              <canvas id="traces"></canvas>
+            </div>
+          </div>
+          <div class="sidebar">
+            <!-- Anomaly Status -->
+            <div class="sidebar-section">
+              <h3>Anomaly Detection</h3>
+              <div class="anomaly-card" id="anomalyCard">
+                <div class="label" id="anomalyLabel">NORMAL</div>
+                <div class="sub" id="anomalySub">Waiting for data...</div>
+              </div>
+              <div class="metric-row">
+                <div class="metric"><div class="k">Mahal. Dist</div><div class="v" id="mMahal">--</div></div>
+                <div class="metric"><div class="k">Confidence</div><div class="v" id="mConf">--</div></div>
+                <div class="metric"><div class="k">Active CH</div><div class="v" id="mCh">0/6</div></div>
+                <div class="metric"><div class="k">Alert Level</div><div class="v" id="mAlert">0</div></div>
+              </div>
+            </div>
+
+            <!-- User Feedback -->
+            <div class="sidebar-section">
+              <h3>User Feedback</h3>
+              <div style="display:flex;gap:6px;margin-bottom:6px">
+                <button class="green" style="flex:1" id="labelNormal">✓ Normal</button>
+                <button class="red" style="flex:1" id="labelAnomaly">✗ Anomaly</button>
+              </div>
+              <div class="metric-row">
+                <div class="metric"><div class="k">Labels</div><div class="v" id="mLabels">0</div></div>
+                <div class="metric"><div class="k">Anomaly %</div><div class="v" id="mAnomPct">0%</div></div>
+              </div>
+            </div>
+
+            <!-- Learning -->
+            <div class="sidebar-section">
+              <h3>Adaptive Learning</h3>
+              <div style="display:flex;justify-content:space-between;font-size:10px">
+                <span style="color:var(--text-3)">Threshold Confidence</span>
+                <span id="mThreshConf" style="color:var(--green)">0%</span>
+              </div>
+              <div class="progress-track"><div class="progress-fill" id="learningBar" style="width:0%"></div></div>
+              <div style="font-size:10px;color:var(--text-3)" id="mFeedback">0 feedback samples</div>
+            </div>
+
+            <!-- Live Classifier -->
+            <div class="sidebar-section">
+              <h3>Live Classifier</h3>
+              <div id="liveCtrl">
+                <div style="font-size:10px;color:var(--text-3)">Train a model in the Train tab, then load it here to classify live sensor input.</div>
+              </div>
+              <div class="live-probs" id="liveProbs"></div>
+              <div id="liveLock"></div>
+            </div>
+
+            <!-- Sensor Health -->
+            <div class="sidebar-section">
+              <h3>Sensor Health</h3>
+              <div id="sensorHealthList"></div>
+            </div>
+
+            <!-- Fingerprint -->
+            <div class="sidebar-section">
+              <h3>Fingerprint</h3>
+              <div class="fingerprint-wrap">
+                <canvas id="fingerprint"></canvas>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== LIBRARY ===== -->
+      <div class="tab-panel" id="panel-library">
+        <div class="library">
+          <div class="library-main">
+            <div class="lib-toolbar">
+              <button id="libImport">Import</button>
+              <button id="libImportFolder">Import Folder</button>
+              <button id="libConvert">Export .osmell</button>
+              <button id="libRefresh">Refresh</button>
+              <span style="width:1px;height:16px;background:var(--border)"></span>
+              <input type="text" id="libSearch" placeholder="Search substance, label..." />
+              <select id="libFormatFilter" style="width:90px">
+                <option value="">All formats</option>
+                <option value="csv">CSV</option>
+                <option value="osmell">OSMELL</option>
+              </select>
+            </div>
+            <div class="lib-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:34px" title="Tick sessions to overlay in Compare">Comp</th>
+                    <th style="width:130px">Time</th>
+                    <th style="width:120px">Substance</th>
+                    <th>Label</th>
+                    <th style="width:60px">Format</th>
+                    <th style="width:60px">Duration</th>
+                    <th style="width:50px">Sensors</th>
+                    <th style="width:60px">Quality</th>
+                  </tr>
+                </thead>
+                <tbody id="libBody"></tbody>
+              </table>
+            </div>
+            <div style="font-size:10px;color:var(--text-3)" id="libStatus">0 sessions</div>
+          </div>
+          <div class="library-inspector">
+            <div class="inspector-section">
+              <h4>Session Details</h4>
+              <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
+            </div>
+            <div class="inspector-section">
+              <h4>Response Fingerprint</h4>
+              <canvas id="session-fp"></canvas>
+            </div>
+            <div class="inspector-section">
+              <h4>Actions</h4>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <button id="inspAnalyze">Analyze</button>
+                <button id="inspExport">Export</button>
+                <button id="inspDelete" style="color:var(--red)">Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== COMPARE ===== -->
+      <div class="tab-panel" id="panel-compare">
+        <div class="compare">
+          <div style="padding:14px 16px 4px">
+            <h2 style="font-size:16px;color:var(--text-0);font-weight:700">Compare</h2>
+            <div style="font-size:11px;color:var(--text-3);margin-top:2px;max-width:720px">
+              Overlay the normalized responses of the sessions you select in the Library.
+              Each session is normalized to its own R0 and plotted on a shared relative-time
+              axis, so responses are comparable across devices and days.
+            </div>
+          </div>
+          <div style="padding:8px 16px 4px;display:flex;align-items:center;gap:8px">
+            <span style="font-size:11px;color:var(--text-2)">Channel:</span>
+            <select id="compareChannel" style="width:150px" disabled></select>
+            <span id="compareCount" style="font-size:10px;color:var(--text-3)"></span>
+          </div>
+          <div style="padding:4px 16px" id="compareLabels"></div>
+          <div id="compareWrap" style="flex:1;min-height:200px;margin:4px 16px 0;border:1px solid var(--border);border-radius:var(--radius-sm);position:relative">
+            <canvas id="compareCanvas" style="width:100%;height:100%;display:block"></canvas>
+          </div>
+          <div style="padding:8px 16px 14px;font-size:10px;color:var(--text-3)">
+            R0 comes from each session's baseline when present; otherwise auto-R0 uses the
+            first 15 samples. Time is relative to each session's first sample.
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== TRAIN ===== -->
+      <div class="tab-panel" id="panel-train">
+        <div class="train">
+          <div style="padding:14px 16px 4px">
+            <h2 style="font-size:16px;color:var(--text-0);font-weight:700">Train Classifier</h2>
+            <div style="font-size:11px;color:var(--text-3);margin-top:2px;max-width:720px">
+              Train a logistic-regression substance classifier from your library recordings.
+              The model is evaluated by leave-one-recording-out cross-validation, so the
+              accuracy you see is out-of-sample, not inflated by training on the same data it
+              is scored against. Near-identical classes and low-quality recordings are gated.
+            </div>
+          </div>
+          <div class="train-layout">
+            <div class="train-main">
+              <div class="train-toolbar">
+                <input type="text" id="trainName" placeholder="Classifier name (e.g. kitchen_spices)" />
+                <input type="number" id="trainWindow" min="20" max="500" value="100" title="Samples per classification window (20-500, default 100)" />
+                <input type="number" id="trainMinQuality" min="0" max="1" step="0.05" value="0" title="Minimum library quality score (0-1) to include a recording; 0 disables the gate" />
+                <button id="trainBtn" class="green">Train</button>
+                <button id="trainRefresh">Refresh</button>
+              </div>
+              <div class="train-table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style="width:34px"></th>
+                      <th style="width:130px">Time</th>
+                      <th style="width:150px">Substance</th>
+                      <th style="width:90px">Label (override)</th>
+                      <th>File</th>
+                      <th style="width:70px">Quality</th>
+                    </tr>
+                  </thead>
+                  <tbody id="trainBody"></tbody>
+                </table>
+              </div>
+              <div style="font-size:10px;color:var(--text-3)" id="trainStatus">Loading recordings…</div>
+              <div id="trainLog" style="font-size:11px;font-family:var(--font-mono);color:var(--text-2);white-space:pre-wrap"></div>
+            </div>
+            <div class="train-inspector" id="trainInspector">
+              <div style="font-size:11px;color:var(--text-3)">No model selected.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ===== FLEET ===== -->
+      <div class="tab-panel" id="panel-fleet">
+        <div style="display:flex;flex-direction:column;height:100%">
+          <div style="padding:12px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0">
+            <h2 style="font-size:14px;color:var(--text-0);font-weight:600">Fleet Management</h2>
+            <div style="flex:1"></div>
+            <button id="fleetScan">Scan Network</button>
+            <button id="fleetAdd" class="blue">+ Add Device</button>
+          </div>
+          <div class="fleet-grid" id="fleetGrid"></div>
+        </div>
+      </div>
+
+      <!-- ===== SYSTEM ===== -->
+      <div class="tab-panel" id="panel-system">
+        <div class="system">
+          <div class="sys-nav">
+            <div class="sys-nav-item active" data-sys="connection">Connection</div>
+            <div class="sys-nav-item" data-sys="sensors">Sensors & Presets</div>
+            <div class="sys-nav-item" data-sys="oled">OLED Display</div>
+            <div class="sys-nav-item" data-sys="buzzer">Buzzer Alerts</div>
+            <div class="sys-nav-item" data-sys="firmware">Firmware</div>
+            <div class="sys-nav-item" data-sys="burnin">Burn-In</div>
+            <div class="sys-nav-item" data-sys="data">Data Storage</div>
+            <div class="sys-nav-item" data-sys="plugins">Plugins</div>
+          </div>
+
+          <!-- Connection Panel -->
+          <div class="sys-panel active" id="sys-connection">
+            <h2>Connection Settings</h2>
+            <div class="card">
+              <h3>Serial Port</h3>
+              <div class="form-row">
+                <label>Baud Rate</label>
+                <select id="sysBaud"><option>115200</option><option>230400</option><option>921600</option><option>9600</option></select>
+                <button id="sysRefreshPorts">Refresh</button>
+              </div>
+              <div class="form-row">
+                <label>Data Bits</label>
+                <select><option>8</option></select>
+                <label style="min-width:auto">Stop Bits</label>
+                <select style="width:50px"><option>1</option></select>
+              </div>
+              <p style="margin-top:8px">Select port from the titlebar and click Connect. Use Detect for auto-discovery.</p>
+            </div>
+            <div class="card">
+              <h3>Protocol</h3>
+              <div class="form-row">
+                <label>Format</label>
+                <select id="sysProtocol"><option value="osm">OSM (OSM,CH1,CH2,...)</option><option value="csv">CSV</option><option value="json">JSON Lines</option></select>
+              </div>
+              <div class="form-row">
+                <label>Expected Channels</label>
+                <input type="number" id="sysChannels" value="6" min="1" max="128" style="width:60px" />
+                <span class="hint">0 = auto-detect</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Sensors Panel -->
+          <div class="sys-panel" id="sys-sensors">
+            <h2>Sensors & Presets</h2>
+            <div class="card">
+              <h3>Active Preset</h3>
+              <div class="form-row">
+                <label>Preset</label>
+                <select id="sysPreset">
+                  <option value="3-sensor-food">3-Sensor Food</option>
+                  <option value="4-sensor-safety">4-Sensor Safety</option>
+                  <option value="6-sensor-full" selected>6-Sensor Full</option>
+                </select>
+              </div>
+              <div id="presetDetail" style="margin-top:8px"></div>
+            </div>
+            <div class="card">
+              <h3>Channel Mapping</h3>
+              <div id="channelMapping"></div>
+            </div>
+          </div>
+
+          <!-- OLED Panel -->
+          <div class="sys-panel" id="sys-oled">
+            <h2>OLED Display Configuration</h2>
+            <div class="card">
+              <h3>Layout</h3>
+              <div class="form-row">
+                <label>Screen</label>
+                <select id="oledScreen">
+                  <option value="128x64">128×64 (SSD1306)</option>
+                  <option value="128x32">128×32</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Page Layout</label>
+                <select id="oledLayout">
+                  <option value="overview">Overview (all sensors + status)</option>
+                  <option value="detail">Detail (single sensor + graph)</option>
+                  <option value="alert">Alert (anomaly focus)</option>
+                  <option value="minimal">Minimal (icon + value)</option>
+                  <option value="multi">Multi-Device</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Rotation</label>
+                <select id="oledRotation">
+                  <option value="0">0°</option>
+                  <option value="90">90°</option>
+                  <option value="180">180°</option>
+                  <option value="270">270°</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Auto-cycle Pages</label>
+                <select id="oledCycle">
+                  <option value="off">Off</option>
+                  <option value="3">Every 3s</option>
+                  <option value="5" selected>Every 5s</option>
+                  <option value="10">Every 10s</option>
+                </select>
+              </div>
+              <div class="oled-preview" id="oledPreview">
+OSMOGRAPH v0.1.0
+─────────────────
+CH1: MQ-135  1523 Ω
+CH2: MQ-3    1187 Ω
+CH3: MQ-6    1842 Ω
+CH4: MQ-7     912 Ω
+CH5: MQ-4    2105 Ω
+CH6: MQ-8    1634 Ω
+
+Status: NORMAL
+Confidence: 97.3%</div>
+            </div>
+          </div>
+
+          <!-- Buzzer Panel -->
+          <div class="sys-panel" id="sys-buzzer">
+            <h2>Buzzer Alert Configuration</h2>
+            <div class="card">
+              <h3>Alert Patterns</h3>
+              <div class="form-row">
+                <label>Warning Pattern</label>
+                <select id="buzzerWarn">
+                  <option value="off">Off</option>
+                  <option value="beep">Single Beep</option>
+                  <option value="double" selected>Double Beep</option>
+                  <option value="triple">Triple Beep</option>
+                  <option value="continuous">Continuous (1s)</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Critical Pattern</label>
+                <select id="buzzerCrit">
+                  <option value="off">Off</option>
+                  <option value="beep">Single Beep</option>
+                  <option value="double">Double Beep</option>
+                  <option value="triple">Triple Beep</option>
+                  <option value="continuous" selected>Continuous (1s)</option>
+                  <option value="sos">SOS Pattern</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Emergency Pattern</label>
+                <select id="buzzerEmerg">
+                  <option value="off">Off</option>
+                  <option value="continuous" selected>Continuous</option>
+                  <option value="sos">SOS Pattern</option>
+                  <option value="rapid">Rapid (100ms)</option>
+                </select>
+              </div>
+              <div class="form-row">
+                <label>Volume</label>
+                <input type="range" id="buzzerVolume" min="0" max="100" value="70" style="flex:1;max-width:200px" />
+                <span id="buzzerVolVal">70%</span>
+              </div>
+              <div class="form-row">
+                <label>Frequency</label>
+                <input type="number" id="buzzerFreq" value="2000" min="200" max="8000" style="width:80px" />
+                <span class="hint">Hz (200-8000)</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Pattern Preview</h3>
+              <div style="display:flex;gap:12px;align-items:flex-end">
+                <div>
+                  <div style="font-size:10px;color:var(--text-3);margin-bottom:4px">Warning</div>
+                  <div class="buzzer-pattern" id="buzPrevWarn"></div>
+                </div>
+                <div>
+                  <div style="font-size:10px;color:var(--text-3);margin-bottom:4px">Critical</div>
+                  <div class="buzzer-pattern" id="buzPrevCrit"></div>
+                </div>
+                <div>
+                  <div style="font-size:10px;color:var(--text-3);margin-bottom:4px">Emergency</div>
+                  <div class="buzzer-pattern" id="buzPrevEmerg"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Firmware Panel -->
+          <div class="sys-panel" id="sys-firmware">
+            <h2>Firmware</h2>
+            <div class="card">
+              <h3>Flash Firmware</h3>
+              <p>Flash ESP32 with OpenSmell firmware for the selected preset.</p>
+              <div class="form-row" style="margin-top:10px">
+                <label>Target Port</label>
+                <span id="fwPort" style="color:var(--text-1)">No port selected</span>
+              </div>
+              <div class="form-row">
+                <label>Preset</label>
+                <span id="fwPreset" style="color:var(--text-1)">6-sensor-full</span>
+              </div>
+              <div class="form-row">
+                <label>WiFi SSID</label>
+                <input type="text" id="fwSsid" value="" placeholder="leave empty for SoftAP mode" autocomplete="off" />
+              </div>
+              <div class="form-row">
+                <label>WiFi Password</label>
+                <input type="password" id="fwPass" value="" placeholder="network password" autocomplete="off" />
+              </div>
+              <div class="form-row">
+                <label>Toolchain</label>
+                <span id="fwToolchain" style="font-size:10px;color:var(--text-3)">checking…</span>
+              </div>
+              <button id="flashBtn" class="green" style="margin-top:8px">Flash Firmware</button>
+              <div class="progress-track" id="flashProgress" style="display:none;margin-top:8px"><div class="progress-fill" id="flashBar" style="width:0%"></div></div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:4px" id="flashStatus"></div>
+              <div style="display:flex;gap:6px;margin-top:8px">
+                <button id="readMacBtn" style="flex:1">Read MAC</button>
+                <button id="eraseBtn" style="flex:1">Erase Flash</button>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Firmware Info</h3>
+              <div class="form-row"><label>Version</label><span style="color:var(--text-1)">--</span></div>
+              <div class="form-row"><label>Board</label><span style="color:var(--text-1)">ESP32</span></div>
+              <div class="form-row"><label>MAC</label><span style="color:var(--text-1)" id="fwMac">--</span></div>
+            </div>
+          </div>
+
+          <!-- Burn-In Panel -->
+          <div class="sys-panel" id="sys-burnin">
+            <h2>Burn-In Timer</h2>
+            <div class="card">
+              <p>New MOX sensors need 24-hour burn-in to stabilise. The timer persists across app restarts.</p>
+              <div class="burnin-display" id="burninTime">--:--:--</div>
+              <div class="progress-track"><div class="progress-fill" id="burninBar" style="width:0%"></div></div>
+              <div class="form-row" style="margin-top:10px">
+                <label>Duration (hours)</label>
+                <input type="number" id="burninHours" value="24" min="1" max="168" style="width:60px" />
+                <button id="burninStart">Start</button>
+                <button id="burninReset">Reset</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Data Storage Panel -->
+          <div class="sys-panel" id="sys-data">
+            <h2>Data Storage</h2>
+            <div class="card">
+              <h3>Save Directory</h3>
+              <div class="form-row">
+                <label>Path</label>
+                <input type="text" id="dataDir" value="" style="flex:1" />
+                <button id="dataBrowse">Browse</button>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Export</h3>
+              <div class="form-row">
+                <button id="dataExportCSV">Export Labeled Data (CSV)</button>
+                <button id="dataSubmitCommons">Submit to Data Commons</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Plugins Panel -->
+          <div class="sys-panel" id="sys-plugins">
+            <h2>Plugins</h2>
+            <div class="card">
+              <p>Drop model files or plugin scripts into the plugins folder. Discovered plugins appear below.</p>
+              <div id="pluginList" style="margin-top:8px;font-size:11px;color:var(--text-3)">No plugins loaded</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <div class="footer-stat">Samples: <strong id="fSamples">0</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Rate: <strong id="fRate">0 Hz</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Session: <strong id="fSession">00:00:00</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Device: <strong id="fDevice">None</strong></div>
+      <div style="flex:1"></div>
+      <div class="footer-stat" style="color:var(--text-3)">OpenSmell v0.1.0</div>
+    </footer>
+  </div>
+
+<!-- Record Modal -->
+  <div id="recordModal" class="modal" style="display:none">
+    <div class="modal-box">
+      <div id="recSetup">
+        <h3>New Phase Recording</h3>
+        <label>Substance
+          <input id="recSubstance" list="substanceList" placeholder="e.g. coffee, garlic…" autocomplete="off" />
+        </label>
+        <datalist id="substanceList">
+          <option value="coffee"></option>
+          <option value="garlic"></option>
+          <option value="lemon"></option>
+          <option value="ethanol"></option>
+          <option value="vinegar"></option>
+          <option value="baseline"></option>
+          <option value="room air"></option>
+        </datalist>
+        <div class="phase-times">
+          <label>Baseline (s)<input id="recBaseline" type="number" value="30" min="0" step="5" /></label>
+          <label>Exposure (s)<input id="recExposure" type="number" value="60" min="0" step="5" /></label>
+          <label>Recovery (s)<input id="recRecovery" type="number" value="30" min="0" step="5" /></label>
+        </div>
+        <div class="modal-actions">
+          <button id="recModalClose">Close</button>
+          <button class="green" id="recStart">Start Recording</button>
+        </div>
+      </div>
+      <div id="recLive" style="display:none">
+        <h3>Recording: <span id="recLabel"></span></h3>
+        <div class="rec-progress">
+          <div class="phase-bars" id="recBars"></div>
+          <div class="rp-instr" id="recInstr"></div>
+          <div class="phase-hud-foot">
+            <span>Total <span id="recTotal"></span></span>
+            <span id="recSamples"></span>
+          </div>
+          <div class="rp-actions">
+            <button class="red" id="recCancel">Cancel</button>
+            <button class="green" id="recStop">Stop & Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

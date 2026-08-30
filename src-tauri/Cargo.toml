@@ -1,0 +1,37 @@
+[package]
+name = "osmograph-desktop"
+version = "0.1.0"
+description = "OpenSmell Desktop — Real-time MOX sensor monitoring"
+authors = ["OpenSmell Contributors"]
+license = "MIT"
+edition = "2021"
+
+[lib]
+name = "osmograph_desktop_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+opensmell = { path = "../../opensmell-rs" }
+data-commons = { path = "../../data-commons" }
+tokio = { version = "1", features = ["full"] }
+serialport = "4"
+log = "0.4"
+env_logger = "0.11"
+chrono = "0.4"
+csv = "1"
+dirs = "5"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+btleplug = "0.12"
+uuid = "1"
+futures = "0.3"
+mdns-sd = "0.11"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
