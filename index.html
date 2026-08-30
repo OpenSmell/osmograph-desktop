@@ -6,33 +6,33 @@
   <title>Osmograph — Fleet MOX Monitoring</title>
   <style>
     :root {
-      --bg-0: #080808;
-      --bg-1: #111111;
-      --bg-2: #1a1a1a;
-      --bg-3: #222222;
-      --bg-4: #2a2a2a;
-      --border: #333333;
-      --border-focus: #4ade80;
-      --text-0: #ffffff;
-      --text-1: #e0e0e0;
-      --text-2: #a0a0a0;
-      --text-3: #666666;
-      --green: #4ade80;
-      --green-dim: #22c55e20;
-      --red: #f87171;
-      --red-dim: #ef444420;
-      --yellow: #fbbf24;
-      --yellow-dim: #f59e0b20;
-      --blue: #60a5fa;
-      --blue-dim: #3b82f620;
-      --cyan: #22d3ee;
-      --purple: #a78bfa;
-      --pink: #f472b6;
-      --orange: #fb923c;
+      --bg-0: #ffffff;
+      --bg-1: #fafafa;
+      --bg-2: #f4f4f5;
+      --bg-3: #ececec;
+      --bg-4: #e4e4e7;
+      --border: #e4e4e7;
+      --border-focus: #2563eb;
+      --text-0: #09090b;
+      --text-1: #18181b;
+      --text-2: #3f3f46;
+      --text-3: #8a8a91;
+      --green: #059669;
+      --green-dim: #05966914;
+      --red: #dc2626;
+      --red-dim: #dc262612;
+      --yellow: #d97706;
+      --yellow-dim: #d9770612;
+      --blue: #2563eb;
+      --blue-dim: #2563eb12;
+      --cyan: #0891b2;
+      --purple: #7c3aed;
+      --pink: #db2777;
+      --orange: #ea580c;
       --font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', monospace;
       --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
-      --radius: 6px;
-      --radius-sm: 4px;
+      --radius: 0px;
+      --radius-sm: 0px;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -133,6 +133,11 @@
     }
     .icon-btn:hover { color: var(--text-0); background: var(--bg-4); }
 
+    button.mini {
+      padding: 1px 7px;
+      font-size: 10px;
+    }
+
     /* === Tab Bar === */
     .tabbar {
       background: var(--bg-1);
@@ -177,6 +182,9 @@
     .content {
       overflow: hidden;
       position: relative;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='100' viewBox='0 0 56 100'%3E%3Cpath d='M28 0L56 16.2v32.4L28 64.8 0 48.6V16.2z' fill='none' stroke='%2309090b' stroke-width='0.3' opacity='0.03'/%3E%3Cpath d='M28 35.2L56 51.4v32.4L28 100 0 83.8V51.4z' fill='none' stroke='%2309090b' stroke-width='0.3' opacity='0.03'/%3E%3C/svg%3E");
+      background-repeat: repeat;
+      background-size: 56px 100px;
     }
     .tab-panel {
       display: none;
@@ -574,7 +582,19 @@
       border-radius: var(--radius);
       padding: 12px;
       margin-bottom: 12px;
+      position: relative;
     }
+    /* Hex HUD corner brackets (Stark motif, mirrors web .hex-box) */
+    .card::before, .card::after {
+      content: "";
+      position: absolute;
+      width: 12px;
+      height: 12px;
+      pointer-events: none;
+      opacity: 0.55;
+    }
+    .card::before { top: -1px; left: -1px; border-top: 1px solid var(--text-3); border-left: 1px solid var(--text-3); }
+    .card::after { bottom: -1px; right: -1px; border-bottom: 1px solid var(--text-3); border-right: 1px solid var(--text-3); }
     .card h3 {
       font-size: 12px;
       font-weight: 600;
@@ -759,6 +779,7 @@
     <!-- Title Bar -->
     <header class="titlebar">
       <span class="logo">OSMOGRAPH</span>
+      <span id="demoBadge" style="display:none;font-size:9px;letter-spacing:2px;color:var(--yellow);border:1px solid var(--yellow);padding:2px 6px;margin-left:8px">DEMO DATA</span>
       <div class="connection-group">
         <div class="status-dot" id="statusDot"></div>
         <select id="modeSelect" style="width:70px">
@@ -886,9 +907,42 @@
             </div>
           </div>
         </div>
+
+        <!-- Session Replay -->
+        <div class="replay" id="replayPanel" style="margin-top:14px;display:none">
+          <div class="replay-head">
+            <h2 style="font-size:13px;letter-spacing:1px">Session Replay
+              <span class="replay-tag">REPLAY</span>
+            </h2>
+            <div class="replay-controls">
+              <select id="replaySession" style="width:230px">
+                <option value="">Select a session...</option>
+              </select>
+              <button id="replayLoad" class="green">Load ↻</button>
+              <button id="replayPlay">▶ Play</button>
+              <select id="replaySpeed" style="width:70px">
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="2">2×</option>
+                <option value="4">4×</option>
+                <option value="8">8×</option>
+              </select>
+              <button id="replayClose" title="Close replay">✕</button>
+            </div>
+          </div>
+          <div class="replay-inline-controls">
+            <input type="range" id="replayScrub" min="0" max="1000" value="0" style="flex:1" />
+            <span id="replayTime" style="font-size:10px;color:var(--text-3);min-width:110px;text-align:right">00:00 / 00:00</span>
+          </div>
+          <div class="canvas-wrap" style="height:160px;margin-top:8px">
+            <canvas id="replayCanvas"></canvas>
+          </div>
+          <div style="font-size:10px;color:var(--text-3);margin-top:6px" id="replayNote">
+            Replays a recorded session offline. Intended for inspection only — it does not feed the live detector or classifier.
+          </div>
+        </div>
       </div>
 
-      <!-- ===== LIBRARY ===== -->
       <div class="tab-panel" id="panel-library">
         <div class="library">
           <div class="library-main">
@@ -938,6 +992,7 @@
               <div style="display:flex;flex-wrap:wrap;gap:6px">
                 <button id="inspAnalyze">Analyze</button>
                 <button id="inspExport">Export</button>
+                <button id="inspReplay">▶ Replay</button>
                 <button id="inspDelete" style="color:var(--red)">Delete</button>
               </div>
             </div>
@@ -1291,14 +1346,46 @@ Confidence: 97.3%</div>
               <h3>Export</h3>
               <div class="form-row">
                 <button id="dataExportCSV">Export Labeled Data (CSV)</button>
-                <button id="dataSubmitCommons">Submit to Data Commons</button>
+                <button id="dataSubmitCommons">Submit Labeled Data to Vetting</button>
+              </div>
+              <p class="hint" style="margin-top:6px">Submitting sends the current labeled data through automated quality checks into the Data Hub review queue below.</p>
+            </div>
+
+            <div class="card">
+              <h3>Data Hub — Review Queue</h3>
+              <div class="form-row">
+                <button id="hubRefresh">Refresh</button>
+                <span id="hubStatus" style="flex:1;font-size:11px;color:var(--text-3)"></span>
+              </div>
+              <div id="hubList" style="margin-top:8px;font-size:11px;color:var(--text-3)">No contributions yet. Submit labeled data to begin vetting.</div>
+            </div>
+
+            <div class="card">
+              <h3>Community Sync — Hugging Face</h3>
+              <p class="hint" style="margin-bottom:8px">Share and pull anonymised OpenSmell sessions via a public HF dataset. Downloads are read-only (no token).</p>
+              <div class="form-row">
+                <label>Dataset</label>
+                <input type="text" id="hfRepo" value="" placeholder="opensmell/opensmell-datasets" style="flex:1" />
+                <button id="hfList">List</button>
+              </div>
+              <div class="form-row">
+                <label>Write Token</label>
+                <input type="password" id="hfToken" value="" placeholder="hf_..." style="flex:1" autocomplete="off" />
+                <button id="hfTokenSave">Use</button>
+                <button id="hfTokenClear" class="mini">Clear</button>
+              </div>
+              <div style="font-size:10px;color:var(--text-3);margin:2px 0 0 0">
+                Token is held in memory for this session only (never written to disk) and used for one upload at a time.
+              </div>
+              <div id="hfFiles" style="margin-top:8px;font-size:11px;color:var(--text-3)">
+                No files listed. Enter a dataset and click List.
               </div>
             </div>
           </div>
 
           <!-- Plugins Panel -->
           <div class="sys-panel" id="sys-plugins">
-            <h2>Plugins</h2>
+            <h2>Plugins <button id="pluginRefresh" style="font-size:10px;margin-left:auto">Refresh</button></h2>
             <div class="card">
               <p>Drop model files or plugin scripts into the plugins folder. Discovered plugins appear below.</p>
               <div id="pluginList" style="margin-top:8px;font-size:11px;color:var(--text-3)">No plugins loaded</div>

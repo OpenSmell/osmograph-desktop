@@ -37,6 +37,7 @@ let fleetDevices: FleetDevice[] = [];
 let bleDevices: { name: string; address: string }[] = [];
 let demoPhase = 0;
 let oledPage = 0;
+let dataDirValue = '';
 
 // === Classifier state ===
 let trainSelected = new Set<string>();
@@ -54,6 +55,25 @@ interface SessionRecord {
   path?: string;
   file_id?: string;
   quality_report?: QualityReport | null;
+}
+
+interface HubEntry {
+  id: string;
+  contributor: string;
+  substance: string;
+  device_id: string;
+  submitted_at: string;
+  quality_score: number;
+  status: string;
+  n_samples: number;
+  n_channels: number;
+  verification_log: string[];
+  data_path: string;
+}
+
+interface HfFile {
+  path: string;
+  size: number;
 }
 
 interface FleetDevice {
@@ -171,11 +191,11 @@ window.addEventListener('resize', resizeTraces);
 
 function drawTraces() {
   const w = tracesCanvas.width, h = tracesCanvas.height;
-  tracesCtx.fillStyle = '#111';
+  tracesCtx.fillStyle = '#fafafa';
   tracesCtx.fillRect(0, 0, w, h);
 
   // Grid lines
-  tracesCtx.strokeStyle = '#1e1e1e';
+  tracesCtx.strokeStyle = '#ececef';
   tracesCtx.lineWidth = 1;
   for (let i = 1; i < 5; i++) {
     const y = (h / 5) * i;
@@ -227,7 +247,7 @@ function drawFingerprint(values: number[]) {
 
   // Grid rings
   for (let ring = 1; ring <= 4; ring++) {
-    fpCtx.strokeStyle = '#222';
+    fpCtx.strokeStyle = '#d4d4d8';
     fpCtx.lineWidth = 1;
     fpCtx.beginPath();
     for (let i = 0; i <= n; i++) {
@@ -243,7 +263,7 @@ function drawFingerprint(values: number[]) {
   // Axes
   for (let i = 0; i < n; i++) {
     const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-    fpCtx.strokeStyle = '#1a1a1a';
+    fpCtx.strokeStyle = '#d4d4d8';
     fpCtx.beginPath();
     fpCtx.moveTo(cx, cy);
     fpCtx.lineTo(cx + Math.cos(angle) * r, cy + Math.sin(angle) * r);
@@ -308,7 +328,7 @@ function drawSessionFingerprint(values: number[]) {
   const n = values.length || chNames.length;
   if (n === 0) return;
   for (let ring = 1; ring <= 4; ring++) {
-    sfpCtx.strokeStyle = '#222'; sfpCtx.lineWidth = 1; sfpCtx.beginPath();
+    sfpCtx.strokeStyle = '#d4d4d8'; sfpCtx.lineWidth = 1; sfpCtx.beginPath();
     for (let i = 0; i <= n; i++) {
       const a = (i / n) * Math.PI * 2 - Math.PI / 2;
       const x = cx + Math.cos(a) * rr * (ring / 4);
@@ -351,7 +371,7 @@ function buildLegend() {
 buildLegend();
 
 // === Data Ingestion ===
-async function ingestReading(values: number[]) {
+async function ingestReading(values: number[], demo = false) {
   if (values.length === 0) return;
   for (let ch = 0; ch < Math.min(values.length, traceData.length); ch++) {
     traceData[ch].push(values[ch]);
@@ -362,34 +382,42 @@ async function ingestReading(values: number[]) {
   // Update fingerprint
   drawFingerprint(values);
 
-  try {
-    const result = await invoke<{
-      is_anomaly: boolean; raw_score: number; calibrated_confidence: number;
-      triggered_channels: number[]; alert_level: number; alert_name: string;
-      consecutive_anomalies: number;
-    }>('ingest_reading_with_failsafe', { reading: values });
+  // Demo/synthetic samples are purely visual — never feed the real detector,
+  // live classifier, or recorder so backend state stays clean for real data.
+  if (!demo) {
+    try {
+      const result = await invoke<{
+        is_anomaly: boolean; raw_score: number; calibrated_confidence: number;
+        triggered_channels: number[]; alert_level: number; alert_name: string;
+        consecutive_anomalies: number;
+      }>('ingest_reading_with_failsafe', { reading: values });
 
-    // Anomaly card
-    const card = document.getElementById('anomalyCard')!;
-    card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
-    document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
-    document.getElementById('anomalySub')!.textContent =
-      result.is_anomaly ? `${result.alert_name.toUpperCase()} — ${result.consecutive_anomalies} consecutive` : 'All channels nominal';
-    document.getElementById('mMahal')!.textContent = result.raw_score.toFixed(2);
-    document.getElementById('mConf')!.textContent = result.is_anomaly
-      ? `${(result.calibrated_confidence * 100).toFixed(0)}%`
-      : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
-    document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
-    document.getElementById('mAlert')!.textContent = result.alert_name;
+      // Anomaly card
+      const card = document.getElementById('anomalyCard')!;
+      card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
+      document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
+      document.getElementById('anomalySub')!.textContent =
+        result.is_anomaly ? `${result.alert_name.toUpperCase()} — ${result.consecutive_anomalies} consecutive` : 'All channels nominal';
+      document.getElementById('mMahal')!.textContent = result.raw_score.toFixed(2);
+      document.getElementById('mConf')!.textContent = result.is_anomaly
+        ? `${(result.calibrated_confidence * 100).toFixed(0)}%`
+        : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
+      document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
+      document.getElementById('mAlert')!.textContent = result.alert_name;
 
-    const statusDot = document.getElementById('statusDot')!;
-    if (result.is_anomaly) {
-      statusDot.className = result.alert_level >= 2 ? 'status-dot crit' : 'status-dot warn';
-    } else {
-      statusDot.className = connected ? 'status-dot ok' : 'status-dot';
+      const statusDot = document.getElementById('statusDot')!;
+      if (result.is_anomaly) {
+        statusDot.className = result.alert_level >= 2 ? 'status-dot crit' : 'status-dot warn';
+      } else {
+        statusDot.className = connected ? 'status-dot ok' : 'status-dot';
+      }
+    } catch (err) {
+      console.error('Detection error:', err);
     }
-  } catch (err) {
-    console.error('Detection error:', err);
+  } else {
+    document.getElementById('anomalyLabel')!.textContent = 'DEMO';
+    document.getElementById('anomalySub')!.textContent = 'Synthetic samples — connect a device for live detection';
+    document.getElementById('statusDot')!.className = 'status-dot';
   }
 
   // Rate counter
@@ -810,7 +838,7 @@ function drawCompare() {
   const sx = (v: number) => pad.left + (v - xMin) / (xMax - xMin) * pw;
   const sy = (v: number) => pad.top + ph - (v - yMin) / (yMax - yMin) * ph;
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.strokeStyle = 'rgba(8,8,12,0.06)';
   ctx.lineWidth = 1;
   for (let g = 0; g <= 5; g++) {
     const gy = pad.top + (ph / 5) * g;
@@ -1004,7 +1032,12 @@ function onPresetChange(preset: string) {
 }
 
 // === Demo Data ===
+function updateDemoBadge() {
+  const el = document.getElementById('demoBadge');
+  if (el) el.style.display = connected ? 'none' : '';
+}
 function generateDemoData() {
+  updateDemoBadge();
   if (connected) return;
   demoPhase += 0.05;
   const values: number[] = [];
@@ -1014,7 +1047,7 @@ function generateDemoData() {
     const noise = (Math.random() - 0.5) * 40;
     values.push(base + wave + noise);
   }
-  ingestReading(values);
+  ingestReading(values, true);
 }
 
 // === Classifier: Train Tab ===
@@ -1301,6 +1334,291 @@ async function reloadLibrary() {
 document.getElementById('libImport')!.addEventListener('click', reloadLibrary);
 document.getElementById('libImportFolder')!.addEventListener('click', reloadLibrary);
 
+async function selectedSessionRecord(): Promise<SessionRecord | null> {
+  const s = sessions[selectedSession ?? -1];
+  if (!s) {
+    await flashStatus('libStatus', 'Select a session first');
+    return null;
+  }
+  return s;
+}
+
+async function flashStatus(id: string, msg: string, color?: string) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = msg;
+  if (color) (el as HTMLElement).style.color = color;
+  await new Promise(r => setTimeout(r, 2500));
+  (el as HTMLElement).style.color = '';
+}
+
+document.getElementById('inspDelete')!.addEventListener('click', async () => {
+  const s = await selectedSessionRecord();
+  if (!s) return;
+  if (!confirm(`Delete session "${s.substance}" (${s.time})? This removes the file.`)) return;
+  try {
+    if (s.file_id) await invoke('remove_session', { fileId: s.file_id });
+    sessions.splice(selectedSession!, 1);
+    selectedSession = null;
+    renderLibrary();
+    document.getElementById('inspectorDetails')!.textContent = 'Select a session';
+    if (sfpCtx && sfpCanvas) sfpCtx.clearRect(0, 0, sfpCanvas.width, sfpCanvas.height);
+  } catch (e) {
+    await flashStatus('libStatus', `Delete failed: ${e}`, 'var(--red)');
+  }
+});
+
+document.getElementById('inspExport')!.addEventListener('click', async () => {
+  const s = await selectedSessionRecord();
+  if (!s) return;
+  try {
+    const out = sessionExportPath(s, 'csv');
+    const msg = await invoke<string>('export_session_copy', { fileId: s.file_id, outputPath: out });
+    await flashStatus('libStatus', msg, 'var(--green)');
+  } catch (e) {
+    await flashStatus('libStatus', `Export failed: ${e}`, 'var(--red)');
+  }
+});
+
+document.getElementById('libConvert')!.addEventListener('click', async () => {
+  const s = await selectedSessionRecord();
+  if (!s) return;
+  try {
+    const out = sessionExportPath(s, 'osmell');
+    const msg = await invoke<string>('export_session_osmell', { fileId: s.file_id, outputPath: out });
+    await flashStatus('libStatus', msg, 'var(--green)');
+  } catch (e) {
+    await flashStatus('libStatus', `Export failed: ${e}`, 'var(--red)');
+  }
+});
+
+function sessionExportPath(s: SessionRecord, ext: 'csv' | 'osmell'): string {
+  const base = dataDirValue || 'exports';
+  const safe = (s.substance || 'session').replace(/[^a-z0-9-_]+/gi, '_');
+  return `${base}/${s.time.replace(/[^0-9]/g, '').slice(0, 12)}_${safe}.${ext}`;
+}
+
+// === Data Storage panel (System -> Data) ===
+async function refreshDataPanel() {
+  try {
+    dataDirValue = await invoke<string>('get_data_dir');
+    const el = document.getElementById('dataDir') as HTMLInputElement;
+    if (el) el.value = dataDirValue;
+  } catch {}
+}
+document.getElementById('dataBrowse')!.addEventListener('click', refreshDataPanel);
+
+document.getElementById('dataExportCSV')!.addEventListener('click', async () => {
+  try {
+    const msg = await invoke<string>('export_labeled_data', { outputDir: dataDirValue || (await invoke<string>('get_data_dir')) });
+    await flashStatus('libStatus', msg, 'var(--green)');
+  } catch (e) {
+    await flashStatus('libStatus', `Export failed: ${e}`, 'var(--red)');
+  }
+});
+
+document.getElementById('dataSubmitCommons')!.addEventListener('click', async () => {
+  try {
+    const dir = dataDirValue || (await invoke<string>('get_data_dir'));
+    await invoke('export_labeled_data', { outputDir: dir });
+    const csvPath = `${dir}/session_unknown.csv`;
+    const metaPath = `${dir}/session_unknown.json`;
+    const info = await invoke<{
+      id: string; substance: string; quality_score: number; status: string;
+      n_samples: number; n_channels: number;
+    }>('commons_submit', { csvPath, metaPath, dataDir: dir });
+    await flashStatus('libStatus', `Submitted to Data Commons — id ${info.id} · ${info.substance} · q ${info.quality_score.toFixed(0)} · ${info.status}`, 'var(--green)');
+    await refreshHub();
+  } catch (e) {
+    await flashStatus('libStatus', `Submit failed: ${e}`, 'var(--red)');
+  }
+});
+
+// === Data Hub — review queue ===
+function hubDataDir(): string {
+  return dataDirValue || '';
+}
+
+async function refreshHub() {
+  const el = document.getElementById('hubList');
+  if (!el) return;
+  const dir = hubDataDir();
+  if (!dir) {
+    await refreshDataPanel();
+  }
+  try {
+    const entries = await invoke<HubEntry[]>('hub_list', { dataDir: hubDataDir() });
+    if (!entries.length) {
+      el.innerHTML = 'No contributions yet. Submit labeled data to begin vetting.';
+      return;
+    }
+    el.innerHTML = entries.map(e => {
+      const t10 = e.submitted_at.replace('T', ' ').slice(0, 19);
+      const log = e.verification_log.slice(-3).join('<br>');
+      const shortId = e.id.slice(0, 10);
+      return `<div style="border:1px solid var(--border);border-left:3px solid var(--border-focus);padding:8px;margin-bottom:8px;border-radius:0">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <strong>${esc(e.substance) || 'unknown'}</strong>
+          <span style="color:var(--text-3)">${shortId}</span>
+          <span style="color:${statusColor(e.status)}">${esc(e.status)}</span>
+          <span style="margin-left:auto;color:var(--text-2)">q ${e.quality_score.toFixed(0)} · ${e.n_samples} samples · ${e.n_channels}ch</span>
+        </div>
+        <div style="color:var(--text-3);margin:4px 0">${esc(e.contributor || 'anon')} · ${esc(e.device_id)} · ${t10}</div>
+        <div style="color:var(--text-3);font-size:10px">${log}</div>
+        <div style="margin-top:6px;display:flex;gap:6px;flex-wrap:wrap">
+          ${statusBtn('hubApprove', e.id, 'Approve')}
+          ${statusBtnReject(e.id)}
+          ${statusBtn('hubPublish', e.id, 'Publish')}
+          <button class="mini" data-hub-upload="${e.id}" data-subst="${esc(e.substance)}">Upload to HF</button>
+        </div>
+        <span class="hub-note" style="display:block;margin-top:4px;font-size:10px;color:var(--text-3)"></span>
+      </div>`;
+    }).join('');
+    el.querySelectorAll('[data-hub-approve]').forEach(b => {
+      b.addEventListener('click', () => hubAction('hub_approve', b.getAttribute('data-hub-approve')!));
+    });
+    el.querySelectorAll('[data-hub-reject]').forEach(b => {
+      b.addEventListener('click', () => hubReject(b.getAttribute('data-hub-reject')!));
+    });
+    el.querySelectorAll('[data-hub-publish]').forEach(b => {
+      b.addEventListener('click', () => hubAction('hub_publish', b.getAttribute('data-hub-publish')!));
+    });
+    el.querySelectorAll('[data-hub-upload]').forEach(b => {
+      b.addEventListener('click', () => hubUpload((b as HTMLElement).dataset.hubUpload!, b.getAttribute('data-subst') || 'session'));
+    });
+    const hubStatus = document.getElementById('hubStatus');
+    if (hubStatus) hubStatus.textContent = `${entries.length} contribution(s)`;
+    const tokenOk = await invoke<boolean>('hf_has_token');
+    if (hubStatus) hubStatus.textContent += tokenOk ? ' · HF token ✓' : ' · HF token not set';
+  } catch (e) {
+    el.innerHTML = `Failed to load hub: ${esc(String(e))}`;
+  }
+}
+
+function statusColor(status: string): string {
+  if (status.includes('Approved') || status.includes('Published')) return 'var(--green)';
+  if (status.includes('Rejected')) return 'var(--red)';
+  if (status.includes('Pending') || status.includes('AutoVerified')) return 'var(--yellow)';
+  return 'var(--text-3)';
+}
+
+function statusBtn(action: string, id: string, label: string): string {
+  return `<button class="mini" data-hub-${action}="${id}">${label}</button>`;
+}
+function statusBtnReject(id: string): string {
+  return `<button class="mini" data-hub-reject="${id}">Reject</button>`;
+}
+
+async function hubAction(cmd: string, id: string) {
+  try {
+    await invoke(cmd, { dataDir: hubDataDir(), id });
+    await refreshHub();
+  } catch (e) {
+    await flashStatus('hubStatus', `Action failed: ${e}`, 'var(--red)');
+  }
+}
+
+async function hubReject(id: string) {
+  const reason = prompt('Rejection reason:') || '';
+  try {
+    await invoke('hub_reject', { dataDir: hubDataDir(), id, reason });
+    await refreshHub();
+  } catch (e) {
+    await flashStatus('hubStatus', `Reject failed: ${e}`, 'var(--red)');
+  }
+}
+
+async function hubUpload(id: string, substance: string) {
+  const repo = (document.getElementById('hfRepo') as HTMLInputElement).value.trim();
+  if (!repo) {
+    await flashStatus('hubStatus', 'Enter a HF dataset repo to upload to.', 'var(--red)');
+    return;
+  }
+  const btn = document.querySelector(`[data-hub-upload="${id}"]`) as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Uploading…'; }
+  try {
+    const msg = await invoke<string>('hf_upload', { dataDir: hubDataDir(), repo, id, commitMessage: `OpenSmell ${substance} session` });
+    const note = document.querySelector(`[data-hub-upload="${id}"]`)?.parentElement?.querySelector('.hub-note');
+    if (note) (note as HTMLElement).textContent = msg;
+  } catch (e) {
+    await flashStatus('hubStatus', `Upload failed: ${e}`, 'var(--red)');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Upload to HF'; }
+  }
+}
+
+// === Community Sync — HF list / download / token ===
+document.getElementById('hfList')!.addEventListener('click', async () => {
+  const repo = (document.getElementById('hfRepo') as HTMLInputElement).value.trim();
+  const filesEl = document.getElementById('hfFiles');
+  if (!filesEl) return;
+  if (!repo) { filesEl.textContent = 'Enter a dataset repo first.'; return; }
+  filesEl.textContent = 'Listing…';
+  try {
+    const files = await invoke<HfFile[]>('hf_list', { repo });
+    filesEl.innerHTML = files.length
+      ? files.map(f => {
+          const kb = (f.size / 1024).toFixed(1);
+          return `<div style="display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);padding:4px 0">
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis">${esc(f.path)}</span>
+            <span style="color:var(--text-3)">${kb} KB</span>
+            <button class="mini" data-hf-dl="${esc(f.path)}">Download</button>
+          </div>`;
+        }).join('')
+      : 'No files found in this dataset.';
+    filesEl.querySelectorAll('[data-hf-dl]').forEach(b => {
+      b.addEventListener('click', async () => {
+        const fn = b.getAttribute('data-hf-dl')!;
+        b.textContent = 'Downloading…';
+        try {
+          const msg = await invoke<string>('hf_download', { repo, filename: fn });
+          await flashStatus('hubStatus', msg, 'var(--green)');
+          await refreshHub();
+          await reloadLibrary();
+        } catch (e) {
+          await flashStatus('hubStatus', `Download failed: ${e}`, 'var(--red)');
+        } finally {
+          b.textContent = 'Download';
+        }
+      });
+    });
+  } catch (e) {
+    filesEl.textContent = `List failed: ${e}`;
+  }
+});
+
+document.getElementById('hfTokenSave')!.addEventListener('click', async () => {
+  const token = (document.getElementById('hfToken') as HTMLInputElement).value.trim();
+  if (!token) { await flashStatus('hubStatus', 'Enter a token to use.', 'var(--red)'); return; }
+  try {
+    const msg = await invoke<string>('hf_set_token', { token });
+    (document.getElementById('hfToken') as HTMLInputElement).value = '';
+    await flashStatus('hubStatus', msg, 'var(--green)');
+    await refreshHub();
+  } catch (e) {
+    await flashStatus('hubStatus', `Token set failed: ${e}`, 'var(--red)');
+  }
+});
+
+const hfTokenClear = document.getElementById('hfTokenClear');
+if (hfTokenClear) {
+  hfTokenClear.addEventListener('click', async () => {
+    try {
+      await invoke('hf_clear_token');
+      await flashStatus('hubStatus', 'HF token cleared from memory.', 'var(--green)');
+      await refreshHub();
+    } catch (e) {
+      await flashStatus('hubStatus', `Clear failed: ${e}`, 'var(--red)');
+    }
+  });
+}
+
+document.getElementById('hubRefresh')!.addEventListener('click', refreshHub);
+
+function esc(s: string): string {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+}
+
 // === Train Tab listeners ===
 document.getElementById('trainBtn')!.addEventListener('click', trainClassifier);
 document.getElementById('trainRefresh')!.addEventListener('click', refreshTrainLibrary);
@@ -1557,15 +1875,96 @@ document.getElementById('recCancel')!.addEventListener('click', async () => {
 });
 
 // System sub-nav interactions
-document.getElementById('burninStart')!.addEventListener('click', () => {
-  const hrs = parseInt((document.getElementById('burninHours') as HTMLInputElement).value);
-  document.getElementById('burninTime')!.textContent = `${hrs}:00:00`;
-  document.getElementById('burninBar')!.style.width = '0%';
+
+interface BurnInStatus {
+  total_hours: number;
+  elapsed_seconds: number;
+  remaining_seconds: number;
+  remaining_hours: number;
+  is_complete: boolean;
+}
+
+function fmtClock(totalSeconds: number): string {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`;
+}
+
+function renderBurnIn(s: BurnInStatus) {
+  document.getElementById('burninTime')!.textContent = fmtClock(s.remaining_seconds);
+  const total = s.total_hours * 3600;
+  const pct = total > 0 ? Math.min(100, (s.elapsed_seconds / total) * 100) : 0;
+  document.getElementById('burninBar')!.style.width = `${pct.toFixed(1)}%`;
+}
+
+async function refreshBurnIn() {
+  try {
+    const s = await invoke<BurnInStatus>('burnin_get_status');
+    renderBurnIn(s);
+  } catch {}
+}
+
+document.getElementById('burninStart')!.addEventListener('click', async () => {
+  try {
+    const s = await invoke<BurnInStatus>('burnin_start');
+    renderBurnIn(s);
+  } catch (e) {
+    console.error('Burn-in start failed:', e);
+  }
 });
-document.getElementById('burninReset')!.addEventListener('click', () => {
-  document.getElementById('burninTime')!.textContent = '--:--:--';
-  document.getElementById('burninBar')!.style.width = '0%';
+
+document.getElementById('burninReset')!.addEventListener('click', async () => {
+  const hrs = parseFloat((document.getElementById('burninHours') as HTMLInputElement).value) || 24;
+  try {
+    const s = await invoke<BurnInStatus>('burnin_reset', { hours: hrs });
+    renderBurnIn(s);
+  } catch (e) {
+    console.error('Burn-in reset failed:', e);
+  }
 });
+
+
+interface PluginInfo {
+  name: string;
+  path: string;
+  description: string;
+  version: string;
+  kind: string;
+  size_bytes: number;
+  loaded: boolean;
+  error: string;
+}
+
+document.getElementById('pluginRefresh')!.addEventListener('click', refreshPlugins);
+
+async function refreshPlugins() {
+  try {
+    const [plugins, dir] = await Promise.all([
+      invoke<PluginInfo[]>('discover_plugins'),
+      invoke<string>('get_plugins_dir'),
+    ]);
+    const list = document.getElementById('pluginList')!;
+    if (!plugins.length) {
+      list.textContent = 'No plugins loaded';
+      list.style.color = 'var(--text-3)';
+      return;
+    }
+    list.style.color = 'var(--text-2)';
+    list.innerHTML = plugins
+      .map((p) => {
+        const size = p.size_bytes >= 1024 * 1024 ? `${(p.size_bytes / 1048576).toFixed(1)} MB` : `${Math.round(p.size_bytes / 1024)} KB`;
+        const state = p.loaded ? '<span style="color:#3fbf5f">&#9679;</span> loaded' : `<span style="color:#d64">&#9679;</span> ${p.error || 'stub'}`;
+        return `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><strong>${p.name}</strong> <span style="color:var(--text-3)">v${p.version || '?'} · ${p.kind} · ${size}</span><br/><span style="color:var(--text-3)">${p.description || ''}</span> &nbsp; ${state}</div>`;
+      })
+      .join('');
+    const hint = document.querySelector('#sys-plugins p')!;
+    hint.textContent = `Plugin folder: ${dir}`;
+  } catch {
+    document.getElementById('pluginList')!.textContent = 'Plugin discovery failed';
+  }
+}
 
 document.getElementById('sysRefreshPorts')!.addEventListener('click', refreshPorts);
 document.getElementById('flashBtn')!.addEventListener('click', async () => {
@@ -1666,6 +2065,241 @@ listen<LiveSnapshot>('live-classification', (event) => {
   renderLiveState();
 });
 
+// === Session Replay (offline inspection) ===
+const replayCanvas = document.getElementById('replayCanvas') as HTMLCanvasElement | null;
+const replayCtx = replayCanvas?.getContext('2d') || null;
+let replaySeries: SessionSeries | null = null;
+let replayFrame = 0;
+let replayPlaying = false;
+let replayLastTs: number | null = null;
+
+function fmtRecTime(sec: number): string {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const ss = s % 60;
+  return `${m.toString().padStart(2, '0')}:${ss.toString().padStart(2, '0')}`;
+}
+
+function replayCurrentSample(): number[] | null {
+  if (!replaySeries) return null;
+  const idx = Math.max(0, Math.min(replayFrame - 1, (replaySeries.time.length || 1) - 1));
+  const chans = replaySeries.channels.length;
+  const sample: number[] = [];
+  for (let ch = 0; ch < chans; ch++) {
+    sample.push(replaySeries.values[ch]?.[idx] ?? 0);
+  }
+  return sample;
+}
+
+function replayReflectOnDashboard() {
+  const sample = replayCurrentSample();
+  if (sample) drawFingerprint(sample);
+  document.getElementById('replayNote')!.textContent =
+    `Replaying "${replaySeries?.label}" — ${replaySeries?.time.length ?? 0} samples · ${replaySeries?.channels.length ?? 0} channels. Inspection only (fingerprint reflects the replayed moment; not fed to the detector/classifier).`;
+}
+
+function populateReplaySelect() {
+  const sel = document.getElementById('replaySession') as HTMLSelectElement;
+  if (!sel) return;
+  const cur = sel.value;
+  const withFid = sessions.filter(s => s.file_id);
+  sel.innerHTML = '<option value="">Select a session...</option>' +
+    withFid
+      .map(s => `<option value="${s.file_id}">${s.substance} · ${s.time}</option>`)
+      .join('');
+  sel.value = cur || (withFid[0]?.file_id ?? '');
+}
+
+function openReplayPanel() {
+  populateReplaySelect();
+  document.getElementById('replayPanel')!.style.display = '';
+}
+
+function closeReplayPanel() {
+  replayPlaying = false;
+  document.getElementById('replayPanel')!.style.display = 'none';
+  const btn = document.getElementById('replayPlay');
+  if (btn) btn.textContent = '▶ Play';
+}
+
+async function loadReplay() {
+  const sel = document.getElementById('replaySession') as HTMLSelectElement;
+  const fid = sel.value;
+  if (!fid) return;
+  try {
+    replaySeries = await invoke<SessionSeries>('load_session_series', { fileId: fid });
+    replayFrame = 0;
+    replayLastTs = null;
+    if (replaySeries.time.length) {
+      const dur = replaySeries.time[replaySeries.time.length - 1];
+      const scrb = document.getElementById('replayScrub') as HTMLInputElement;
+      if (scrb) { scrb.max = '1000'; scrb.value = '0'; }
+      document.getElementById('replayTime')!.textContent = `00:00 / ${fmtRecTime(dur)}`;
+    }
+    replayReflectOnDashboard();
+    replayPlaying = false;
+    const btn = document.getElementById('replayPlay');
+    if (btn) btn.textContent = '▶ Play';
+  } catch (e) {
+    document.getElementById('replayNote')!.textContent = `Failed to load session: ${e}`;
+  }
+}
+
+function drawReplay() {
+  if (!replayCtx || !replayCanvas) return;
+  const parent = replayCanvas.parentElement!;
+  const rect = parent.getBoundingClientRect();
+  replayCanvas.width = Math.max(1, Math.floor(rect.width - 4));
+  replayCanvas.height = Math.max(1, Math.floor(rect.height - 4));
+  const w = replayCanvas.width, h = replayCanvas.height;
+  const ctx = replayCtx;
+  ctx.fillStyle = '#fafafa';
+  ctx.fillRect(0, 0, w, h);
+
+  ctx.strokeStyle = '#ececef';
+  ctx.lineWidth = 1;
+  for (let i = 1; i < 5; i++) {
+    const y = (h / 5) * i;
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+  }
+
+  if (!replaySeries) {
+    ctx.fillStyle = '#8a8a91';
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Pick a session and press Load to replay', w / 2, h / 2);
+    return;
+  }
+
+  const chans = replaySeries.channels;
+  const nCh = chans.length;
+  const nSamples = replaySeries.time.length;
+  const limit = Math.max(1, Math.min(replayFrame, nSamples));
+
+  let gMin = Infinity, gMax = -Infinity;
+  for (let ch = 0; ch < nCh; ch++) {
+    const vals = replaySeries.values[ch] || [];
+    for (let i = 0; i <= limit && i < vals.length; i++) {
+      const v = vals[i];
+      if (Number.isFinite(v)) { if (v < gMin) gMin = v; if (v > gMax) gMax = v; }
+    }
+  }
+  if (gMin === Infinity) return;
+  const range = gMax - gMin || 1;
+  gMin -= range * 0.1; gMax += range * 0.1;
+  const span = gMax - gMin;
+
+  for (let ch = 0; ch < nCh; ch++) {
+    const vals = replaySeries.values[ch] || [];
+    if (vals.length < 2) continue;
+    ctx.strokeStyle = CH_COLORS[ch % CH_COLORS.length];
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    const count = Math.min(limit, vals.length);
+    for (let i = 0; i < count; i++) {
+      const x = (i / Math.max(1, nSamples - 1)) * w;
+      const y = h - ((vals[i] - gMin) / span) * h;
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+
+  // Playhead
+  if (limit < nSamples) {
+    const x = (limit / Math.max(1, nSamples - 1)) * w;
+    ctx.strokeStyle = 'rgba(8,8,12,0.35)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
+  }
+}
+
+function replayTick(dtMs: number) {
+  if (!replaySeries || !replayPlaying) return;
+  const speed = parseFloat((document.getElementById('replaySpeed') as HTMLSelectElement).value) || 1;
+  const times = replaySeries.time;
+  if (!times.length) return;
+  const dur = times[times.length - 1];
+  const cur = replayLastTs !== null ? replayLastTs : 0;
+  const next = cur + (dtMs / 1000) * speed;
+  if (next >= dur) {
+    replayFrame = times.length;
+    pauseReplay();
+    return;
+  }
+  // find highest index with time <= next (binary-ish scan)
+  let lo = 0, hi = times.length - 1, best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (times[mid] <= next) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  replayFrame = best + 1;
+  replayLastTs = next;
+  const scrb = document.getElementById('replayScrub') as HTMLInputElement;
+  if (scrb) scrb.value = String((next / dur) * 1000);
+  document.getElementById('replayTime')!.textContent = `${fmtRecTime(next)} / ${fmtRecTime(dur)}`;
+  replayReflectOnDashboard();
+}
+
+function pauseReplay() {
+  replayPlaying = false;
+  const btn = document.getElementById('replayPlay');
+  if (btn) btn.textContent = '▶ Play';
+}
+
+function toggleReplay() {
+  if (replayPlaying) { pauseReplay(); return; }
+  if (!replaySeries) { loadReplay(); }
+  replayPlaying = true;
+  replayLastTs = replaySeries ? null : null;
+  const btn = document.getElementById('replayPlay');
+  if (btn) btn.textContent = '❚❚ Pause';
+}
+
+let lastReplayTick: number | null = null;
+function replayLoop(ts: number) {
+  if (lastReplayTick !== null) {
+    replayTick(ts - lastReplayTick);
+  }
+  lastReplayTick = ts;
+  drawReplay();
+  requestAnimationFrame(replayLoop);
+}
+
+function seekReplayByRatio(ratio: number) {
+  if (!replaySeries || !replaySeries.time.length) return;
+  const dur = replaySeries.time[replaySeries.time.length - 1];
+  const target = Math.max(0, Math.min(dur, ratio * dur));
+  let lo = 0, hi = replaySeries.time.length - 1, best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (replaySeries.time[mid] <= target) { best = mid; lo = mid + 1; } else { hi = mid - 1; }
+  }
+  replayFrame = best + 1;
+  replayLastTs = target;
+  document.getElementById('replayTime')!.textContent = `${fmtRecTime(target)} / ${fmtRecTime(dur)}`;
+  replayReflectOnDashboard();
+}
+
+document.getElementById('replayLoad')!.addEventListener('click', loadReplay);
+document.getElementById('replayPlay')!.addEventListener('click', toggleReplay);
+document.getElementById('replayClose')!.addEventListener('click', closeReplayPanel);
+document.getElementById('replaySpeed')!.addEventListener('change', () => { replayLastTs = null; });
+
+(document.getElementById('inspReplay') as HTMLButtonElement)?.addEventListener('click', async () => {
+  const s = sessions[selectedSession ?? -1];
+  if (!s || !s.file_id) return;
+  const sel = document.getElementById('replaySession') as HTMLSelectElement;
+  sel.value = s.file_id;
+  openReplayPanel();
+  await loadReplay();
+  toggleReplay();
+});
+(document.getElementById('replayScrub') as HTMLInputElement)?.addEventListener('input', (e) => {
+  const ratio = (parseInt((e.target as HTMLInputElement).value, 10) || 0) / 1000;
+  seekReplayByRatio(ratio);
+});
+requestAnimationFrame(replayLoop);
+
 // === Animation Loop ===
 function animate() {
   drawTraces();
@@ -1680,6 +2314,7 @@ setInterval(generateDemoData, 100);
 setInterval(updateOledPreview, 1000);
 setInterval(pollPhaseRecorder, 500);
 setInterval(reloadClassifiers, 4000);
+setInterval(refreshBurnIn, 1000);
 
 // === Init ===
 refreshPorts();
@@ -1692,3 +2327,8 @@ refreshToolchain();
 reloadLibrary();
 refreshTrainLibrary();
 renderLiveState();
+refreshBurnIn();
+refreshPlugins();
+refreshDataPanel();
+setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
+updateDemoBadge();

@@ -1,6 +1,8 @@
 mod data;
 mod classifier;
 mod live;
+mod burnin;
+mod plugins;
 
 use data::{
     parse_osm_line, recordings_dir, now_secs, CsvRecorder, SessionIndex, SessionRecord,
@@ -1484,8 +1486,21 @@ fn current_preset_name(state: &State<'_, AppState>) -> String {
 
 /// Score one indexed recording with the opensmell quality scorer and stash the
 /// report (`quality_report`) on its `SessionRecord`. Mirrors the Python app's
-/// `.osmell` import analysis (`app.py`) for the desktop's CSV session format.
+/// `.osmell`/CSV import analysis (`app.py`). Dispatches on extension so an
+/// indexed `.osmell` phase recording (whose `csv_path` is the bundle) is
+/// analyzed from its manifest rather than misread as CSV.
 fn analyze_session_file(path: &str) -> Result<opensmell::quality::QualityReport, String> {
+    let p = std::path::Path::new(path);
+    let ext = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if ext == "osmell" {
+        return analyze_osmell_file(p);
+    }
+
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path, e))?;
     let parsed = data::csv_parse::parse_session_csv(&text)?;
@@ -1504,7 +1519,55 @@ fn analyze_session_file(path: &str) -> Result<opensmell::quality::QualityReport,
         unsorted_rows: parsed.unsorted,
         non_finite_samples: parsed.non_finite,
     };
-    Ok(opensmell::compute_quality(&parsed.time, &channels, &params))
+    let mut report = opensmell::compute_quality(&parsed.time, &channels, &params);
+    // Surface the tolerant-parser warnings (order/delimiter/rate heuristics) so
+    // they reach the quality report instead of being silently dropped. Mirrors
+    // `app.py` merging parser warnings into the report notes.
+    report.notes.extend(
+        parsed
+            .warnings
+            .iter()
+            .map(|w| format!("CSV parser: {}", w)),
+    );
+    Ok(report)
+}
+
+/// Analyze a `.osmell` bundle: carry the manifest's declared calibration
+/// parameters (ADC max, sampling rate, role, baseline source, R0) into the
+/// quality scorer instead of guessing them from a raw CSV.
+fn analyze_osmell_file(p: &std::path::Path) -> Result<opensmell::quality::QualityReport, String> {
+    let b = data::osmell_read::read_osmell(p)?;
+    let channels: Vec<opensmell::ChannelSeries> = b
+        .channels
+        .iter()
+        .map(|(id, values)| opensmell::ChannelSeries::new(id.clone(), values.clone()))
+        .collect();
+    // Estimate a fallback sampling rate from the time series when the manifest
+    // does not declare one, so the scorer never sees a zero guess for a valid
+    // bundle (mirrors the CSV parser's heuristic-rate behavior).
+    let fallback_rate = b.sampling_rate_hz.or_else(|| {
+        if b.time.len() >= 2 {
+            let dt = (b.time[1] - b.time[0]).abs();
+            if dt > 0.0 {
+                Some(1.0 / dt)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }).unwrap_or(0.0);
+    let params = opensmell::QualityParams {
+        adc_max: b.adc_max,
+        sampling_rate_hz: b.sampling_rate_hz,
+        guess_sampling_rate_hz: fallback_rate,
+        role: b.role.clone(),
+        baseline_source: b.baseline_source.clone(),
+        r0_samples: b.r0_samples,
+        unsorted_rows: false,
+        non_finite_samples: 0,
+    };
+    Ok(opensmell::compute_quality(&b.time, &channels, &params))
 }
 
 #[tauri::command]
@@ -1539,6 +1602,18 @@ pub struct SessionSeries {
     pub channels: Vec<String>,
     pub time: Vec<f64>,
     pub values: Vec<Vec<f64>>,
+}
+
+#[tauri::command]
+fn export_session_copy(state: State<AppState>, file_id: String, output_path: String) -> Result<String, String> {
+    let index = state.session_index.lock().map_err(|e| e.to_string())?;
+    data::export::export_session_copy(&index, &file_id, std::path::Path::new(&output_path))
+}
+
+#[tauri::command]
+fn export_session_osmell(state: State<AppState>, file_id: String, output_path: String) -> Result<String, String> {
+    let index = state.session_index.lock().map_err(|e| e.to_string())?;
+    data::export::export_session_osmell(&index, &file_id, std::path::Path::new(&output_path))
 }
 
 fn relative_seconds(ms: &[f64]) -> Vec<f64> {
@@ -1976,6 +2051,209 @@ pub struct ContributionInfo {
     pub verification_log: Vec<String>,
 }
 
+fn to_contribution_info(c: &data_commons::Contribution) -> ContributionInfo {
+    ContributionInfo {
+        id: c.id.clone(),
+        substance: c.substance.clone(),
+        quality_score: c.quality_score,
+        status: format!("{:?}", c.status),
+        n_samples: c.n_samples,
+        n_channels: c.n_channels,
+        verification_log: c.verification_log.clone(),
+    }
+}
+
+// === Data Hub ===
+
+#[derive(Serialize, Deserialize)]
+pub struct HubEntry {
+    pub id: String,
+    pub contributor: String,
+    pub substance: String,
+    pub device_id: String,
+    pub submitted_at: String,
+    pub quality_score: f64,
+    pub status: String,
+    pub n_samples: usize,
+    pub n_channels: usize,
+    pub verification_log: Vec<String>,
+    pub data_path: String,
+}
+
+#[tauri::command]
+fn hub_list(data_dir: String) -> Result<Vec<HubEntry>, String> {
+    let pipeline = data_commons::VerificationPipeline::new(std::path::Path::new(&data_dir));
+    let all = pipeline.list_all().map_err(|e| e.to_string())?;
+    Ok(all
+        .into_iter()
+        .map(|c| HubEntry {
+            id: c.id.clone(),
+            contributor: c.contributor.clone(),
+            substance: c.substance.clone(),
+            device_id: c.device_id.clone(),
+            submitted_at: c.submitted_at.to_rfc3339(),
+            quality_score: c.quality_score,
+            status: format!("{:?}", c.status),
+            n_samples: c.n_samples,
+            n_channels: c.n_channels,
+            verification_log: c.verification_log,
+            data_path: c.data_path.to_string_lossy().to_string(),
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn hub_approve(data_dir: String, id: String) -> Result<ContributionInfo, String> {
+    let pipeline = data_commons::VerificationPipeline::new(std::path::Path::new(&data_dir));
+    let c = pipeline.approve(&id).map_err(|e| e.to_string())?;
+    Ok(to_contribution_info(&c))
+}
+
+#[tauri::command]
+fn hub_reject(data_dir: String, id: String, reason: String) -> Result<ContributionInfo, String> {
+    let pipeline = data_commons::VerificationPipeline::new(std::path::Path::new(&data_dir));
+    let reason = if reason.trim().is_empty() {
+        "Rejected by reviewer"
+    } else {
+        reason.trim()
+    };
+    let c = pipeline.reject(&id, reason).map_err(|e| e.to_string())?;
+    Ok(to_contribution_info(&c))
+}
+
+#[tauri::command]
+fn hub_publish(data_dir: String, id: String) -> Result<ContributionInfo, String> {
+    let pipeline = data_commons::VerificationPipeline::new(std::path::Path::new(&data_dir));
+    let c = pipeline.publish(&id).map_err(|e| e.to_string())?;
+    Ok(to_contribution_info(&c))
+}
+
+/// Import an external/research CSV into the library and recordings directory.
+#[tauri::command]
+fn hub_import_csv(state: State<'_, AppState>, path: String) -> Result<data::SessionRecord, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    data::hub::import_external_csv(&dir, &mut index, std::path::Path::new(&path))
+}
+
+// === Hugging Face community sync ===
+
+#[tauri::command]
+fn hf_list(repo: String) -> Result<Vec<data::hub::HfFile>, String> {
+    data::hub::hf_list_dataset_files(&repo)
+}
+
+#[tauri::command]
+fn hf_download(
+    state: State<'_, AppState>,
+    repo: String,
+    filename: String,
+) -> Result<String, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest = data::hub::hf_download_file(&dir, &repo, &filename)?;
+    let ext = data::hub::download_extension(&filename);
+    if ext == "csv" {
+        let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+        let rec = data::hub::import_external_csv(&dir, &mut index, std::path::Path::new(&dest))?;
+        Ok(format!(
+            "Downloaded and imported '{}' as session '{}' (file_id {}).",
+            filename, rec.substance, rec.file_id
+        ))
+    } else {
+        Ok(format!("Downloaded '{}' to {}", filename, dest))
+    }
+}
+
+#[tauri::command]
+fn hf_set_token(token: String) -> Result<String, String> {
+    data::hub::set_hf_token(&token)?;
+    Ok("Hugging Face write token held in memory for this session (never written to disk)".to_string())
+}
+
+#[tauri::command]
+fn hf_has_token() -> Result<bool, String> {
+    Ok(data::hub::has_hf_token())
+}
+
+#[tauri::command]
+fn hf_clear_token() -> Result<(), String> {
+    data::hub::clear_hf_token();
+    Ok(())
+}
+
+/// Upload a `Published` contribution's data to a HF dataset. Only
+/// human-vetted (approved + published) contributions are eligible. The write
+/// token is taken from the in-memory session value (set via `hf_set_token`
+/// from the user's prompt); it is never read from disk or embedded.
+#[tauri::command]
+fn hf_upload(
+    data_dir: String,
+    repo: String,
+    id: String,
+    commit_message: Option<String>,
+) -> Result<String, String> {
+    let pipeline = data_commons::VerificationPipeline::new(std::path::Path::new(&data_dir));
+    let c = pipeline.get(&id).map_err(|e| e.to_string())?;
+    if !matches!(c.status, data_commons::ContributionStatus::Published) {
+        return Err(format!(
+            "Contribution {} must be human-reviewed and Published before upload (status {:?}). Approve then Publish it in the Data Hub first.",
+            id, c.status
+        ));
+    }
+    let csv = if c.data_path.is_file() {
+        c.data_path.clone()
+    } else {
+        // Fall back to the file next to the metadata if paths moved.
+        c.metadata_path.with_extension("csv")
+    };
+    if !csv.is_file() {
+        return Err(format!("Data file missing for contribution {}: {}", id, csv.display()));
+    }
+    let default_msg = format!("OpenSmell session {} ({})", c.substance, c.id.chars().take(8).collect::<String>());
+    let msg = commit_message.filter(|m| !m.trim().is_empty()).unwrap_or(default_msg);
+    let committed = data::hub::hf_upload_csv(&repo, &csv, &msg)?;
+    Ok(format!("Uploaded {} as '{}'", csv.file_name().unwrap_or_default().to_string_lossy(), committed))
+}
+// === Burn-In tracker ===
+
+/// Path next to the recordings dir that persists `.burnin.json`.
+fn burnin_dir(state: &State<'_, AppState>) -> std::path::PathBuf {
+    state
+        .recordings_dir
+        .lock()
+        .map(|d| d.clone())
+        .unwrap_or_else(|_| std::env::temp_dir().join("osmograph"))
+}
+
+#[tauri::command]
+fn burnin_get_status(state: State<'_, AppState>) -> Result<burnin::BurnInStatus, String> {
+    burnin::get_status(&burnin_dir(&state))
+}
+
+#[tauri::command]
+fn burnin_start(state: State<'_, AppState>) -> Result<burnin::BurnInStatus, String> {
+    burnin::start(&burnin_dir(&state))
+}
+
+#[tauri::command]
+fn burnin_reset(state: State<'_, AppState>, hours: Option<f64>) -> Result<burnin::BurnInStatus, String> {
+    burnin::reset(&burnin_dir(&state), hours)
+}
+
+// === Plugins ===
+
+#[tauri::command]
+fn discover_plugins() -> Result<Vec<plugins::PluginInfo>, String> {
+    plugins::discover(&plugins::default_plugin_dir())
+}
+
+#[tauri::command]
+fn get_plugins_dir() -> Result<String, String> {
+    let dir = plugins::default_plugin_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    Ok(dir.to_string_lossy().to_string())
+}
+
 // === Tauri Entry ===
 
 #[tauri::command]
@@ -2034,6 +2312,8 @@ pub fn run() {
             get_session_index,
             remove_session,
             analyze_recording,
+            export_session_copy,
+            export_session_osmell,
             load_session_series,
             fleet_scan,
             fleet_add_device,
@@ -2045,6 +2325,22 @@ pub fn run() {
             buzzer_set_config,
             commons_submit,
             get_data_dir,
+            hub_list,
+            hub_approve,
+            hub_reject,
+            hub_publish,
+            hub_import_csv,
+            hf_list,
+            hf_download,
+            hf_set_token,
+            hf_has_token,
+            hf_clear_token,
+            hf_upload,
+            burnin_get_status,
+            burnin_start,
+            burnin_reset,
+            discover_plugins,
+            get_plugins_dir,
             classifier::train_classifier,
             classifier::list_classifiers,
             classifier::delete_classifier,
