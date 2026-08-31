@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/cli-linux-x64-gnu": "^2.11.4",
     "chart.js": "^4.4.0"
   },
   "devDependencies": {

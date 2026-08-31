@@ -3,23 +3,35 @@ import { listen } from '@tauri-apps/api/event';
 
 // === Constants ===
 const MAX_TRACE = 800;
-const DATA_CHANNELS = 6;
-const CH_COLORS = ['#4ade80', '#60a5fa', '#f87171', '#fbbf24', '#a78bfa', '#f472b6', '#22d3ee', '#fb923c'];
+// Cool, distinguishable trace palette (cyan→blue→indigo→violet) that stays
+// readable on the warm paper canvas without going rainbow.
+const CH_COLORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 const PRESETS: Record<string, { name: string; sensors: string[] }> = {
   '3-sensor-food': { name: '3-Sensor Food', sensors: ['MQ-135', 'MQ-3', 'MQ-7'] },
   '4-sensor-safety': { name: '4-Sensor Safety', sensors: ['MQ-7', 'MQ-8', 'MQ-135', 'MQ-3'] },
   '6-sensor-full': { name: '6-Sensor Full', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8'] },
 };
 
+// Human-readable descriptors for the sensor-to-channel mapping table.
+const SENSOR_INFO: Record<string, { name: string; target: string; range: string }> = {
+  'MQ-135': { name: 'MQ-135', target: 'Air quality / NH₃, benzene, CO₂', range: '10 – 1000 ppm' },
+  'MQ-3':  { name: 'MQ-3',  target: 'Alcohol / ethanol, smoke', range: '0.05 – 10 mg/L' },
+  'MQ-6':  { name: 'MQ-6',  target: 'LPG, butane, propane', range: '200 – 10000 ppm' },
+  'MQ-7':  { name: 'MQ-7',  target: 'Carbon monoxide (CO)', range: '20 – 2000 ppm' },
+  'MQ-4':  { name: 'MQ-4',  target: 'Methane (CH₄), natural gas', range: '300 – 10000 ppm' },
+  'MQ-8':  { name: 'MQ-8',  target: 'Hydrogen (H₂)', range: '100 – 10000 ppm' },
+};
+
 function toDataChannels(values: number[]): number[] {
-  const out = values.slice(0, DATA_CHANNELS);
-  while (out.length < DATA_CHANNELS) out.push(0);
+  const out = values.slice(0, channelCount);
+  while (out.length < channelCount) out.push(0);
   return out;
 }
 
 // === State ===
 let connected = false;
 let activeMode: 'serial' | 'wifi' | 'ble' = 'serial';
+let channelCount = 6;
 let sessionStart: number | null = null;
 let sampleCount = 0;
 let lastSampleTime = 0;
@@ -35,7 +47,6 @@ let compareLoaded: (SessionSeries | null)[] = [];
 let compareChannel = '';
 let fleetDevices: FleetDevice[] = [];
 let bleDevices: { name: string; address: string }[] = [];
-let demoPhase = 0;
 let oledPage = 0;
 let dataDirValue = '';
 
@@ -81,9 +92,13 @@ interface FleetDevice {
   name: string;
   status: 'online' | 'offline' | 'warning';
   sensors: { name: string; value: number; health: string }[];
-  firmware: string;
+  firmware_version: string;
+  n_channels: number;
+  port: string;
   uptime_seconds: number;
   ip: string;
+  kind: string;
+  is_recognized: boolean;
 }
 
 interface SessionSeries {
@@ -191,17 +206,29 @@ window.addEventListener('resize', resizeTraces);
 
 function drawTraces() {
   const w = tracesCanvas.width, h = tracesCanvas.height;
-  tracesCtx.fillStyle = '#fafafa';
+  const gutterL = 44, gutterB = 18;
+  const pw = w - gutterL, ph = h - gutterB;
+
+  tracesCtx.fillStyle = '#f6f1e7';
   tracesCtx.fillRect(0, 0, w, h);
 
-  // Grid lines
-  tracesCtx.strokeStyle = '#ececef';
+  // Full technical grid: 5 horizontal value lines x 10 vertical time lines.
+  tracesCtx.fillStyle = '#8b8574';
+  tracesCtx.font = '9px monospace';
+  tracesCtx.textAlign = 'right';
+  tracesCtx.textBaseline = 'middle';
+  tracesCtx.strokeStyle = '#ece4d4';
   tracesCtx.lineWidth = 1;
-  for (let i = 1; i < 5; i++) {
-    const y = (h / 5) * i;
-    tracesCtx.beginPath(); tracesCtx.moveTo(0, y); tracesCtx.lineTo(w, y); tracesCtx.stroke();
+  for (let i = 0; i <= 4; i++) {
+    const y = gutterL > 0 ? (ph / 4) * i : 0;
+    const yy = y + (h - ph); // y sits at top already since gutter is bottom-only
+    tracesCtx.beginPath();
+    tracesCtx.moveTo(gutterL, y);
+    tracesCtx.lineTo(pw, y);
+    tracesCtx.stroke();
   }
 
+  // Horizontal value labels (left gutter)
   let gMin = Infinity, gMax = -Infinity;
   for (const ch of traceData) {
     for (const v of ch) {
@@ -209,21 +236,48 @@ function drawTraces() {
       if (v > gMax) gMax = v;
     }
   }
-  if (gMin === Infinity) return;
-  const range = gMax - gMin || 1;
-  gMin -= range * 0.1;
-  gMax += range * 0.1;
-  const span = gMax - gMin;
+  if (gMin === Infinity) gMin = 0;
+  const rawRange = gMax - gMin || 1;
+  gMin -= rawRange * 0.1;
+  gMax += rawRange * 0.1;
+  const span = gMax - gMin || 1;
+  tracesCtx.fillStyle = '#9a9484';
+  for (let i = 0; i <= 4; i++) {
+    const v = gMax - (span / 4) * i;
+    const y = (ph / 4) * i;
+    const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0);
+    tracesCtx.fillText(label, gutterL - 6, y);
+  }
+
+  // Vertical time gridlines with tick labels at the bottom.
+  tracesCtx.textAlign = 'center';
+  tracesCtx.textBaseline = 'top';
+  const nTicks = 8;
+  for (let i = 0; i <= nTicks; i++) {
+    const x = gutterL + (pw / nTicks) * i;
+    tracesCtx.strokeStyle = '#ece4d4';
+    tracesCtx.beginPath();
+    tracesCtx.moveTo(x, 0);
+    tracesCtx.lineTo(x, ph);
+    tracesCtx.stroke();
+    // Bottom axis label: time offset in seconds walking backward from "now".
+    const secs = Math.round(((MAX_TRACE - 1 - ((x - gutterL) / (pw / nTicks)) * nTicks) / 20));
+    const label = `${secs}s`;
+    tracesCtx.fillStyle = '#9a9484';
+    tracesCtx.fillText(label, x, ph + 4);
+  }
+  tracesCtx.textAlign = 'left';
+  tracesCtx.textBaseline = 'alphabetic';
 
   for (let ch = 0; ch < traceData.length; ch++) {
     const data = traceData[ch];
     if (data.length < 2) continue;
     tracesCtx.strokeStyle = CH_COLORS[ch % CH_COLORS.length];
-    tracesCtx.lineWidth = 1.2;
+    tracesCtx.lineWidth = 1.4;
     tracesCtx.beginPath();
     for (let i = 0; i < data.length; i++) {
-      const x = (i / (MAX_TRACE - 1)) * w;
-      const y = h - ((data[i] - gMin) / span) * h;
+      const x = gutterL + (i / (MAX_TRACE - 1)) * pw;
+      const y = (ph - (ph * ((data[i] - gMin) / span)));
       i === 0 ? tracesCtx.moveTo(x, y) : tracesCtx.lineTo(x, y);
     }
     tracesCtx.stroke();
@@ -236,8 +290,8 @@ const fpCtx = fpCanvas.getContext('2d')!;
 
 function drawFingerprint(values: number[]) {
   const rect = fpCanvas.parentElement!.getBoundingClientRect();
-  fpCanvas.width = rect.width - 8;
-  fpCanvas.height = 120;
+  fpCanvas.width = Math.max(1, Math.floor(rect.width - 8));
+  fpCanvas.height = Math.max(80, Math.floor(rect.height - 8));
   const w = fpCanvas.width, h = fpCanvas.height;
   const cx = w / 2, cy = h / 2, r = Math.min(cx, cy) - 10;
   fpCtx.clearRect(0, 0, w, h);
@@ -247,7 +301,7 @@ function drawFingerprint(values: number[]) {
 
   // Grid rings
   for (let ring = 1; ring <= 4; ring++) {
-    fpCtx.strokeStyle = '#d4d4d8';
+    fpCtx.strokeStyle = '#d7cdba';
     fpCtx.lineWidth = 1;
     fpCtx.beginPath();
     for (let i = 0; i <= n; i++) {
@@ -263,7 +317,7 @@ function drawFingerprint(values: number[]) {
   // Axes
   for (let i = 0; i < n; i++) {
     const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-    fpCtx.strokeStyle = '#d4d4d8';
+    fpCtx.strokeStyle = '#d7cdba';
     fpCtx.beginPath();
     fpCtx.moveTo(cx, cy);
     fpCtx.lineTo(cx + Math.cos(angle) * r, cy + Math.sin(angle) * r);
@@ -275,9 +329,9 @@ function drawFingerprint(values: number[]) {
   // Normalize values
   const maxVal = Math.max(...values, 1);
 
-  // Fill
-  fpCtx.fillStyle = 'rgba(74, 222, 128, 0.15)';
-  fpCtx.strokeStyle = '#4ade80';
+  // Fill — cyan (live monitoring data accent), per the paper & ink discipline
+  fpCtx.fillStyle = 'rgba(14, 116, 144, 0.12)';
+  fpCtx.strokeStyle = '#0e7490';
   fpCtx.lineWidth = 2;
   fpCtx.beginPath();
   for (let i = 0; i <= n; i++) {
@@ -328,7 +382,7 @@ function drawSessionFingerprint(values: number[]) {
   const n = values.length || chNames.length;
   if (n === 0) return;
   for (let ring = 1; ring <= 4; ring++) {
-    sfpCtx.strokeStyle = '#d4d4d8'; sfpCtx.lineWidth = 1; sfpCtx.beginPath();
+    sfpCtx.strokeStyle = '#d7cdba'; sfpCtx.lineWidth = 1; sfpCtx.beginPath();
     for (let i = 0; i <= n; i++) {
       const a = (i / n) * Math.PI * 2 - Math.PI / 2;
       const x = cx + Math.cos(a) * rr * (ring / 4);
@@ -338,8 +392,8 @@ function drawSessionFingerprint(values: number[]) {
     sfpCtx.stroke();
   }
   const maxVal = Math.max(...values, 1);
-  sfpCtx.fillStyle = 'rgba(96, 165, 250, 0.15)';
-  sfpCtx.strokeStyle = '#60a5fa'; sfpCtx.lineWidth = 2;
+  sfpCtx.fillStyle = 'rgba(17, 17, 17, 0.06)';
+  sfpCtx.strokeStyle = '#1a1a17'; sfpCtx.lineWidth = 2;
   sfpCtx.beginPath();
   for (let i = 0; i <= n; i++) {
     const idx = i % n;
@@ -371,53 +425,52 @@ function buildLegend() {
 buildLegend();
 
 // === Data Ingestion ===
-async function ingestReading(values: number[], demo = false) {
+async function ingestReading(values: number[]) {
   if (values.length === 0) return;
+  if (values.length !== channelCount && connected) {
+    setChannelCount(values.length);
+  }
   for (let ch = 0; ch < Math.min(values.length, traceData.length); ch++) {
     traceData[ch].push(values[ch]);
     if (traceData[ch].length > MAX_TRACE) traceData[ch].shift();
   }
   sampleCount++;
 
+  // HUD readout
+  const samplesEl = document.getElementById('plotSamples');
+  if (samplesEl) samplesEl.textContent = `${sampleCount.toLocaleString()} SAMP`;
+
   // Update fingerprint
   drawFingerprint(values);
 
-  // Demo/synthetic samples are purely visual — never feed the real detector,
-  // live classifier, or recorder so backend state stays clean for real data.
-  if (!demo) {
-    try {
-      const result = await invoke<{
-        is_anomaly: boolean; raw_score: number; calibrated_confidence: number;
-        triggered_channels: number[]; alert_level: number; alert_name: string;
-        consecutive_anomalies: number;
-      }>('ingest_reading_with_failsafe', { reading: values });
+  try {
+    const result = await invoke<{
+      is_anomaly: boolean; raw_score: number; calibrated_confidence: number;
+      triggered_channels: number[]; alert_level: number; alert_name: string;
+      consecutive_anomalies: number;
+    }>('ingest_reading_with_failsafe', { reading: values });
 
-      // Anomaly card
-      const card = document.getElementById('anomalyCard')!;
-      card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
-      document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
-      document.getElementById('anomalySub')!.textContent =
-        result.is_anomaly ? `${result.alert_name.toUpperCase()} — ${result.consecutive_anomalies} consecutive` : 'All channels nominal';
-      document.getElementById('mMahal')!.textContent = result.raw_score.toFixed(2);
-      document.getElementById('mConf')!.textContent = result.is_anomaly
-        ? `${(result.calibrated_confidence * 100).toFixed(0)}%`
-        : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
-      document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
-      document.getElementById('mAlert')!.textContent = result.alert_name;
+    // Anomaly card
+    const card = document.getElementById('anomalyCard')!;
+    card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
+    document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
+    document.getElementById('anomalySub')!.textContent =
+      result.is_anomaly ? `${result.alert_name.toUpperCase()} — ${result.consecutive_anomalies} consecutive` : 'All channels nominal';
+    document.getElementById('mMahal')!.textContent = result.raw_score.toFixed(2);
+    document.getElementById('mConf')!.textContent = result.is_anomaly
+      ? `${(result.calibrated_confidence * 100).toFixed(0)}%`
+      : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
+    document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
+    document.getElementById('mAlert')!.textContent = result.alert_name;
 
-      const statusDot = document.getElementById('statusDot')!;
-      if (result.is_anomaly) {
-        statusDot.className = result.alert_level >= 2 ? 'status-dot crit' : 'status-dot warn';
-      } else {
-        statusDot.className = connected ? 'status-dot ok' : 'status-dot';
-      }
-    } catch (err) {
-      console.error('Detection error:', err);
+    const statusDot = document.getElementById('statusDot')!;
+    if (result.is_anomaly) {
+      statusDot.className = result.alert_level >= 2 ? 'status-dot crit' : 'status-dot warn';
+    } else {
+      statusDot.className = connected ? 'status-dot ok' : 'status-dot';
     }
-  } else {
-    document.getElementById('anomalyLabel')!.textContent = 'DEMO';
-    document.getElementById('anomalySub')!.textContent = 'Synthetic samples — connect a device for live detection';
-    document.getElementById('statusDot')!.className = 'status-dot';
+  } catch (err) {
+    console.error('Detection error:', err);
   }
 
   // Rate counter
@@ -444,14 +497,16 @@ function updateSessionTime() {
 // === Port Management ===
 async function refreshPorts() {
   try {
-    const ports = await invoke<{ name: string; description: string; hw_type: string }[]>('list_serial_ports');
+    const ports = await invoke<{ name: string; description: string; kind: string; hw_type: string }[]>('list_serial_ports');
     const sel = document.getElementById('portSelect') as HTMLSelectElement;
     const cur = sel.value;
     sel.innerHTML = '<option value="">Select port...</option>';
     for (const p of ports) {
       const opt = document.createElement('option');
       opt.value = p.name;
-      opt.textContent = p.description ? `${p.name} — ${p.description}` : p.name;
+      const label = p.kind === 'osmograph-e-nose' ? 'E-NOSE' :
+        p.kind && p.kind !== 'unknown-usb' ? p.kind.replace(/_/g, ' ').toUpperCase() : 'UNKNOWN';
+      opt.textContent = p.description ? `${p.name} — ${p.description} · ${label}` : `${p.name} · ${label}`;
       if (p.name === cur) opt.selected = true;
       sel.appendChild(opt);
     }
@@ -487,10 +542,23 @@ async function scanBleDevices() {
 }
 
 // === Connection ===
+function setPlotLink(on: boolean) {
+  const el = document.getElementById('plotLinkState');
+  if (!el) return;
+  el.textContent = on ? '● LIVE LINK' : '● NO LINK';
+  el.classList.toggle('on', on);
+}
+
 async function toggleConnection() {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   const baud = parseInt((document.getElementById('baudSelect') as HTMLSelectElement).value);
   const mode = (document.getElementById('modeSelect') as HTMLSelectElement).value as 'serial' | 'wifi' | 'ble';
+
+  const connMsg = document.getElementById('connMsg')!;
+  const setMsg = (m: string, ok = false) => {
+    connMsg.textContent = m;
+    connMsg.style.color = ok ? '#9ece6a' : '#f6c177';
+  };
 
   if (connected) {
     if (activeMode === 'wifi') {
@@ -503,6 +571,8 @@ async function toggleConnection() {
     connected = false;
     document.getElementById('connectBtn')!.textContent = 'Connect';
     document.getElementById('statusDot')!.className = 'status-dot';
+    setPlotLink(false);
+    setMsg('');
     return;
   }
 
@@ -521,14 +591,17 @@ async function toggleConnection() {
       if (!isNaN(maybe)) portN = maybe;
     }
     try {
-      await invoke('connect_wifi', { host, port: portN, nChannels: DATA_CHANNELS });
+      await invoke('connect_wifi', { host, port: portN, nChannels: channelCount });
       activeMode = 'wifi';
       connected = true;
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
       document.getElementById('statusDot')!.className = 'status-dot ok';
+      setPlotLink(true);
       document.getElementById('fDevice')!.textContent = addr;
       sampleCount = 0;
+      setMsg('WiFi connected', true);
     } catch (e) {
+      setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('WiFi connect failed:', e);
     }
     return;
@@ -545,9 +618,12 @@ async function toggleConnection() {
       connected = true;
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
       document.getElementById('statusDot')!.className = 'status-dot ok';
+      setPlotLink(true);
       document.getElementById('fDevice')!.textContent = addr;
       sampleCount = 0;
+      setMsg('BLE connected', true);
     } catch (e) {
+      setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('BLE connect failed:', e);
     }
     return;
@@ -555,50 +631,23 @@ async function toggleConnection() {
 
   if (port) {
     try {
-      await invoke('connect_serial', { port, baudRate: baud, nChannels: DATA_CHANNELS });
+      await invoke('connect_serial', { port, baudRate: baud, nChannels: channelCount });
       activeMode = 'serial';
       connected = true;
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
       document.getElementById('statusDot')!.className = 'status-dot ok';
+      setPlotLink(true);
       document.getElementById('fDevice')!.textContent = port;
       sampleCount = 0;
+      setMsg('Serial connected', true);
     } catch (e) {
+      setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('Connect failed:', e);
     }
   }
 }
 
 // === Labeling ===
-async function labelCurrent(isAnomaly: boolean) {
-  const values = traceData.map(ch => ch[ch.length - 1] || 0);
-  try {
-    await invoke('label_sample', {
-      reading: values,
-      isAnomaly,
-      note: isAnomaly ? 'User flagged anomaly' : 'User confirmed normal',
-    });
-    sessionLabels.push({ ts: Date.now(), anomaly: isAnomaly, note: isAnomaly ? 'Anomaly' : 'Normal' });
-    updateLabelUI();
-  } catch (e) {
-    console.error('Label failed:', e);
-  }
-}
-
-async function updateLabelUI() {
-  try {
-    const stats = await invoke<{ total: number; normal: number; anomaly: number; anomaly_ratio: number }>('get_labeling_stats');
-    document.getElementById('mLabels')!.textContent = stats.total.toString();
-    document.getElementById('mAnomPct')!.textContent = `${(stats.anomaly_ratio * 100).toFixed(0)}%`;
-  } catch {}
-  try {
-    const state = await invoke<{ thresholds: Array<{ confidence: number }>; n_feedback: number }>('get_detector_state');
-    const avg = state.thresholds.reduce((a, t) => a + t.confidence, 0) / Math.max(state.thresholds.length, 1);
-    document.getElementById('mThreshConf')!.textContent = `${(avg * 100).toFixed(0)}%`;
-    document.getElementById('learningBar')!.style.width = `${(avg * 100).toFixed(0)}%`;
-    document.getElementById('mFeedback')!.textContent = `${state.n_feedback} feedback samples`;
-  } catch {}
-}
-
 // === Sensor Health ===
 async function updateSensorHealth() {
   try {
@@ -622,6 +671,11 @@ async function updateSensorHealth() {
 // === Library ===
 function renderLibrary() {
   const body = document.getElementById('libBody')!;
+  if (sessions.length === 0) {
+    body.innerHTML = `<tr class="empty-row"><td colspan="8">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong> to load recordings. They will appear here.</td></tr>`;
+    document.getElementById('libStatus')!.textContent = '0 sessions';
+    return;
+  }
   body.innerHTML = sessions.map((s, i) => {
     const qBadge = s.quality >= 70 ? 'good' : s.quality >= 40 ? 'ok' : 'bad';
     const ticked = s.file_id ? compareFiles.includes(s.file_id) : false;
@@ -634,7 +688,8 @@ function renderLibrary() {
   }).join('');
   document.getElementById('libStatus')!.textContent = `${sessions.length} sessions`;
   body.querySelectorAll('tr').forEach(tr => {
-    tr.addEventListener('click', () => {
+    tr.addEventListener('click', (ev) => {
+      if ((ev.target as HTMLElement).closest('.compare-tick')) return;
       selectedSession = parseInt(tr.getAttribute('data-idx')!);
       renderLibrary();
       inspectSession(sessions[selectedSession]);
@@ -743,7 +798,7 @@ function renderQualityReport(q: QualityReport) {
 }
 
 // === Compare Panel (Python `viz/compare_panel.py` parity) ===
-const CHART_COLORS = ['#4f8df7', '#4ade80', '#f59e0b', '#f472b6', '#a78bfa', '#22d3ee', '#f87171', '#34d399'];
+const CHART_COLORS = CH_COLORS;
 const COMPARE_R0_SAMPLES = 15;
 
 const compareCanvas = document.getElementById('compareCanvas') as HTMLCanvasElement | null;
@@ -918,14 +973,22 @@ async function updateCompare() {
 // === Fleet ===
 function renderFleet() {
   const grid = document.getElementById('fleetGrid')!;
+  const summary = document.getElementById('fleetSummary')!;
+  const recognized = fleetDevices.filter(d => d.is_recognized).length;
+  const online = fleetDevices.filter(d => d.status === 'online').length;
+  summary.textContent = `${fleetDevices.length} device(s) · ${recognized} recognized · ${online} online`;
   if (fleetDevices.length === 0) {
-    grid.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-3);font-size:12px">No devices found. Click "Scan Network" or "+ Add Device".</div>';
+    grid.innerHTML = '<div style="padding:32px;text-align:center;color:var(--text-3);font-size:12px">No devices found.<br/>Plug in a USB e-nose, or click "Scan Network" to search USB + mDNS.</div>';
     document.getElementById('fleetBadge')!.style.display = 'none';
     return;
   }
+  // Sort: recognized + online first, then the rest on the wire, then other.
+  const sorted = [...fleetDevices].sort((a, b) =>
+    (b.is_recognized ? 1 : 0) - (a.is_recognized ? 1 : 0) ||
+    (b.status === 'online' ? 1 : 0) - (a.status === 'online' ? 1 : 0));
   document.getElementById('fleetBadge')!.style.display = '';
   document.getElementById('fleetBadge')!.textContent = fleetDevices.length.toString();
-  grid.innerHTML = fleetDevices.map(d => {
+  grid.innerHTML = sorted.map(d => {
     const statusClass = d.status;
     const sensorsHtml = d.sensors.map(s =>
       `<div class="sensor-slot${s.name === 'Empty' ? ' empty' : ''}">
@@ -933,12 +996,17 @@ function renderFleet() {
         <div class="s-val" style="color:${s.health === 'OK' ? 'var(--green)' : s.health === 'WARNING' ? 'var(--yellow)' : 'var(--red)'}">${s.value > 0 ? s.value.toFixed(0) + ' Ω' : '--'}</div>
       </div>`
     ).join('');
+    const kindLabel = d.kind === 'osmograph-e-nose' ? 'E-NOSE' : d.kind
+      ? d.kind.replace(/_/g, ' ').toUpperCase() : 'UNKNOWN';
+    const recognizedTxt = d.is_recognized;
+    const badgeHtml = `<span class="fleet-kind ${recognizedTxt ? 'recognized' : 'unknown'}">${recognizedTxt ? '●' : '○'} ${kindLabel}</span>`;
     return `<div class="device-card">
       <div class="dev-header">
         <div class="dev-name">${d.name}</div>
         <span class="dev-status ${statusClass}">${d.status}</span>
       </div>
-      <div style="font-size:10px;color:var(--text-3)">IP: ${d.ip || '—'} · FW: ${d.firmware} · Up: ${d.uptime_seconds > 0 ? Math.round(d.uptime_seconds) + 's' : '—'}</div>
+      <div class="dev-meta">${badgeHtml}</div>
+      <div style="font-size:10px;color:var(--text-3)">${d.port || '—'} · CH${d.n_channels} · FW ${d.firmware_version || '—'}</div>
       <div class="sensor-grid">${sensorsHtml}</div>
     </div>`;
   }).join('');
@@ -1003,51 +1071,59 @@ function updateBuzzerPreviews() {
   drawBuzzerPattern('buzPrevEmerg', (document.getElementById('buzzerEmerg') as HTMLSelectElement).value);
 }
 
+// === Dynamic channel count (device-agnostic) ===
+function setChannelCount(n: number, names?: string[]) {
+  const next = Math.max(1, Math.min(64, Math.floor(n) || 1));
+  channelCount = next;
+  if (names && names.length === next) {
+    chNames = names;
+  } else {
+    chNames = Array.from({ length: next }, (_, i) => PRESETS[activePreset]?.sensors[i] || `CH${i + 1}`);
+  }
+  traceData = chNames.map(() => []);
+  buildLegend();
+  const sc = document.getElementById('sysChannels') as HTMLInputElement | null;
+  if (sc && sc.value !== String(next)) sc.value = String(next);
+  updateRailCoord();
+}
+
+function updateRailCoord() {
+  const el = document.getElementById('railCoord');
+  if (el) el.textContent = `${channelCount} CH · ${activePreset}`;
+}
+
 // === Preset Change ===
 function onPresetChange(preset: string) {
   activePreset = preset;
   const p = PRESETS[preset];
   if (!p) return;
   chNames = p.sensors;
+  channelCount = p.sensors.length;
   traceData = chNames.map(() => []);
   buildLegend();
+  updateRailCoord();
   const detail = document.getElementById('presetDetail');
   if (detail) {
     detail.innerHTML = `<div style="font-size:11px;color:var(--text-2)">
-      <strong>${p.name}</strong> — ${p.sensors.length} sensors<br/>
-      ${p.sensors.map((s, i) => `<span style="color:${CH_COLORS[i]}">${s}</span>`).join(' · ')}
+      <strong>${p.name}</strong> — ${p.sensors.length} sensor array<br/>
+      ${p.sensors.map((s, i) => `<span class="preset-chip" style="border-color:${CH_COLORS[i]};color:${CH_COLORS[i]}">${s}</span>`).join(' ')}
     </div>`;
   }
-  // Channel mapping
+  // Channel mapping — a coherent CH → sensor → target-gas table.
   const mapping = document.getElementById('channelMapping');
   if (mapping) {
-    mapping.innerHTML = p.sensors.map((s, i) =>
-      `<div class="form-row">
-        <label style="color:${CH_COLORS[i]}">Slot ${i + 1}</label>
-        <select style="width:120px"><option selected>${s}</option><option>Empty</option></select>
-        <span class="hint">GPIO ${32 + i * 2}</span>
-      </div>`
-    ).join('');
+    mapping.innerHTML = p.sensors.map((s, i) => {
+      const info = SENSOR_INFO[s] || { name: s, target: 'Unspecified target', range: '—' };
+      return `<div class="map-row">
+        <div class="map-ch" style="color:${CH_COLORS[i]}">CH${i + 1}</div>
+        <div class="map-sensor">
+          <div class="map-name">${info.name}</div>
+          <div class="map-target">${info.target} · ${info.range}</div>
+        </div>
+        <div class="map-gpio">GPIO ${32 + i * 2}</div>
+      </div>`;
+    }).join('');
   }
-}
-
-// === Demo Data ===
-function updateDemoBadge() {
-  const el = document.getElementById('demoBadge');
-  if (el) el.style.display = connected ? 'none' : '';
-}
-function generateDemoData() {
-  updateDemoBadge();
-  if (connected) return;
-  demoPhase += 0.05;
-  const values: number[] = [];
-  for (let i = 0; i < DATA_CHANNELS; i++) {
-    const base = 1200 + i * 200;
-    const wave = Math.sin(demoPhase * (0.5 + i * 0.2)) * (100 + i * 30);
-    const noise = (Math.random() - 0.5) * 40;
-    values.push(base + wave + noise);
-  }
-  ingestReading(values, true);
 }
 
 // === Classifier: Train Tab ===
@@ -1266,8 +1342,6 @@ document.getElementById('detectBtn')!.addEventListener('click', async () => {
     status.textContent = `Detection failed: ${e}`;
   }
 });
-document.getElementById('labelNormal')!.addEventListener('click', () => labelCurrent(false));
-document.getElementById('labelAnomaly')!.addEventListener('click', () => labelCurrent(true));
 
 document.getElementById('compareChannel')!.addEventListener('change', (e) => {
   compareChannel = (e.target as HTMLSelectElement).value;
@@ -1633,11 +1707,16 @@ document.getElementById('fleetScan')!.addEventListener('click', async () => {
   } catch { renderFleet(); }
 });
 document.getElementById('fleetAdd')!.addEventListener('click', () => {
+  const n = fleetDevices.length + 1;
+  const name = prompt('Device name') || `Device ${n}`;
+  const port = prompt('Port / address (e.g. /dev/ttyUSB0 or host:port)') || '';
+  if (!port) { renderFleet(); return; }
   fleetDevices.push({
-    id: `dev-${Date.now()}`, name: `Device ${fleetDevices.length + 1}`,
-    status: 'offline',
+    id: `dev-${Date.now()}`, name, status: 'offline',
     sensors: chNames.map(s => ({ name: s, value: 0, health: 'OK' })),
-    firmware: 'v0.1.0', uptime_seconds: 0, ip: '192.168.1.' + (100 + fleetDevices.length),
+    firmware_version: 'v0.1.0', n_channels: chNames.length, port,
+    uptime_seconds: 0, ip: '',
+    kind: 'manual-add', is_recognized: false,
   });
   renderFleet();
 });
@@ -1659,6 +1738,13 @@ document.getElementById('buzzerVolume')!.addEventListener('input', (e) => {
 // Preset
 document.getElementById('sysPreset')!.addEventListener('change', (e) => {
   onPresetChange((e.target as HTMLSelectElement).value);
+});
+
+// Dynamic channel count (device-agnostic): user pins N channels before connecting
+document.getElementById('sysChannels')!.addEventListener('change', (e) => {
+  const el = e.target as HTMLInputElement;
+  const n = parseInt(el.value, 10);
+  if (!isNaN(n) && n > 0) setChannelCount(n);
 });
 
 // === Phase Recording (.osmell) ===
@@ -1696,7 +1782,7 @@ interface PhaseRecordingSummary {
 
 const PHASE_ORDER = ['baseline', 'exposure', 'recovery'];
 const PHASE_LABELS: Record<string, string> = { baseline: 'Before', exposure: 'During', recovery: 'After' };
-const PHASE_COLORS: Record<string, string> = { baseline: '#4a9eff', exposure: '#ef4444', recovery: '#34d399' };
+const PHASE_COLORS: Record<string, string> = { baseline: '#1a1a17', exposure: '#e11d48', recovery: '#0e7490' };
 
 function phaseLabelOf(name: string): string { return PHASE_LABELS[name] ?? name; }
 function phaseColorOf(name: string): string { return PHASE_COLORS[name] ?? '#888'; }
@@ -1955,7 +2041,7 @@ async function refreshPlugins() {
     list.innerHTML = plugins
       .map((p) => {
         const size = p.size_bytes >= 1024 * 1024 ? `${(p.size_bytes / 1048576).toFixed(1)} MB` : `${Math.round(p.size_bytes / 1024)} KB`;
-        const state = p.loaded ? '<span style="color:#3fbf5f">&#9679;</span> loaded' : `<span style="color:#d64">&#9679;</span> ${p.error || 'stub'}`;
+        const state = p.loaded ? '<span style="color:#1a1a17">&#9679;</span> loaded' : `<span style="color:#e11d48">&#9679;</span> ${p.error || 'stub'}`;
         return `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><strong>${p.name}</strong> <span style="color:var(--text-3)">v${p.version || '?'} · ${p.kind} · ${size}</span><br/><span style="color:var(--text-3)">${p.description || ''}</span> &nbsp; ${state}</div>`;
       })
       .join('');
@@ -2153,10 +2239,10 @@ function drawReplay() {
   replayCanvas.height = Math.max(1, Math.floor(rect.height - 4));
   const w = replayCanvas.width, h = replayCanvas.height;
   const ctx = replayCtx;
-  ctx.fillStyle = '#fafafa';
+  ctx.fillStyle = '#f6f1e7';
   ctx.fillRect(0, 0, w, h);
 
-  ctx.strokeStyle = '#ececef';
+  ctx.strokeStyle = '#ece4d4';
   ctx.lineWidth = 1;
   for (let i = 1; i < 5; i++) {
     const y = (h / 5) * i;
@@ -2280,8 +2366,38 @@ function seekReplayByRatio(ratio: number) {
   replayReflectOnDashboard();
 }
 
+// === Replay transport: rewind / step-back / pause / fast-forward ===
+function rewindReplay() {
+  if (!replaySeries) return;
+  replayFrame = 0;
+  replayLastTs = null;
+  document.getElementById('replayTime')!.textContent =
+    `00:00 / ${fmtRecTime(replaySeries.time[replaySeries.time.length - 1] || 0)}`;
+  const scrb = document.getElementById('replayScrub') as HTMLInputElement;
+  if (scrb) scrb.value = '0';
+  replayReflectOnDashboard();
+}
+
+function stepReplay(dir: number) {
+  if (!replaySeries) return;
+  const next = Math.max(0, Math.min((replayFrame ?? 0) + dir, replaySeries.time.length));
+  replayFrame = next;
+  replayLastTs = next > 0 ? replaySeries.time[Math.min(next - 1, replaySeries.time.length - 1)] : null;
+  seekReplayByRatio(next / Math.max(1, replaySeries.time.length));
+}
+
+function skipReplayForward() {
+  if (!replaySeries) return;
+  // Jump ahead ~5% of the loaded recording/session each press.
+  const jump = Math.max(1, Math.ceil(replaySeries.time.length * 0.05));
+  stepReplay(jump);
+}
+
 document.getElementById('replayLoad')!.addEventListener('click', loadReplay);
 document.getElementById('replayPlay')!.addEventListener('click', toggleReplay);
+document.getElementById('replayRewind')!.addEventListener('click', rewindReplay);
+document.getElementById('replayStepBack')!.addEventListener('click', () => stepReplay(-1));
+document.getElementById('replayFastForward')!.addEventListener('click', skipReplayForward);
 document.getElementById('replayClose')!.addEventListener('click', closeReplayPanel);
 document.getElementById('replaySpeed')!.addEventListener('change', () => { replayLastTs = null; });
 
@@ -2309,8 +2425,6 @@ function animate() {
 
 // === Periodic Updates ===
 setInterval(updateSensorHealth, 2000);
-setInterval(updateLabelUI, 5000);
-setInterval(generateDemoData, 100);
 setInterval(updateOledPreview, 1000);
 setInterval(pollPhaseRecorder, 500);
 setInterval(reloadClassifiers, 4000);
@@ -2331,4 +2445,3 @@ refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
-updateDemoBadge();

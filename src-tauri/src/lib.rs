@@ -94,13 +94,30 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
     let mut ports = Vec::new();
     if let Ok(serial_ports) = serialport::available_ports() {
         for p in serial_ports {
-            let desc = match &p.port_type {
-                serialport::SerialPortType::UsbPort(info) => info.product.clone().unwrap_or_default(),
-                _ => String::new(),
+            // Only surface USB & Bluetooth serial devices — actual connectable
+            // e-nose candidates. Onboard legacy UARTs (ttyS* exposed as
+            // PciPort/Unknown) are not real devices and just add noise.
+            let (kind, desc) = match &p.port_type {
+                serialport::SerialPortType::UsbPort(info) => {
+                    let board = classify_vid_pid(info.vid, info.pid);
+                    let kind = if board == "esp32" {
+                        "osmograph-e-nose".to_string()
+                    } else if board != "unknown" {
+                        board
+                    } else {
+                        "unknown-usb".to_string()
+                    };
+                    (kind, info.product.clone().unwrap_or_default())
+                }
+                serialport::SerialPortType::BluetoothPort => {
+                    ("bluetooth".to_string(), String::new())
+                }
+                _ => continue,
             };
             ports.push(SerialPortInfo {
                 name: p.port_name.clone(),
                 description: desc,
+                kind,
                 hw_type: format!("{:?}", p.port_type),
             });
         }
@@ -112,6 +129,9 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
 pub struct SerialPortInfo {
     pub name: String,
     pub description: String,
+    /// Label from classify_vid_pid: "osmograph-e-nose" (recognised ESP32),
+    /// or "arduino_uno"/"raspberry_pi_pico"/"unknown-usb".
+    pub kind: String,
     pub hw_type: String,
 }
 
@@ -203,10 +223,14 @@ fn connect_serial(
         .timeout(Duration::from_millis(50))
         .open()
         .map_err(|e| {
-            if e.kind() == serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied) {
-                "Permission denied. Add your user to the 'dialout' group:\n  sudo usermod -a -G dialout $USER\nThen log out and back in.".to_string()
-            } else {
-                format!("Failed to open {}: {}", port, e)
+            match e.kind() {
+                serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied) => {
+                    "Permission denied. Add your user to the 'dialout' group:\n  sudo usermod -a -G dialout $USER\nThen log out and back in.".to_string()
+                }
+                serialport::ErrorKind::Io(std::io::ErrorKind::NotFound) => {
+                    format!("Port {} not found. Is the device plugged in and in work mode (not bootloader)?", port)
+                }
+                _ => format!("Failed to open {}: {}", port, e),
             }
         })?;
 
@@ -375,6 +399,75 @@ fn serial_port_reports() -> Vec<BoardReport> {
         }
     }
     boards
+}
+
+/// Build a labelled fleet entry for a serial port, classifying it by VID:PID.
+///
+/// Only USB & Bluetooth serial devices are returned (connectable e-nose
+/// candidates). Onboard legacy UARTs (ttyS* → PciPort/Unknown) are skipped so
+/// a scan doesn't flood the fleet with 30+ non-devices. Unknown USB devices are
+/// still listed (never hidden) so DIY/indie e-nose builders are not locked out —
+/// they're just clearly marked as not-yet-recognised.
+fn serial_fleet_entry(index: usize, name: &str, description: &str) -> Option<FleetDeviceState> {
+    let mut kind = "unknown-usb".to_string();
+    let mut is_recognized = false;
+    let mut n_channels = 6usize;
+    let mut found = false;
+
+    if let Ok(ports) = serialport::available_ports() {
+        for p in ports {
+            if p.port_name != name {
+                continue;
+            }
+            found = true;
+            match p.port_type {
+                serialport::SerialPortType::UsbPort(info) => {
+                    let board = classify_vid_pid(info.vid, info.pid);
+                    if board == "esp32" {
+                        kind = "osmograph-e-nose".to_string();
+                        is_recognized = true;
+                        n_channels = 6;
+                    } else if board != "unknown" {
+                        kind = board; // e.g. arduino_uno / raspberry_pi_pico
+                        is_recognized = false;
+                    } else {
+                        kind = "unknown-usb".to_string();
+                        is_recognized = false;
+                    }
+                }
+                serialport::SerialPortType::BluetoothPort => {
+                    kind = "bluetooth".to_string();
+                    is_recognized = false;
+                }
+                // Onboard PCI/unknown UARTs (ttyS*) are not real connectable
+                // devices — filter them out of the fleet scan.
+                _ => return None,
+            }
+            break;
+        }
+    }
+
+    if !found {
+        return None;
+    }
+
+    Some(FleetDeviceState {
+        id: format!("device-{}", index),
+        name: if description.is_empty() {
+            format!("Serial /dev {}", name)
+        } else {
+            description.to_string()
+        },
+        status: "offline".to_string(),
+        port: name.to_string(),
+        n_channels,
+        firmware_version: "unknown".to_string(),
+        uptime_seconds: 0.0,
+        ip: String::new(),
+        kind,
+        is_recognized,
+        sensors: default_sensors(n_channels),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1783,6 +1876,14 @@ pub struct FleetDeviceState {
     pub firmware_version: String,
     pub uptime_seconds: f64,
     pub ip: String,
+    /// Human/Machine label describing what the device is: "osmograph-e-nose"
+    /// for a recognised ESP32 e-nose, or "unknown-usb" / "unknown-mdns" so the
+    /// UI can clearly mark anything that is not (yet) confirmed to be an e-nose.
+    pub kind: String,
+    /// True when the device is a recognised ESP32-family e-nose (known VID:PID
+    /// or advertises the _osmograph._tcp service). Unknown devices are still
+    /// listed — never hidden — so DIY/indie builders are not locked out.
+    pub is_recognized: bool,
     pub sensors: Vec<FleetSensorState>,
 }
 
@@ -1886,17 +1987,9 @@ fn fleet_scan(state: State<AppState>) -> Result<Vec<FleetDeviceState>, String> {
     let mut devices: Vec<FleetDeviceState> = Vec::new();
 
     for (i, p) in list_serial_ports()?.iter().enumerate() {
-        devices.push(FleetDeviceState {
-            id: format!("device-{}", i),
-            name: if p.description.is_empty() { format!("Device #{}", i + 1) } else { p.description.clone() },
-            status: "offline".to_string(),
-            port: p.name.clone(),
-            n_channels: 6,
-            firmware_version: "unknown".to_string(),
-            uptime_seconds: 0.0,
-            ip: String::new(),
-            sensors: default_sensors(6),
-        });
+        if let Some(d) = serial_fleet_entry(i, &p.name, &p.description) {
+            devices.push(d);
+        }
     }
 
     for d in mdns_discover(Duration::from_secs(4)) {
@@ -1910,6 +2003,10 @@ fn fleet_scan(state: State<AppState>) -> Result<Vec<FleetDeviceState>, String> {
             firmware_version: d.firmware_version,
             uptime_seconds: 0.0,
             ip: d.ip,
+            // Only _osmograph._tcp services are browsed, so every mDNS hit is a
+            // confirmed Osmograph e-nose advertising over the network.
+            kind: "osmograph-e-nose".to_string(),
+            is_recognized: true,
             sensors: default_sensors(n),
         });
     }
@@ -1921,15 +2018,20 @@ fn fleet_scan(state: State<AppState>) -> Result<Vec<FleetDeviceState>, String> {
 
 #[tauri::command]
 fn fleet_add_device(state: State<AppState>, name: String, port: String) -> Result<FleetDeviceState, String> {
+    // Manual add — the target may not be a physically-present USB/BT device, so
+    // always create an offline, unverified manual entry rather than requiring it
+    // to be enumerated (unlike the auto-scan path).
     let device = FleetDeviceState {
         id: format!("device-{}", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()),
         name,
         status: "offline".to_string(),
         port,
         n_channels: 6,
-        firmware_version: "v0.1.0".to_string(),
+        firmware_version: "unknown".to_string(),
         uptime_seconds: 0.0,
         ip: String::new(),
+        kind: "manual-add".to_string(),
+        is_recognized: false,
         sensors: default_sensors(6),
     };
     let mut fleet = state.fleet.lock().map_err(|e| e.to_string())?;
