@@ -3,5 +3,11 @@
   "identifier": "main-capability",
   "description": "Main window capability. Grants the standard Tauri 2 core defaults so the frontend can listen for real-time events (live readings) and use core APIs. Custom commands registered via invoke_handler remain allowed by default.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save",
+    "core:window:allow-set-size",
+    "core:window:allow-center"
+  ]
 }

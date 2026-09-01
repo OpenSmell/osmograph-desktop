@@ -240,6 +240,53 @@
     .hud-corners::before { top: -1px; left: -1px; border-top: 1px solid var(--border-strong); border-left: 1px solid var(--border-strong); opacity: 0.55; }
     .hud-corners::after { bottom: -1px; right: -1px; border-bottom: 1px solid var(--border-strong); border-right: 1px solid var(--border-strong); opacity: 0.55; }
 
+    /* Reusable Sybil HUD panel: four-corner brackets on the top-left and
+       bottom-right, plus an optional top-left section label. Apply to any
+       content box to give it the monitoring-system framing the dashboard plot
+       already has. */
+    .hud-panel { position: relative; }
+    .hud-panel::before,
+    .hud-panel::after {
+      content: "";
+      position: absolute;
+      width: 11px;
+      height: 11px;
+      pointer-events: none;
+      z-index: 3;
+    }
+    .hud-panel::before { top: 0; left: 0; border-top: 1px solid var(--border-strong); border-left: 1px solid var(--border-strong); }
+    .hud-panel::after { bottom: 0; right: 0; border-bottom: 1px solid var(--border-strong); border-right: 1px solid var(--border-strong); }
+    .hud-panel-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px 0;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      flex-shrink: 0;
+    }
+    .hud-panel-head .hp-num {
+      color: var(--text-3);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+    }
+    .hp-fill { flex: 1; }
+
+    /* "provisional" quality marker — the score is a quick estimate until the
+       full 7-factor report is run via Analyze. */
+    .quality-prov {
+      font-style: normal;
+      font-size: 8px;
+      opacity: 0.7;
+      margin-left: 3px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
     /* Hairline frame with single corner accent */
     .frame {
       position: relative;
@@ -355,27 +402,31 @@
     .tab-panel.active { display: flex; }
 
     /* === Dashboard Tab === */
-    /* The dashboard panel stacks the telemetry grid and the (hidden) replay
-       strip vertically. `.dashboard` grows to fill; the rail stays pinned right. */
+    /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
     #panel-dashboard.tab-panel { flex-direction: column; }
+    /* The library tab stacks the session-library grid and the replay strip vertically. */
+    #panel-library.tab-panel { flex-direction: column; }
     #panel-dashboard .dashboard {
       flex: 1 1 auto;
       min-height: 0;
+      height: auto;
     }
     .dashboard {
       display: grid;
       grid-template-columns: minmax(0, 1fr) 300px;
+      grid-template-rows: minmax(0, 1fr);
       height: 100%;
       gap: 10px;
       padding: 10px;
     }
     .dashboard > .traces-area,
-    .dashboard > .sidebar { min-width: 0; }
+    .dashboard > .sidebar { min-width: 0; min-height: 0; }
     .traces-area {
       display: flex;
       flex-direction: column;
       gap: 8px;
       min-width: 0;
+      min-height: 0;
     }
     .traces-header {
       display: flex;
@@ -410,6 +461,50 @@
       height: 3px;
       border-radius: 0;
     }
+    .trace-legend .tl-chip {
+      cursor: pointer;
+      user-select: none;
+      transition: color 0.12s ease;
+      padding: 1px 4px;
+      border: 1px solid transparent;
+    }
+    .trace-legend .tl-chip:hover {
+      color: var(--text-0);
+      border-color: var(--border);
+    }
+    .trace-legend .tl-chip.tl-off { opacity: 0.35; text-decoration: line-through; }
+    .trace-legend .tl-eye {
+      font-size: 10px;
+      color: var(--cyan);
+      line-height: 1;
+      cursor: pointer;
+      padding: 1px 3px;
+      border-radius: 2px;
+      border: 1px solid transparent;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .trace-legend .tl-chip:hover .tl-eye,
+    .trace-legend .tl-eye:hover {
+      background: var(--bg-3);
+      border-color: var(--border-strong);
+    }
+    .trace-legend .tl-chip.tl-off .tl-eye { color: var(--text-3); }
+    /* Trading-view hover readout (per-channel values under the cursor) */
+    .hover-readout {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 4px 12px;
+      padding: 3px 12px 1px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.04em;
+      color: var(--text-3);
+      background: color-mix(in srgb, var(--bg-1) 55%, transparent);
+      border-bottom: 1px dashed var(--border);
+    }
+    .hover-readout .xr-item { display: inline-flex; align-items: center; gap: 4px; }
+    .hover-readout .xr-dot { width: 7px; height: 3px; border-radius: 0; display: inline-block; }
+    .hover-readout b { color: var(--text-0); font-weight: 600; }
     .canvas-wrap {
       flex: 1;
       position: relative;
@@ -421,7 +516,10 @@
     canvas#traces {
       width: 100%;
       height: 100%;
+      cursor: crosshair;
     }
+    canvas#traces.tl-panning { cursor: grabbing; }
+    canvas#traces.tl-boxing { cursor: crosshair; }
     /* Subtle retro-scanline texture — cyberpunk HUD layer kept barely-there so
        the warm paper reads clearly underneath. */
     .canvas-wrap::after {
@@ -463,18 +561,19 @@
       0% { top: -20%; }
       100% { top: 120%; }
     }
-    /* HUD status strip above the live plot */
+    /* Combined toolbar above the live plot: sys tags + live transport */
     .plot-tagbar {
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
       flex-shrink: 0;
-      padding: 2px 2px 0;
+      padding: 2px;
       font-family: var(--font-mono);
       font-size: 9px;
       letter-spacing: 0.08em;
       color: var(--text-3);
     }
+    .toolbar-sep { width: 1px; align-self: stretch; background: var(--border); }
     .sys-tag {
       border: 1px solid var(--border);
       padding: 2px 7px;
@@ -489,11 +588,187 @@
       color: var(--green);
       border-color: var(--green);
     }
+    .sys-tag.live.stall {
+      color: var(--yellow);
+      border-color: var(--yellow);
+    }
+    /* Bootloader diagnosis banner — appears only when a device that answered in
+       bootloader is not streaming data (see updatePlotLinkState). */
+    .boot-banner {
+      display: none;
+      align-items: center;
+      gap: 10px;
+      flex-shrink: 0;
+      margin: 10px 10px 0;
+      padding: 8px 14px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      color: var(--text-0);
+      background: var(--yellow-dim);
+      border: 1px solid var(--yellow);
+      border-radius: var(--radius-sm);
+    }
+    .boot-banner.show { display: flex; }
+    .boot-banner .bb-fill { flex: 1; }
+    .boot-banner button { padding: 3px 10px; font-family: var(--font-mono); font-size: 10px; }
+    /* Reserved under-graph dock: spans only the traces column, never the side
+       rail, so the fingerprint keeps its full height. */
+    .dock {
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+      height: 200px;
+      border: var(--hairline) dashed var(--border-strong);
+      border-radius: var(--radius-sm);
+      background: color-mix(in srgb, var(--bg-1) 72%, transparent);
+      overflow: hidden;
+      transition: height 0.15s ease;
+    }
+    .dock-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 10px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      color: var(--text-3);
+      text-transform: uppercase;
+      border-bottom: 1px dashed var(--border);
+    }
+    .dock-fill { flex: 1; }
+    .dock-toggle {
+      cursor: pointer;
+      background: none;
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      color: var(--text-2);
+      padding: 0 6px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      line-height: 1.4;
+    }
+    .dock:hover .dock-toggle,
+    .dock-toggle:hover { color: var(--cyan); border-color: var(--cyan); }
+    .dock-body {
+      flex: 1;
+      overflow: auto;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-3);
+      text-align: center;
+    }
+    .dock.collapsed { height: 26px; }
+    .dock.collapsed .dock-body { display: none; }
+    /* Compact per-sensor health readout — 2-col grid, one slim cell per sensor. */
+    .health-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px 8px;
+    }
+    .health-cell {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 6px;
+      background: var(--bg-2);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      min-width: 0;
+    }
+    .health-cell .hd-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .health-cell .hd-name { flex: 1; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .health-cell .hd-mean { color: var(--text-3); }
     .plot-fill { flex: 1; }
     .plot-readout {
       color: var(--text-3);
       text-transform: uppercase;
     }
+    .plot-tagbar .transport-btn,
+    .plot-tagbar .transport-select {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      background: var(--bg-1);
+      color: var(--text-1);
+      border: var(--hairline) solid var(--border);
+      padding: 2px 8px;
+      cursor: pointer;
+    }
+    .plot-tagbar .transport-btn:hover { border-color: var(--cyan); color: var(--cyan); }
+    .plot-tagbar .transport-btn:disabled { opacity: 0.4; cursor: default; border-color: var(--border); color: var(--text-3); }
+    .plot-tagbar .transport-select { cursor: pointer; }
+    /* Icon-only next/prev transport buttons */
+    .plot-tagbar .trans-nav {
+      width: 24px;
+      padding: 2px 0;
+      text-align: center;
+      font-size: 13px;
+      line-height: 1;
+      font-variant-emoji: text;
+    }
+    .plot-tagbar .trans-nav:active:not(:disabled) { background: var(--bg-3); }
+    /* Prominent play/pause */
+    .plot-tagbar .trans-play {
+      width: 26px;
+      height: 20px;
+      padding: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      border-radius: 3px;
+      border-color: var(--border-strong);
+      color: var(--text-0);
+    }
+    .plot-tagbar .trans-jump {
+      border-color: var(--cyan);
+      color: var(--cyan);
+      font-weight: 700;
+      padding: 2px 6px;
+    }
+    .plot-tagbar .trans-jump:disabled { opacity: 0; pointer-events: none; }
+    .plot-tagbar .trans-record {
+      color: var(--red);
+      border-color: var(--red);
+      font-weight: 700;
+      padding: 2px 7px;
+    }
+    .plot-tagbar .trans-record:hover { background: var(--red-dim); }
+    .plot-tagbar .trans-record.recording {
+      background: var(--red);
+      color: var(--bg-0);
+      animation: rec-pulse 1.4s ease-in-out infinite;
+    }
+    @keyframes rec-pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.45); } 50% { box-shadow: 0 0 0 4px rgba(220,38,38,0); } }
+    .plot-tagbar .transport-scrub {
+      -webkit-appearance: none;
+      appearance: none;
+      flex: 1 1 auto;
+      min-width: 60px;
+      height: 4px;
+      margin: 0;
+      background: var(--border);
+      border-radius: 2px;
+      cursor: pointer;
+    }
+    .plot-tagbar .transport-scrub::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--cyan);
+      border: 1px solid var(--bg-0);
+    }
+    .plot-tagbar .transport-scrub:disabled { opacity: 0.35; cursor: default; }
 
     /* Right telemetry rail — a pinned, full-height panel (no mid-screen scroll) */
     .sidebar {
@@ -591,20 +866,154 @@
     /* === Library Tab === */
     .library {
       display: grid;
-      grid-template-columns: 1fr 320px;
-      height: 100%;
+      grid-template-columns: minmax(0, 1fr) 380px;
+      grid-template-rows: minmax(0, 1fr);
+      flex: 1;
+      min-height: 0;
+    }
+    .library-main,
+    .library-inspector {
+      min-height: 0;
+      overscroll-behavior: contain;
     }
     /* === Compare Tab === */
     .compare {
       display: flex;
       flex-direction: column;
       height: 100%;
+      padding: 10px 14px 6px;
+      gap: 8px;
     }
+    .compare-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      flex-shrink: 0;
+    }
+    .compare-head h2 { font-size: 16px; color: var(--text-0); font-weight: 700; }
+    .compare-modes {
+      display: flex;
+      gap: 4px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .cmp-mode {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      background: var(--bg-1);
+      color: var(--text-2);
+      border: 1px solid var(--border);
+      border-radius: 3px;
+      cursor: pointer;
+    }
+    .cmp-mode:hover { color: var(--cyan); border-color: var(--cyan); }
+    .cmp-mode.active { color: var(--bg-0); background: var(--cyan); border-color: var(--cyan); }
+    .compare-controls {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+      flex-wrap: wrap;
+    }
+    .cc-label { font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.1em; color: var(--text-3); text-transform: uppercase; }
+    .cc-sep { width: 1px; align-self: stretch; background: var(--border); }
+    .cmp-chips { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+    .cmp-chip {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.06em;
+      padding: 2px 8px;
+      background: var(--bg-1);
+      color: var(--text-2);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.12s ease;
+    }
+    .cmp-chip:hover { border-color: var(--cyan); color: var(--cyan); }
+    .cmp-chip.on { color: var(--bg-0); background: var(--cyan); border-color: var(--cyan); font-weight: 700; }
+    .cmp-chip.off { opacity: 0.45; }
+    .compare-body {
+      display: grid;
+      grid-template-columns: minmax(300px, 360px) minmax(0, 1fr);
+      gap: 10px;
+      flex: 1;
+      min-height: 0;
+    }
+    .compare-side,
+    .compare-chart {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      overflow: hidden;
+    }
+    .cmp-metrics-wrap {
+      flex: 1;
+      overflow: auto;
+      padding: 8px 10px;
+    }
+    #compareWrap {
+      flex: 1;
+      min-height: 0;
+      position: relative;
+      margin: 0 8px 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      background: var(--bg-0);
+      overflow: hidden;
+    }
+    #compareCanvas { width: 100%; height: 100%; display: block; }
+    .compare-labels {
+      flex-shrink: 0;
+      padding: 4px 10px 2px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-3);
+      letter-spacing: 0.04em;
+    }
+    .compare-labels b { font-weight: 600; }
+    .cmp-metrics-table { border-collapse: collapse; width: 100%; font-size: 10px; }
+    .cmp-metrics-table th {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      text-align: right;
+      padding: 2px 6px;
+      border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .cmp-metrics-table th:first-child { text-align: left; }
+    .cmp-metrics-table td {
+      text-align: right;
+      color: var(--text-2);
+      padding: 2px 6px;
+      border-bottom: var(--hairline) solid var(--border);
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+    .cmp-metrics-table td:first-child {
+      font-family: var(--font-mono);
+      color: var(--text-0);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 150px;
+    }
+    .cmp-metrics-table tr.cmp-best td { color: var(--green); font-weight: 700; }
+    .cmp-recover-hi { color: var(--green); }
+    .cmp-recover-lo { color: var(--red); }
     .library-main {
       display: flex;
       flex-direction: column;
       padding: 8px;
       gap: 6px;
+      position: relative;
     }
     .lib-toolbar {
       display: flex;
@@ -658,20 +1067,32 @@
     .quality-badge.good { background: var(--green-dim); color: var(--green); }
     .quality-badge.ok { background: var(--yellow-dim); color: var(--yellow); }
     .quality-badge.bad { background: var(--red-dim); color: var(--red); }
+    .lib-analyze {
+      background: transparent;
+      border: 1px dashed var(--border);
+      color: var(--text-3);
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 1px 6px;
+      border-radius: 8px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .lib-analyze:hover { border-color: var(--cyan); color: var(--cyan); border-style: solid; }
 
     .library-inspector {
       background: var(--bg-1);
       border-left: 1px solid var(--border);
-      padding: 12px;
+      padding: 14px;
       display: flex;
       flex-direction: column;
-      gap: 10px;
+      gap: 12px;
       overflow-y: auto;
     }
     .inspector-section {
       background: var(--bg-2);
       border-radius: var(--radius);
-      padding: 10px;
+      padding: 12px 14px;
     }
     .inspector-section h4 {
       font-size: 9px;
@@ -680,6 +1101,14 @@
       letter-spacing: 1px;
       margin-bottom: 6px;
     }
+    .inspector-section .kv-row {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 2px 10px;
+      font-size: 11px;
+    }
+    .inspector-section .kv-row .k { color: var(--text-3); }
+    .inspector-section .kv-row .v { color: var(--text-1); overflow-wrap: anywhere; }
     canvas#session-fp {
       width: 100%;
       height: 140px;
@@ -711,22 +1140,33 @@
     .train-toolbar input[type="number"] { width: 110px; }
     .train-steps {
       display: flex;
-      flex-wrap: wrap;
-      gap: 6px 18px;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 5px;
       margin-top: 10px;
       font-size: 10px;
       color: var(--text-2);
+      line-height: 1.5;
     }
-    .train-step { font-family: var(--font-mono); letter-spacing: 0.04em; }
+    .train-step {
+      font-family: var(--font-mono);
+      letter-spacing: 0.04em;
+      display: flex;
+      align-items: flex-start;
+      gap: 7px;
+      line-height: 1.5;
+    }
     .train-step b {
-      display: inline-block;
+      flex: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       color: #fbf8f2;
       background: var(--green);
-      width: 14px; height: 14px;
-      line-height: 14px;
-      text-align: center;
+      width: 15px; height: 15px;
+      border-radius: 2px;
       font-size: 9px;
-      margin-right: 4px;
+      margin-top: 1px;
     }
     .train-field { display: flex; align-items: center; gap: 5px; }
     .train-field label {
@@ -744,6 +1184,12 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
     }
+    /* Recordings excluded by the min-quality gate read clearly as blocked. */
+    .train-table-wrap tr.train-blocked {
+      opacity: 0.5;
+      background: repeating-linear-gradient(45deg, transparent 0 6px, rgba(0,0,0,0.05) 6px 12px);
+    }
+    .train-table-wrap tr.train-blocked:hover { opacity: 0.85; }
     .train-inspector {
       background: var(--bg-1);
       border: 1px solid var(--border);
@@ -791,6 +1237,18 @@
       background: var(--red-dim);
       border-radius: var(--radius-sm);
       margin-top: 4px;
+    }
+    .adequacy-ok {
+      margin-top: 6px;
+      padding: 4px 8px;
+      border-left: 3px solid var(--green);
+      background: rgba(154, 230, 152, 0.07);
+      color: var(--green);
+      font-size: 10px;
+      line-height: 1.45;
+      border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+      width: fit-content;
+      max-width: 100%;
     }
     .train-metric { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
 
@@ -1062,6 +1520,63 @@
       letter-spacing: 0.05em;
       white-space: nowrap;
     }
+    .calib-row {
+      display: grid;
+      grid-template-columns: 34px 1fr 80px 70px 60px 44px;
+      align-items: center;
+      gap: 8px;
+      padding: 4px 0;
+      border-bottom: 1px solid var(--border);
+    }
+    .calib-head {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .calib-row input[type="number"], .calib-row select {
+      width: 100%;
+      box-sizing: border-box;
+      background: var(--bg-1);
+      color: var(--text-1);
+      border: 1px solid var(--border);
+      padding: 3px 5px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+    }
+    .calib-ch { font-family: var(--font-mono); font-size: 11px; font-weight: 700; }
+    .calib-toggle { text-align: center; }
+    .sensor-lib-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 11px;
+    }
+    .sensor-lib-table th {
+      text-align: left;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-3);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 5px 6px;
+      border-bottom: 1px solid var(--border-strong);
+    }
+    .sensor-lib-table td {
+      padding: 5px 6px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-2);
+    }
+    .mini-btn {
+      background: transparent;
+      color: var(--cyan);
+      border: 1px solid var(--cyan);
+      font-size: 9px;
+      font-family: var(--font-mono);
+      padding: 2px 6px;
+      cursor: pointer;
+    }
+    .mini-btn:hover { background: var(--cyan); color: var(--bg-0); }
     .sensor-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -1144,7 +1659,8 @@
     }
     .modal-box {
       background: var(--bg-1); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 16px; width: 360px;
+      border-radius: var(--radius); padding: 16px; width: 400px;
+      max-width: 92vw; max-height: 92vh; overflow-y: auto;
       display: flex; flex-direction: column; gap: 10px;
     }
     .modal-box h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
@@ -1156,8 +1672,46 @@
     }
     .phase-times { display: flex; gap: 8px; }
     .phase-times label { flex: 1; }
+    .protocol-seq {
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+      padding: 6px 8px; border: 1px solid var(--border);
+      border-radius: var(--radius-sm); background: var(--bg-2);
+    }
+    .ps-phase { font-size: 10px; color: var(--text-2); }
+    .ps-phase b { color: var(--text-0); }
+    .ps-arrow { color: var(--text-3); }
+    .ps-fill { flex: 1; }
+    .ps-hint { font-size: 9px; color: var(--text-3); }
     .modal-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
     .modal-actions button { padding: 5px 12px; }
+
+    /* === Rig picker / flash modal / drop hint / train shortfall === */
+    .rig-bar { display: flex; align-items: center; gap: 6px; padding: 3px 0 5px; flex-wrap: wrap; }
+    .rg-chip {
+      font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
+      padding: 2px 10px; border-radius: 999px; cursor: pointer;
+      border: 1px solid var(--border); background: var(--bg-1); color: var(--text-2);
+      transition: all .12s ease;
+    }
+    .rg-chip:hover { border-color: var(--green); color: var(--green); }
+    .rg-chip.active { background: var(--green-dim); border-color: var(--green); color: var(--green); }
+    .rg-note { font-size: 10px; color: var(--text-3); }
+    .rg-note.warn { color: var(--yellow); }
+    .drop-hint {
+      position: absolute; inset: 0; z-index: 20;
+      display: flex; align-items: center; justify-content: center;
+      border: 2px dashed var(--green); border-radius: var(--radius);
+      background: rgba(14, 116, 144, 0.1); color: var(--green);
+      font-size: 14px; font-weight: 700; letter-spacing: 1px;
+      pointer-events: none;
+    }
+    .train-shortfall {
+      border: 1px solid var(--yellow); background: var(--yellow-dim);
+      border-radius: var(--radius-sm); padding: 8px 10px; margin-top: 6px;
+      font-size: 11px; color: var(--text-1);
+    }
+    .train-shortfall .ts-title { font-weight: 700; color: var(--yellow); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px; margin-bottom: 3px; }
+    .train-shortfall .ts-actions { display: flex; gap: 6px; margin-top: 7px; flex-wrap: wrap; }
 
     /* === Progress modal (recording in progress) === */
     .rec-progress { display: flex; flex-direction: column; gap: 8px; }
@@ -1191,6 +1745,7 @@
           <option value="">Scan for devices ↻</option>
         </select>
         <button class="icon-btn" id="refreshBtn" title="Refresh ports / scan BLE">↻</button>
+        <button id="flashQuick" title="Flash / update the OpenSmell firmware on your board (one-click, like the Python app)">⚡ Flash</button>
         <button class="green" id="connectBtn">Connect</button>
         <button id="detectBtn" title="Auto-detect board">Detect</button>
         <span id="connMsg" class="conn-msg"></span>
@@ -1212,6 +1767,13 @@
     <div class="content">
       <!-- ===== DASHBOARD ===== -->
       <div class="tab-panel active" id="panel-dashboard">
+        <div class="boot-banner" id="bootBanner">
+          <span style="color:var(--yellow);font-weight:700">⚠ BOOTLOADER</span>
+          <span>This device is answering in bootloader mode — it will not stream data until it is flashed. Firmware may be missing or corrupt.</span>
+          <span class="bb-fill"></span>
+          <button id="bootToFlash" class="green">Flash firmware</button>
+          <button id="bootDismiss">Dismiss</button>
+        </div>
         <div class="dashboard">
           <div class="traces-area">
             <div class="traces-header">
@@ -1221,9 +1783,32 @@
             <div class="plot-tagbar">
               <span class="sys-tag">SYS.LIVE</span>
               <span class="sys-tag live" id="plotLinkState">● NO LINK</span>
+              <span class="toolbar-sep"></span>
+              <button id="liveRecord" class="transport-btn trans-record" title="Start a recording session (record while you watch the live trace)">● Rec</button>
+              <button id="liveRev" class="transport-btn trans-nav" title="Rewind one window (⌥ hold to go to the earliest)">⏪</button>
+              <button id="livePlayPause" class="transport-btn trans-play" title="Pause / resume the live view">⏸</button>
+              <button id="liveFwd" class="transport-btn trans-nav" title="Fast-forward one window (⌥ hold to jump to now)">⏩</button>
+              <button id="liveJump" class="transport-btn trans-jump" title="Return to live / newest data">LIVE</button>
+              <input id="liveScrub" class="transport-scrub" type="range" min="0" max="1000" value="1000"
+                title="Rewind / fast-forward through session history" aria-label="Session history scrub">
+              <span class="plot-readout" id="liveScrubStamp"></span>
               <div class="plot-fill"></div>
+              <span class="plot-readout" id="liveWindowReadout" title="Window size — scroll over the graph to zoom, ⇧ drag to box-zoom, double-click to return to live"></span>
+              <button id="liveZoomOut" class="transport-btn trans-nav" title="Zoom out · or scroll down over the graph">⊖</button>
+              <button id="liveZoomIn" class="transport-btn trans-nav" title="Zoom in · or scroll up over the graph">⊕</button>
+              <button id="liveZoomReset" class="transport-btn trans-jump" title="Reset zoom to the default window (double-click the graph also returns to live)">⟲ reset</button>
               <span class="plot-readout" id="plotSamples">0 SAMP</span>
               <span class="plot-readout">CH <span id="plotChCount">6</span></span>
+              <button id="liveClear" class="transport-btn trans-nav" title="Clear the displayed window">⟲</button>
+            </div>
+            <div id="hoverReadout" class="hover-readout" style="display:none"></div>
+            <div class="rig-bar">
+              <span class="sys-tag" title="How many ADC channels your rig actually has — the graph only plots these.">RIG</span>
+              <span class="rg-chip" data-preset="3-sensor-food">3 sensors</span>
+              <span class="rg-chip" data-preset="4-sensor-safety">4 sensors</span>
+              <span class="rg-chip active" data-preset="6-sensor-full">6 sensors</span>
+              <span class="rg-chip" data-preset="8-sensor-max">8 sensors</span>
+              <span class="rg-note" id="rigNote">Pick how many sensors your rig has — only those are plotted.</span>
             </div>
             <div class="phase-hud" id="phaseHud" style="display:none">
               <div class="phase-hud-head">
@@ -1238,6 +1823,15 @@
             </div>
             <div class="canvas-wrap hud-corners">
               <canvas id="traces"></canvas>
+            </div>
+            <div class="dock" id="underDock">
+              <div class="dock-head">
+                <span>SYS.DOCK</span>
+                <span>analysis timeline strip</span>
+                <span class="dock-fill"></span>
+                <button id="dockToggle" class="dock-toggle" title="Collapse / expand the analysis timeline strip">—</button>
+              </div>
+              <div class="dock-body">Analysis timeline strip — markers · live-classification ticks · event ticker. Nothing here yet.</div>
             </div>
           </div>
           <aside class="sidebar">
@@ -1285,6 +1879,75 @@
             </div>
           </aside>
         </div>
+      </div>
+
+      <div class="tab-panel" id="panel-library">
+        <div class="library">
+          <div class="library-main hud-panel" id="libMain">
+            <div class="hud-panel-head">
+              <span class="hp-num">LIB</span>
+              <span>Session Library</span>
+              <span class="hp-fill"></span>
+              <span id="libFilterStamp" class="coord-tag">0 records</span>
+            </div>
+            <div class="lib-toolbar">
+              <button id="libImport">Import</button>
+              <button id="libImportFolder">Import Folder</button>
+              <button id="libConvert">Export .osmell</button>
+              <button id="libRefresh">Refresh</button>
+              <span style="width:1px;height:16px;background:var(--border)"></span>
+              <input type="text" id="libSearch" placeholder="Search substance, label..." />
+              <select id="libFormatFilter" style="width:90px">
+                <option value="">All formats</option>
+                <option value="csv">CSV</option>
+                <option value="osmell">OSMELL</option>
+              </select>
+            </div>
+            <div class="lib-table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th style="width:34px" title="Tick sessions to overlay in Compare">Comp</th>
+                    <th style="width:130px">Time</th>
+                    <th style="width:120px">Substance</th>
+                    <th>Label</th>
+                    <th style="width:60px">Format</th>
+                    <th style="width:60px">Duration</th>
+                    <th style="width:50px">Sensors</th>
+                    <th style="width:60px">Quality</th>
+                  </tr>
+                </thead>
+                <tbody id="libBody"></tbody>
+              </table>
+            </div>
+            <div style="font-size:10px;color:var(--text-3)" id="libStatus">0 sessions</div>
+            <div class="drop-hint" id="libDropHint" style="display:none">DROP RECORDINGS TO IMPORT</div>
+          </div>
+          <div class="library-inspector hud-panel">
+            <div class="hud-panel-head" style="padding-left:0;padding-right:0">
+              <span class="hp-num">INS</span>
+              <span>Inspector</span>
+            </div>
+            <div class="inspector-section">
+              <h4>Session Details</h4>
+              <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
+            </div>
+            <div class="inspector-section">
+              <h4>Response Fingerprint</h4>
+              <canvas id="session-fp"></canvas>
+            </div>
+            <div class="inspector-section">
+              <h4>Actions</h4>
+              <div style="display:flex;flex-wrap:wrap;gap:6px">
+                <button id="inspRename">✎ Rename</button>
+                <button id="inspAnalyze">Analyze</button>
+                <button id="inspExport">Export</button>
+                <button id="inspReplay">▶ Replay</button>
+                <button id="inspDelete" style="color:var(--red)">Delete</button>
+              </div>
+            </div>
+          </div>
+        </div>
 
         <!-- Session Replay -->
         <div class="replay" id="replayPanel" style="margin-top:14px;display:none">
@@ -1324,86 +1987,59 @@
         </div>
       </div>
 
-      <div class="tab-panel" id="panel-library">
-        <div class="library">
-          <div class="library-main">
-            <div class="lib-toolbar">
-              <button id="libImport">Import</button>
-              <button id="libImportFolder">Import Folder</button>
-              <button id="libConvert">Export .osmell</button>
-              <button id="libRefresh">Refresh</button>
-              <span style="width:1px;height:16px;background:var(--border)"></span>
-              <input type="text" id="libSearch" placeholder="Search substance, label..." />
-              <select id="libFormatFilter" style="width:90px">
-                <option value="">All formats</option>
-                <option value="csv">CSV</option>
-                <option value="osmell">OSMELL</option>
-              </select>
-            </div>
-            <div class="lib-table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th style="width:34px" title="Tick sessions to overlay in Compare">Comp</th>
-                    <th style="width:130px">Time</th>
-                    <th style="width:120px">Substance</th>
-                    <th>Label</th>
-                    <th style="width:60px">Format</th>
-                    <th style="width:60px">Duration</th>
-                    <th style="width:50px">Sensors</th>
-                    <th style="width:60px">Quality</th>
-                  </tr>
-                </thead>
-                <tbody id="libBody"></tbody>
-              </table>
-            </div>
-            <div style="font-size:10px;color:var(--text-3)" id="libStatus">0 sessions</div>
-          </div>
-          <div class="library-inspector">
-            <div class="inspector-section">
-              <h4>Session Details</h4>
-              <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
-            </div>
-            <div class="inspector-section">
-              <h4>Response Fingerprint</h4>
-              <canvas id="session-fp"></canvas>
-            </div>
-            <div class="inspector-section">
-              <h4>Actions</h4>
-              <div style="display:flex;flex-wrap:wrap;gap:6px">
-                <button id="inspAnalyze">Analyze</button>
-                <button id="inspExport">Export</button>
-                <button id="inspReplay">▶ Replay</button>
-                <button id="inspDelete" style="color:var(--red)">Delete</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <!-- ===== COMPARE ===== -->
       <div class="tab-panel" id="panel-compare">
         <div class="compare">
-          <div style="padding:14px 16px 4px">
-            <h2 style="font-size:16px;color:var(--text-0);font-weight:700">Compare</h2>
-            <div style="font-size:11px;color:var(--text-3);margin-top:2px;max-width:720px">
-              Overlay the normalized responses of the sessions you select in the Library.
-              Each session is normalized to its own R0 and plotted on a shared relative-time
-              axis, so responses are comparable across devices and days.
+          <div class="compare-head">
+            <div>
+              <h2>Compare</h2>
+              <div style="font-size:11px;color:var(--text-3);margin-top:2px;max-width:720px">
+                Sessions are normalized to their own per-channel R0 (baseline when present, else the
+                first 15 samples) and aligned on relative time, so responses are comparable across
+                devices and days.
+              </div>
+            </div>
+            <div class="compare-modes" id="compareModes">
+              <button class="cmp-mode active" data-mode="overlay">Overlay</button>
+              <button class="cmp-mode" data-mode="delta">Δ vs ref</button>
+              <button class="cmp-mode" data-mode="heatmap">Similarity</button>
             </div>
           </div>
-          <div style="padding:8px 16px 4px;display:flex;align-items:center;gap:8px">
-            <span style="font-size:11px;color:var(--text-2)">Channel:</span>
-            <select id="compareChannel" style="width:150px" disabled></select>
-            <span id="compareCount" style="font-size:10px;color:var(--text-3)"></span>
+          <div class="compare-controls" id="compareControls">
+            <span class="cc-label">Channels:</span>
+            <span class="cmp-chips" id="compareChs"></span>
+            <span class="cc-sep"></span>
+            <span class="cc-label cmp-ref-hide" id="cmpRefLabel" style="display:none">Reference:</span>
+            <select id="compareRef" class="cmp-ref-hide" style="display:none"></select>
+            <span style="flex:1"></span>
+            <span class="coord-tag" id="compareCount"></span>
           </div>
-          <div style="padding:4px 16px" id="compareLabels"></div>
-          <div id="compareWrap" style="flex:1;min-height:200px;margin:4px 16px 0;border:1px solid var(--border);border-radius:var(--radius-sm);position:relative">
-            <canvas id="compareCanvas" style="width:100%;height:100%;display:block"></canvas>
+          <div class="compare-body">
+            <div class="compare-side hud-panel">
+              <div class="hud-panel-head">
+                <span class="hp-num">MET</span>
+                <span>Tear sheet</span>
+                <span class="hp-fill"></span>
+                <span class="coord-tag" id="cmpMetricStamp" style="font-size:9px">—</span>
+              </div>
+              <div class="cmp-metrics-wrap" id="compareMetricsWrap">
+                <div id="compareMetrics"></div>
+              </div>
+            </div>
+            <div class="compare-chart hud-panel">
+              <div class="hud-panel-head">
+                <span class="hp-num">VIZ</span>
+                <span id="cmpVizTitle">Overlay — per-channel normalized response</span>
+              </div>
+              <div class="compare-labels" id="compareLabels"></div>
+              <div id="compareWrap">
+                <canvas id="compareCanvas"></canvas>
+              </div>
+            </div>
           </div>
-          <div style="padding:8px 16px 14px;font-size:10px;color:var(--text-3)">
-            R0 comes from each session's baseline when present; otherwise auto-R0 uses the
-            first 15 samples. Time is relative to each session's first sample.
+          <div style="padding:6px 16px 12px;font-size:10px;color:var(--text-3)" id="compareFoot">
+            Overlay / Δ: one lane per sensor channel, sessions overlaid (Δ shows each session minus the reference).
+            Similarity: Pearson correlation over the shared overlap of the selected channels.
           </div>
         </div>
       </div>
@@ -1427,11 +2063,17 @@
             </div>
           </div>
           <div class="train-layout">
-            <div class="train-main">
+            <div class="train-main hud-panel">
+              <div class="hud-panel-head">
+                <span class="hp-num">TRN</span>
+                <span>Recording Selection</span>
+                <span class="hp-fill"></span>
+                <span class="coord-tag">≥2 recordings per smell</span>
+              </div>
               <div class="train-toolbar">
                 <input type="text" id="trainName" placeholder="Model name (e.g. kitchen_spices)" title="Name your model" />
                 <div class="train-field"><label>Window</label><input type="number" id="trainWindow" min="20" max="500" value="100" title="Samples per classification window (20-500, default 100)" /></div>
-                <div class="train-field"><label>Min quality</label><input type="number" id="trainMinQuality" min="0" max="1" step="0.05" value="0" title="Skip recordings below this quality (0-1); 0 = include all" /></div>
+                <div class="train-field"><label>Min quality /100</label><input type="number" id="trainMinQuality" min="0" max="100" step="5" value="0" title="Skip recordings below this quality (0-100); 0 = include all" /></div>
                 <button id="trainBtn" class="green">Train</button>
                 <button id="trainRefresh">Refresh</button>
               </div>
@@ -1453,7 +2095,11 @@
               <div style="font-size:10px;color:var(--text-3)" id="trainStatus">Loading recordings…</div>
               <div id="trainLog" style="font-size:11px;font-family:var(--font-mono);color:var(--text-2);white-space:pre-wrap"></div>
             </div>
-            <div class="train-inspector" id="trainInspector">
+            <div class="train-inspector hud-panel" id="trainInspector">
+              <div class="hud-panel-head" style="padding-left:0;padding-right:0">
+                <span class="hp-num">MDL</span>
+                <span>Model Card</span>
+              </div>
               <div style="font-size:11px;color:var(--text-3)">Train a model, then select it here for details.</div>
             </div>
           </div>
@@ -1470,7 +2116,7 @@
             <button id="fleetScan">Scan Network</button>
             <button id="fleetAdd" class="blue">+ Add Device</button>
           </div>
-          <div class="fleet-grid" id="fleetGrid"></div>
+          <div class="fleet-grid hud-panel" id="fleetGrid"></div>
         </div>
       </div>
 
@@ -1480,6 +2126,8 @@
           <div class="sys-nav">
             <div class="sys-nav-item active" data-sys="connection">Connection</div>
             <div class="sys-nav-item" data-sys="sensors">Sensors & Presets</div>
+            <div class="sys-nav-item" data-sys="hardware">Hardware Profile</div>
+            <div class="sys-nav-item" data-sys="calibration">Calibration & Library</div>
             <div class="sys-nav-item" data-sys="oled">OLED Display</div>
             <div class="sys-nav-item" data-sys="buzzer">Buzzer Alerts</div>
             <div class="sys-nav-item" data-sys="firmware">Firmware</div>
@@ -1531,6 +2179,7 @@
                   <option value="3-sensor-food">3-Sensor Food</option>
                   <option value="4-sensor-safety">4-Sensor Safety</option>
                   <option value="6-sensor-full" selected>6-Sensor Full</option>
+                  <option value="8-sensor-max">8-Sensor Max</option>
                 </select>
               </div>
               <div id="presetDetail" style="margin-top:8px"></div>
@@ -1538,6 +2187,89 @@
             <div class="card">
               <h3>Channel Mapping</h3>
               <div id="channelMapping"></div>
+            </div>
+          </div>
+
+          <!-- Hardware Profile Panel -->
+          <div class="sys-panel" id="sys-hardware">
+            <h2>Rig Setup</h2>
+            <p class="hint" style="margin-bottom:10px">
+              Describe <b>your</b> rig — nothing is assumed. The circuit reference below (ADC bits,
+              load resistor, supply voltage, divider wiring) is how the app makes sense of the raw
+              counts your board produces. Set it once, then export it as
+              <code>sensor_profile.json</code> so your device travels between OpenSmell tools.
+            </p>
+            <div class="card">
+              <h3>Template</h3>
+              <div class="form-row">
+                <label>Start from</label>
+                <select id="hwProfilePreset">
+                  <option value="custom" selected>My Rig (custom)</option>
+                  <option value="smellmonitor">Example: SmellMonitor</option>
+                  <option value="reference">Example: 6-sensor lab rig</option>
+                </select>
+              </div>
+              <div class="form-row" style="margin-top:6px">
+                <label>Profile Name</label>
+                <input type="text" id="hwProfileName" placeholder="e.g. lab rig no. 3" style="flex:1" />
+              </div>
+            </div>
+            <div class="card">
+              <h3>Circuit Reference</h3>
+              <div class="calib-row" style="grid-template-columns:1fr 1fr">
+                <div style="padding:4px 0"><label>ADC bits</label>
+                  <input type="number" id="hwAdcBits" value="12" min="8" max="24" style="width:80px" /></div>
+                <div style="padding:4px 0"><label>Load resistor R<sub>L</sub> (Ω)</label>
+                  <input type="number" id="hwRload" value="1000" min="1" step="any" style="width:90px" /></div>
+                <div style="padding:4px 0"><label>V<sub>cc</sub> supply (V)</label>
+                  <input type="number" id="hwVcc" value="5.0" min="0.1" step="any" style="width:80px" /></div>
+                <div style="padding:4px 0"><label>Sensor on low side?</label>
+                  <select id="hwLowSide"><option value="true">Yes (sensor to GND)</option><option value="false">No — high side</option></select></div>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Share &amp; Interoperability</h3>
+              <div class="form-row">
+                <button id="hwExport">Export sensor_profile.json</button>
+                <button id="hwImport">Import profile…</button>
+                <span class="hint" id="hwStatus" style="align-self:center">Set your rig, then export.</span>
+              </div>
+              <pre id="hwExported" style="display:none;background:var(--bg-2);padding:8px;border-radius:4px;font-size:10px;overflow:auto;max-height:200px"></pre>
+            </div>
+          </div>
+
+          <!-- Calibration & Sensor Library Panel -->
+          <div class="sys-panel" id="sys-calibration">
+            <h2>Calibration &amp; Sensor Library</h2>
+            <p class="hint" style="margin-bottom:10px">
+              Enter each sensor&rsquo;s calibration constants (R₀, sensitivity <b>a</b>, exponent <b>b</b>) so raw
+              resistance is turned into an accurate ppm estimate and a fair quality score. Values are stored locally
+              on this device and applied live to the trace, features and quality analysis.
+            </p>
+            <div class="card">
+              <h3>Per-Channel Calibration Constants</h3>
+              <div id="calibTable" style="display:grid;gap:6px;margin-top:8px"></div>
+              <div class="form-row" style="margin-top:10px">
+                <button id="calibSave">Save Constants</button>
+                <span class="hint" id="calibStatus" style="align-self:center">Adjust values then Save.</span>
+              </div>
+            </div>
+            <div class="card">
+              <h3>Sensor Library</h3>
+              <div class="form-row">
+                <label>Filter</label>
+                <input type="text" id="sensorLibSearch" placeholder="e.g. MQ-135, CO, ammonia…" style="flex:1" />
+              </div>
+              <div id="sensorLibTable" style="margin-top:8px"></div>
+            </div>
+            <div class="card">
+              <h3>Contribute a Sensor Model</h3>
+              <p class="hint">Know the datasheet curve for a sensor that isn&rsquo;t in the library? Add it so everyone benefits.</p>
+              <div class="form-row">
+                <button id="calibExport">Export Sensor JSON</button>
+                <button id="calibContribute">Open GitHub Contribute →</button>
+              </div>
+              <pre id="calibExported" style="display:none;background:var(--bg-2);padding:8px;border-radius:4px;font-size:10px;overflow:auto;max-height:180px"></pre>
             </div>
           </div>
 
@@ -1822,6 +2554,15 @@ Confidence: 97.3%</div>
           <label>Exposure (s)<input id="recExposure" type="number" value="60" min="0" step="5" /></label>
           <label>Recovery (s)<input id="recRecovery" type="number" value="30" min="0" step="5" /></label>
         </div>
+        <div class="protocol-seq" id="protocolSeq">
+          <span class="ps-phase">1 · Baseline <b id="psBaseline">30s</b></span>
+          <span class="ps-arrow">→</span>
+          <span class="ps-phase">2 · Exposure <b id="psExposure">60s</b></span>
+          <span class="ps-arrow">→</span>
+          <span class="ps-phase">3 · Recovery <b id="psRecovery">30s</b></span>
+          <span class="ps-fill"></span>
+          <span class="ps-hint">Keep the sample near the intake during Exposure.</span>
+        </div>
         <div class="modal-actions">
           <button id="recModalClose">Close</button>
           <button class="green" id="recStart">Start Recording</button>
@@ -1841,6 +2582,42 @@ Confidence: 97.3%</div>
             <button class="green" id="recStop">Stop & Save</button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Flash Firmware Modal -->
+  <div id="flashModal" class="modal" style="display:none">
+    <div class="modal-box" style="width:420px">
+      <h3>⚡ Flash Firmware</h3>
+      <div style="font-size:11px;color:var(--text-2);line-height:1.45">
+        Updates your ESP32 with the OpenSmell firmware. Takes ~30s — the board
+        reconnects automatically when it finishes. Pick the number of sensors on
+        your rig first so the firmware matches your hardware.
+      </div>
+      <div class="phase-times">
+        <label>Target Port
+          <select id="fmPort" style="background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;padding:5px 7px;width:100%">
+            <option value="">Select port...</option>
+          </select>
+        </label>
+        <label>Rig Preset
+          <select id="fmPreset" style="background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;padding:5px 7px;width:100%">
+            <option value="3-sensor-food">3-Sensor Food</option>
+            <option value="4-sensor-safety">4-Sensor Safety</option>
+            <option value="6-sensor-full" selected>6-Sensor Full</option>
+            <option value="8-sensor-max">8-Sensor Max</option>
+          </select>
+        </label>
+      </div>
+      <label>WiFi SSID <input id="fmSsid" type="text" placeholder="leave empty for SoftAP mode" autocomplete="off" /></label>
+      <label>WiFi Password <input id="fmPass" type="password" placeholder="network password" autocomplete="off" /></label>
+      <div style="font-size:10px;color:var(--text-3)" id="fmToolchain">checking toolchain…</div>
+      <button id="fmFlash" class="green" style="margin-top:6px">Flash Firmware</button>
+      <div class="progress-track" id="fmProgress" style="display:none"><div class="progress-fill" id="fmBar" style="width:0%"></div></div>
+      <div style="font-size:10px;color:var(--text-3)" id="fmStatus"></div>
+      <div class="modal-actions">
+        <button id="fmClose">Not now</button>
       </div>
     </div>
   </div>

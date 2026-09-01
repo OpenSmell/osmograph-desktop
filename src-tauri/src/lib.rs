@@ -14,7 +14,7 @@ use data::osmell::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
@@ -245,29 +245,63 @@ fn connect_serial(
     let app_handle = app.clone();
 
     thread::spawn(move || {
-        let mut reader = BufReader::new(port_handle);
+        let mut reader = port_handle;
         let protocol = OsmProtocol::new(MAX_CHANNELS);
         let mut validator = SampleValidator::new();
         let mut bootloader_newlines = 0usize;
-        let mut buf: Vec<u8> = Vec::new();
+        let mut buffer: Vec<u8> = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 512];
 
         loop {
             if !*connected_flag.lock().unwrap() {
                 break;
             }
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
+            match reader.read(&mut chunk) {
+                Ok(0) => break, // EOF — port is gone.
+                Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                Err(e) => {
+                    // A read timeout is NOT a disconnect — it just means the device
+                    // paused for a moment (Python's reader treats it the same way:
+                    // `if not raw: time.sleep(0.01); continue`). Only break on a real
+                    // I/O error (device unplugged, port closed).
+                    match e.kind() {
+                        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => continue,
+                        _ => break,
+                    }
+                }
             }
-            // Python counts newlines since connect; <5 => still bootloader output.
-            bootloader_newlines += buf.iter().filter(|&&b| b == b'\n').count();
-            if bootloader_newlines < 5 {
-                let _ = app_handle.emit("bootloader-detected", String::new());
+
+            // Drain every complete newline-terminated line; keep the trailing
+            // partial line in `buffer` so a line split across reads is never lost.
+            let mut handled = 0usize;
+            while let Some(rel) = buffer[handled..].iter().position(|&b| b == b'\n') {
+                let end = handled + rel + 1;
+                // Python counts newlines since connect; <5 => still bootloader output.
+                bootloader_newlines += buffer[handled..end]
+                    .iter()
+                    .filter(|&&b| b == b'\n')
+                    .count();
+                if bootloader_newlines < 5 {
+                    let _ = app_handle.emit("bootloader-detected", String::new());
+                }
+                let line = String::from_utf8_lossy(&buffer[handled..end]);
+                handle_reader_line(
+                    &line,
+                    &protocol,
+                    MAX_CHANNELS,
+                    &mut validator,
+                    &app_handle,
+                    &last_channels,
+                );
+                handled = end;
             }
-            let line = String::from_utf8_lossy(&buf);
-            handle_reader_line(&line, &protocol, MAX_CHANNELS, &mut validator, &app_handle, &last_channels);
+            if handled > 0 {
+                buffer.drain(..handled);
+            } else if buffer.len() > 8192 {
+                // Guard against unbounded growth from a binary/garble stream with
+                // no newlines (e.g. a magstripe-style bootloader dump).
+                buffer.drain(..4096);
+            }
         }
 
         *connected_flag.lock().unwrap() = false;
@@ -1108,22 +1142,46 @@ fn connect_wifi(
     let app_handle = app.clone();
 
     thread::spawn(move || {
-        let mut reader = BufReader::new(peer);
+        let mut reader = peer;
         let protocol = OsmProtocol::new(MAX_CHANNELS);
         let mut validator = SampleValidator::new();
-        let mut buf: Vec<u8> = Vec::new();
+        let mut buffer: Vec<u8> = Vec::with_capacity(1024);
+        let mut chunk = [0u8; 512];
         loop {
             if !*connected_flag.lock().unwrap() {
                 break;
             }
-            buf.clear();
-            match reader.read_until(b'\n', &mut buf) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
+            match reader.read(&mut chunk) {
+                Ok(0) => break, // EOF — stream closed.
+                Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                Err(e) => {
+                    // Socket read timeouts/backpressure (WouldBlock) are normal
+                    // pauses, NOT disconnects. Only break on real I/O errors.
+                    if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) {
+                        continue;
+                    }
+                    break;
+                }
             }
-            let line = String::from_utf8_lossy(&buf);
-            handle_reader_line(&line, &protocol, MAX_CHANNELS, &mut validator, &app_handle, &last_channels);
+            let mut handled = 0usize;
+            while let Some(rel) = buffer[handled..].iter().position(|&b| b == b'\n') {
+                let end = handled + rel + 1;
+                let line = String::from_utf8_lossy(&buffer[handled..end]);
+                handle_reader_line(
+                    &line,
+                    &protocol,
+                    MAX_CHANNELS,
+                    &mut validator,
+                    &app_handle,
+                    &last_channels,
+                );
+                handled = end;
+            }
+            if handled > 0 {
+                buffer.drain(..handled);
+            } else if buffer.len() > 8192 {
+                buffer.drain(..4096);
+            }
         }
         *connected_flag.lock().unwrap() = false;
         let _ = app_handle.emit("wifi-disconnected", ());
@@ -1532,25 +1590,125 @@ fn import_recordings(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
         if exists {
             continue;
         }
-        let record = SessionRecord {
-            file_id: f.file_id.clone(),
-            substance: f.substance.clone(),
-            label: "Imported".to_string(),
-            csv_path: f.path.clone(),
-            timestamp: f.mtime,
-            duration_sec: f.duration_sec,
-            sensor_count: f.sensor_count,
-            preset_name: String::new(),
-            notes: String::new(),
-            opensmell_result: None,
-            quality_report: None,
-            quality: SessionIndex::provision_quality(f.duration_sec, f.rows),
-        };
+        let record = build_record_from_file(&f);
         index.upsert(record.clone());
         imported.push(record);
     }
     let _ = index.save(&dir);
     Ok(imported)
+}
+
+/// Build a `SessionRecord` (unanalyzed) from a scanned `RecordingFile`.
+fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
+    SessionRecord {
+        file_id: f.file_id.clone(),
+        substance: f.substance.clone(),
+        label: "Imported".to_string(),
+        csv_path: f.path.clone(),
+        timestamp: f.mtime,
+        duration_sec: f.duration_sec,
+        sensor_count: f.sensor_count,
+        preset_name: String::new(),
+        notes: String::new(),
+        opensmell_result: None,
+        quality_report: None,
+        quality: SessionIndex::provision_quality(f.duration_sec, f.rows),
+    }
+}
+
+/// Import user-chosen files/folders from anywhere (not just the recordings dir).
+/// Accepts absolute paths to `.csv`/`.osmell` files, or directories whose tree
+/// is scanned for them. Deduplicates against the existing index.
+#[tauri::command]
+fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<SessionRecord>, String> {
+    let mut files: Vec<RecordingFile> = Vec::new();
+    for p in paths {
+        let path = std::path::PathBuf::from(&p);
+        let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {}", p, e))?;
+        if meta.is_dir() {
+            collect_recordings_in_tree(&path, &mut files);
+        } else if matches_file_ext(&path) {
+            if let Some(rf) = recording_from_path(&path) {
+                files.push(rf);
+            }
+        }
+    }
+    // Keep newest-first, dedupe by absolute path.
+    files.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap());
+
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let mut imported = Vec::new();
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let mut seen: std::collections::HashSet<String> = index
+        .records
+        .iter()
+        .map(|r| r.csv_path.clone())
+        .collect();
+    for f in files {
+        if seen.contains(&f.path) {
+            continue;
+        }
+        let record = build_record_from_file(&f);
+        seen.insert(record.csv_path.clone());
+        index.upsert(record.clone());
+        imported.push(record);
+    }
+    let _ = index.save(&dir);
+    Ok(imported)
+}
+
+fn matches_file_ext(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("csv") || e.eq_ignore_ascii_case("osmell"))
+        .unwrap_or(false)
+}
+
+/// Read a single file into a `RecordingFile` (generalizes `scan_recordings`).
+fn recording_from_path(path: &std::path::Path) -> Option<RecordingFile> {
+    let meta = std::fs::metadata(path).ok()?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let (rows, sensor_count, duration_sec) = parse_csv_summary(path);
+    Some(RecordingFile {
+        path: path.to_string_lossy().to_string(),
+        name: name.clone(),
+        substance: substance_from_filename(&name),
+        duration_sec,
+        sensor_count,
+        rows,
+        file_id: file_id_from_filename(&name),
+        mtime: meta
+            .modified()
+            .ok()
+            .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0),
+    })
+}
+
+/// Recursively scan a directory tree for recording files.
+fn collect_recordings_in_tree(dir: &std::path::Path, out: &mut Vec<RecordingFile>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if meta.is_dir() {
+            collect_recordings_in_tree(&path, out);
+        } else if matches_file_ext(&path) {
+            if let Some(rf) = recording_from_path(&path) {
+                out.push(rf);
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1564,6 +1722,59 @@ fn remove_session(state: State<AppState>, file_id: String) -> Result<(), String>
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
     index.remove_record_and_file(&dir, &file_id);
+    let _ = index.save(&dir);
+    Ok(())
+}
+
+/// Rename a recorded session from the library: updates the substance/label in
+/// the index AND renames the on-disk file (keeping its `YYYYMMDD_HHMMSS_`
+/// timestamp prefix) so the library always matches what is stored.
+#[tauri::command]
+fn rename_session(state: State<AppState>, file_id: String, new_name: String) -> Result<(), String> {
+    let new_name = new_name.trim().to_string();
+    if new_name.is_empty() {
+        return Err("Enter a name before renaming.".to_string());
+    }
+    if new_name.contains('/') || new_name.contains('\\') || new_name.contains(':') {
+        return Err("Keep the name simple — no / \\ or : characters.".to_string());
+    }
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let Some(record) = index.records.iter_mut().find(|r| r.file_id == file_id) else {
+        return Err("Session not found in the library.".to_string());
+    };
+
+    // Preserve the canonical timestamp prefix; fall back to the original stem.
+    let old_path = std::path::PathBuf::from(&record.csv_path);
+    let old_stem = old_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let ext = old_path
+        .extension()
+        .map(|e| e.to_string_lossy().to_string())
+        .unwrap_or_else(|| "csv".to_string());
+    let mut parts = old_stem.splitn(3, '_');
+    let (date, time, rest) = (
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next(),
+    );
+    let slug = new_name.replace(' ', "_");
+    let new_stem = if !date.is_empty() && !time.is_empty() && rest.is_some() {
+        format!("{}_{}_{}", date, time, slug)
+    } else {
+        format!("{}_{}", old_stem, slug)
+    };
+    let new_path = old_path.with_file_name(format!("{}.{}", new_stem, ext));
+
+    if new_path != old_path {
+        std::fs::rename(&old_path, &new_path)
+            .map_err(|e| format!("Rename failed: {} (file may be open elsewhere).", e))?;
+    }
+    record.label = new_name.clone();
+    record.substance = new_name.clone();
+    record.csv_path = new_path.to_string_lossy().to_string();
     let _ = index.save(&dir);
     Ok(())
 }
@@ -2373,6 +2584,7 @@ pub fn run() {
     let state = AppState::default();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             list_serial_ports,
@@ -2411,8 +2623,10 @@ pub fn run() {
             get_recordings_dir,
             list_recordings,
             import_recordings,
+            import_paths,
             get_session_index,
             remove_session,
+            rename_session,
             analyze_recording,
             export_session_copy,
             export_session_osmell,

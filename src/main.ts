@@ -3,13 +3,33 @@ import { listen } from '@tauri-apps/api/event';
 
 // === Constants ===
 const MAX_TRACE = 800;
+const MAX_HISTORY = 20000; // long rolling history for scrub / rewind (beyond the 800-sample view)
+const LIVE_WINDOW_DEFAULT = 800; // default trailing-sample window; reset-zoom target
 // Cool, distinguishable trace palette (cyan→blue→indigo→violet) that stays
-// readable on the warm paper canvas without going rainbow.
-const CH_COLORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
+// readable on the warm paper canvas without going rainbow. The first 8 entries
+// are the hand-tuned anchor hues; anything beyond is generated on the fly so
+// every channel (up to 64) gets its own distinct color.
+const PALETTE_ANCHORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
+
+// Golden-angle hue stepper keeps generated colors maximally separated so
+// high channel counts never land on visually identical traces.
+const GOLDEN_ANGLE = 137.50776405003785;
+function channelColor(i: number): string {
+  if (i < PALETTE_ANCHORS.length) return PALETTE_ANCHORS[i];
+  // Cool range ~ 160° (cyan) → 280° (violet); walk it with the golden angle.
+  const n = i - PALETTE_ANCHORS.length;
+  const hue = (160 + (n * GOLDEN_ANGLE) % 120) % 360;
+  return `hsl(${hue.toFixed(1)} 62% 42%)`;
+}
+// Legacy alias: callers keep working but color-per-channel is now unbounded.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const CH_COLORS = PALETTE_ANCHORS;
+const chColor = (i: number) => channelColor(i);
 const PRESETS: Record<string, { name: string; sensors: string[] }> = {
   '3-sensor-food': { name: '3-Sensor Food', sensors: ['MQ-135', 'MQ-3', 'MQ-7'] },
   '4-sensor-safety': { name: '4-Sensor Safety', sensors: ['MQ-7', 'MQ-8', 'MQ-135', 'MQ-3'] },
   '6-sensor-full': { name: '6-Sensor Full', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8'] },
+  '8-sensor-max': { name: '8-Sensor Max', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8', 'MQ-2', 'MQ-9'] },
 };
 
 // Human-readable descriptors for the sensor-to-channel mapping table.
@@ -35,16 +55,39 @@ let channelCount = 6;
 let sessionStart: number | null = null;
 let sampleCount = 0;
 let lastSampleTime = 0;
+let lastDataAt = 0; // wall-clock of the last successfully-ingested reading (stall watchdog)
+let bootloaderHinted = false; // device answered in bootloader during the current link session
+let bootFlashShown = false;   // the Flash modal was already auto-offered during this bootloader stall
+let streamWidth = 0;          // how many channels the device actually streams (vs. the rig picker)
 let activePreset = '6-sensor-full';
 let chNames: string[] = PRESETS['6-sensor-full'].sensors;
 let traceData: number[][] = chNames.map(() => []);
-let sessionLabels: { ts: number; anomaly: boolean; note: string }[] = [];
-let sessions: SessionRecord[] = [];
+// History ring: a longer rolling buffer (independent of the 800-sample display
+// window) so the user can rewind / scrub / fast-forward through recent history.
+let historyData: number[][] = chNames.map(() => []);
+let liveScrollSeek = 0;      // samples back from the newest sample the view is anchored at (0 = live)
+let isLiveScrubbing = false; // a scrub is dragging / or user rewound: show frozen history window
+// Trading-view style hover crosshair + geometry captured each draw for mapping
+// cursor -> sample / value, plus interactive legend hover-highlight.
+let cursorPX = -1, cursorPY = -1;
+let hoverSeries = -1; // legend chip hovered: highlight that channel's trace
+let lastPlotGeo: { wlen: number; gMin: number; gMax: number; slices: number[][] } | null = null;
+
+// Live transport controls (pause / clear / time-window zoom). Pausing freezes
+// the visible plot on a snapshot; ingestion keeps a live copy, and every
+// frame we draw either the frozen view or the current buffer.
+let livePaused = false;
+let frozenTrace: number[][] = [];
+let liveWindowSamples = 800; // trailing samples drawn on the x-axis
+let liveRateHz = 20;         // updated from measured sample timing, falls back to 20
+let sessionLabels: { ts: number; anomaly: boolean; note: string }[] = [];let sessions: SessionRecord[] = [];
 let selectedSession: number | null = null;
 let compareFiles: string[] = [];
 const compareSeriesCache = new Map<string, SessionSeries | null>();
 let compareLoaded: (SessionSeries | null)[] = [];
-let compareChannel = '';
+let activeCompareChannels: string[] = [];
+let compareMode: 'overlay' | 'delta' | 'heatmap' = 'overlay';
+let compareRefIdx = 0;
 let fleetDevices: FleetDevice[] = [];
 let bleDevices: { name: string; address: string }[] = [];
 let oledPage = 0;
@@ -176,7 +219,9 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.classList.add('active');
     const tab = (btn as HTMLElement).dataset.tab!;
     document.getElementById(`panel-${tab}`)?.classList.add('active');
-    if (tab === 'compare') {
+    if (tab === 'dashboard') {
+      requestAnimationFrame(() => resizeTraces());
+    } else if (tab === 'compare') {
       requestAnimationFrame(() => updateCompare());
     }
   });
@@ -198,11 +243,16 @@ const tracesCtx = tracesCanvas.getContext('2d')!;
 
 function resizeTraces() {
   const rect = tracesCanvas.parentElement!.getBoundingClientRect();
-  tracesCanvas.width = rect.width;
-  tracesCanvas.height = rect.height;
+  // The dashboard tab may be hidden (display:none) when resize fires — a 0-size
+  // canvas would then stay blank forever. Only adopt real sizes; the tab switch
+  // handler re-runs resizeTraces when the dashboard becomes visible again.
+  if (rect.width < 2 || rect.height < 2) return;
+  tracesCanvas.width = Math.max(2, Math.floor(rect.width));
+  tracesCanvas.height = Math.max(2, Math.floor(rect.height));
 }
 resizeTraces();
 window.addEventListener('resize', resizeTraces);
+new ResizeObserver(resizeTraces).observe(tracesCanvas.parentElement!);
 
 function drawTraces() {
   const w = tracesCanvas.width, h = tracesCanvas.height;
@@ -212,76 +262,219 @@ function drawTraces() {
   tracesCtx.fillStyle = '#f6f1e7';
   tracesCtx.fillRect(0, 0, w, h);
 
-  // Full technical grid: 5 horizontal value lines x 10 vertical time lines.
-  tracesCtx.fillStyle = '#8b8574';
-  tracesCtx.font = '9px monospace';
-  tracesCtx.textAlign = 'right';
-  tracesCtx.textBaseline = 'middle';
-  tracesCtx.strokeStyle = '#ece4d4';
-  tracesCtx.lineWidth = 1;
-  for (let i = 0; i <= 4; i++) {
-    const y = gutterL > 0 ? (ph / 4) * i : 0;
-    const yy = y + (h - ph); // y sits at top already since gutter is bottom-only
-    tracesCtx.beginPath();
-    tracesCtx.moveTo(gutterL, y);
-    tracesCtx.lineTo(pw, y);
-    tracesCtx.stroke();
-  }
-
-  // Horizontal value labels (left gutter)
-  let gMin = Infinity, gMax = -Infinity;
-  for (const ch of traceData) {
-    for (const v of ch) {
-      if (v < gMin) gMin = v;
-      if (v > gMax) gMax = v;
+  // Source: frozen snapshot while paused, else the live buffer.
+  const source = (livePaused && frozenTrace.length) ? frozenTrace : traceData;
+  const liveSrc = (livePaused && frozenTrace.length) ? frozenTrace : historyData;
+  const wlen = Math.max(2, liveWindowSamples);
+  // Visible window per channel. When scrubbing (rewound / seeking), anchor the
+  // window `liveScrollSeek` samples back from the newest sample instead of the
+  // live trailing edge; otherwise show the newest data.
+  const drawn = liveSrc[0] ? liveSrc : source;
+  const slices: number[][] = drawn.map((chArr) => {
+    const src = chArr.length ? chArr : [];
+    if (src.length === 0) return [];
+    if (isLiveScrubbing) {
+      // Seek offset is samples back from the newest sample (clamped to history).
+      const end = Math.max(0, src.length - liveScrollSeek);
+      const start = Math.max(0, end - wlen);
+      return src.slice(start, end);
     }
+    return src.length <= wlen ? src.slice() : src.slice(src.length - wlen);
+  });
+
+  // Trading-view style leveled grid: choose a "nice" step for the value levels
+  // (1/2/5×10^k) so the labels are clean, then render a strong major level every
+  // step with a faint mid-level between. Time axis gets major 1s-ish + minor ticks.
+  let gMin = Infinity, gMax = -Infinity;
+  for (const slice of slices) for (const v of slice) {
+    if (v < gMin) gMin = v;
+    if (v > gMax) gMax = v;
   }
   if (gMin === Infinity) gMin = 0;
   const rawRange = gMax - gMin || 1;
   gMin -= rawRange * 0.1;
   gMax += rawRange * 0.1;
+
+  // Nice step for vertical levels (aim for ~8 levels).
+  const targetLevels = 8;
+  const rough = (gMax - gMin) / targetLevels;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough || 1)));
+  const normMag = rough / mag;
+  const step = mag * (normMag < 1.5 ? 1 : normMag < 3.5 ? 2 : normMag < 7.5 ? 5 : 10);
+  const first = Math.ceil(gMin / step) * step;
+  const levels: number[] = [];
+  for (let v = first; v <= gMax; v += step) levels.push(v);
+  if (levels.length < 2) { levels.length = 0; levels.push(gMin, gMax); }
+
   const span = gMax - gMin || 1;
-  tracesCtx.fillStyle = '#9a9484';
-  for (let i = 0; i <= 4; i++) {
-    const v = gMax - (span / 4) * i;
-    const y = (ph / 4) * i;
-    const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0);
-    tracesCtx.fillText(label, gutterL - 6, y);
+  const geomY = (v: number) => ph - (ph * ((v - gMin) / span));
+
+  // Minor mid-levels (half-step) drawn faintly, majors drawn stronger.
+  tracesCtx.font = '9px monospace';
+  tracesCtx.textAlign = 'right';
+  tracesCtx.textBaseline = 'middle';
+  const majorIdx = Math.max(1, Math.round(levels.length / 6));
+  for (let li = 0; li < levels.length; li++) {
+    const v = levels[li];
+    const y = geomY(v);
+    const minor = li % 2 === 1;
+    tracesCtx.strokeStyle = minor ? '#efe7d6' : '#e2d8c2';
+    tracesCtx.lineWidth = minor ? 0.6 : 1;
+    tracesCtx.beginPath();
+    tracesCtx.moveTo(gutterL, y);
+    tracesCtx.lineTo(pw, y);
+    tracesCtx.stroke();
+    if (!minor) {
+      const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0);
+      tracesCtx.fillStyle = '#9a9484';
+      tracesCtx.fillText(label, gutterL - 6, y);
+    }
   }
 
-  // Vertical time gridlines with tick labels at the bottom.
+  // Vertical time grid: minor ticks every ~1s, major (labeled) every ceil(4s).
+  const totalSecs = Math.max(0.1, wlen / liveRateHz);
+  const minorSpacingSecs = totalSecs / 24;
+  const minorMs = Math.max(1, Math.round(minorSpacingSecs * liveRateHz));
+  const majorSecs = Math.max(1, Math.ceil(totalSecs / 6));
+  const majorMs = Math.round(majorSecs * liveRateHz);
   tracesCtx.textAlign = 'center';
   tracesCtx.textBaseline = 'top';
-  const nTicks = 8;
-  for (let i = 0; i <= nTicks; i++) {
-    const x = gutterL + (pw / nTicks) * i;
-    tracesCtx.strokeStyle = '#ece4d4';
+  // Draw minor ticks; detect majors by sample index spacing.
+  const nMinor = Math.max(2, Math.ceil(wlen / minorMs));
+  for (let i = 0; i <= nMinor; i++) {
+    const s = Math.round(i * (wlen / nMinor));
+    const x = gutterL + (s / (wlen - 1)) * pw;
+    const major = Math.round(s / majorMs) * majorMs === s;
+    tracesCtx.strokeStyle = major ? '#e0d6bf' : '#efeadb';
+    tracesCtx.lineWidth = 1;
     tracesCtx.beginPath();
     tracesCtx.moveTo(x, 0);
     tracesCtx.lineTo(x, ph);
     tracesCtx.stroke();
-    // Bottom axis label: time offset in seconds walking backward from "now".
-    const secs = Math.round(((MAX_TRACE - 1 - ((x - gutterL) / (pw / nTicks)) * nTicks) / 20));
-    const label = `${secs}s`;
-    tracesCtx.fillStyle = '#9a9484';
-    tracesCtx.fillText(label, x, ph + 4);
+    if (major) {
+      // secs ago relative to the right edge of the visible window.
+      const secs = Math.round((wlen - s) / liveRateHz);
+      tracesCtx.fillStyle = '#9a9484';
+      tracesCtx.fillText(`${secs}s`, x, ph + 4);
+    }
   }
   tracesCtx.textAlign = 'left';
   tracesCtx.textBaseline = 'alphabetic';
 
-  for (let ch = 0; ch < traceData.length; ch++) {
-    const data = traceData[ch];
-    if (data.length < 2) continue;
-    tracesCtx.strokeStyle = CH_COLORS[ch % CH_COLORS.length];
-    tracesCtx.lineWidth = 1.4;
+  // Draw each channel's visible slice (highlight the hovered legend series).
+  for (let ch = 0; ch < slices.length; ch++) {
+    const slice = slices[ch];
+    if (slice.length < 2) continue;
+    const hidden = hiddenChannels.has(ch);
+    const active = !hidden && (hoverSeries === -1 || hoverSeries === ch);
+    tracesCtx.strokeStyle = channelColor(ch);
+    tracesCtx.lineWidth = active ? (hoverSeries === ch ? 2.2 : 1.4) : 0.6;
+    tracesCtx.globalAlpha = hidden ? 0.08 : (active ? 1 : 0.25);
     tracesCtx.beginPath();
-    for (let i = 0; i < data.length; i++) {
-      const x = gutterL + (i / (MAX_TRACE - 1)) * pw;
-      const y = (ph - (ph * ((data[i] - gMin) / span)));
+    for (let i = 0; i < slice.length; i++) {
+      const x = gutterL + (i / (wlen - 1)) * pw;
+      const y = (ph - (ph * ((slice[i] - gMin) / span)));
       i === 0 ? tracesCtx.moveTo(x, y) : tracesCtx.lineTo(x, y);
     }
     tracesCtx.stroke();
+    tracesCtx.globalAlpha = 1;
   }
+
+  // Remember the visible geometry for crosshair mapping.
+  lastPlotGeo = { wlen, gMin, gMax, slices };
+
+  // Status overlay so it's obvious the plotted window is frozen / rewound.
+  const statusLabel = livePaused
+    ? '⏸ PAUSED — capturing behind the view'
+    : isLiveScrubbing
+      ? `⏪ REWOUND — at −${Math.round(liveScrollSeek / liveRateHz)}s`
+      : null;
+  if (statusLabel) {
+    tracesCtx.fillStyle = 'rgba(217,88,16,0.08)';
+    tracesCtx.fillRect(0, 0, w, ph);
+    tracesCtx.fillStyle = '#d95810';
+    tracesCtx.font = '600 10px monospace';
+    tracesCtx.textAlign = 'left';
+    tracesCtx.textBaseline = 'top';
+    tracesCtx.fillText(statusLabel, gutterL + 6, 6);
+    tracesCtx.textAlign = 'left';
+    tracesCtx.textBaseline = 'alphabetic';
+  }
+
+  // Trading-view crosshair: read out the exact sample + values under the cursor.
+  drawCrosshair(gutterL, pw, ph, wlen);
+
+  // Box-zoom selection rectangle (shift+drag).
+  if (box && dragStart) {
+    const bx = Math.min(box.x0, box.x1), bx2 = Math.max(box.x0, box.x1);
+    const by = Math.min(box.y0, box.y1), by2 = Math.max(box.y0, box.y1);
+    tracesCtx.save();
+    tracesCtx.strokeStyle = '#0891b2';
+    tracesCtx.lineWidth = 1;
+    tracesCtx.setLineDash([4, 3]);
+    tracesCtx.strokeRect(bx, by, bx2 - bx, by2 - by);
+    tracesCtx.fillStyle = 'rgba(8,145,178,0.08)';
+    tracesCtx.fillRect(bx, by, bx2 - bx, by2 - by);
+    tracesCtx.restore();
+  }
+}
+
+function drawCrosshair(gutterL: number, pw: number, ph: number, wlen: number) {
+  if (!lastPlotGeo || cursorPX < 0 || cursorPY < 0) return;
+  const { gMin, gMax, slices } = lastPlotGeo;
+  const inPlot = cursorPX >= gutterL && cursorPX <= gutterL + pw && cursorPY >= 0 && cursorPY <= ph;
+  if (!inPlot) { drawCrosshairReadout(null); return; }
+
+  const frac = (cursorPX - gutterL) / (pw || 1);
+  const si = Math.round(frac * (wlen - 1));
+  const idx = Math.max(0, Math.min(wlen - 1, si));
+  const x = gutterL + idx * pw / ((wlen - 1) || 1);
+
+  tracesCtx.save();
+  // Vertical (time) crosshair.
+  tracesCtx.strokeStyle = 'rgba(8,145,178,0.5)';
+  tracesCtx.lineWidth = 1;
+  tracesCtx.setLineDash([3, 3]);
+  tracesCtx.beginPath(); tracesCtx.moveTo(x, -6); tracesCtx.lineTo(x, ph); tracesCtx.stroke();
+  // Horizontal (value) crosshair.
+  tracesCtx.strokeStyle = 'rgba(8,145,178,0.35)';
+  tracesCtx.beginPath(); tracesCtx.moveTo(gutterL, cursorPY); tracesCtx.lineTo(gutterL + pw, cursorPY); tracesCtx.stroke();
+  tracesCtx.setLineDash([]);
+
+  // Time readout box pinned above the vertical line.
+  const secs = Math.round(idx / liveRateHz);
+  const tboxTxt = '-' + secs + 's';
+  tracesCtx.font = '500 9px monospace';
+  const tw = tracesCtx.measureText(tboxTxt).width;
+  const tbx0 = Math.max(gutterL, Math.min(gutterL + pw - tw - 6, x - tw / 2 - 3));
+  tracesCtx.fillStyle = '#0891b2';
+  tracesCtx.fillRect(tbx0, 2, tw + 6, 12);
+  tracesCtx.fillStyle = '#f6f1e7';
+  tracesCtx.textAlign = 'left';
+  tracesCtx.textBaseline = 'middle';
+  tracesCtx.fillText(tboxTxt, tbx0 + 3, 8);
+  tracesCtx.restore();
+
+  // Per-channel values at the hovered sample.
+  const vals: { name: string; v: number }[] = [];
+  slices.forEach((slice, c) => {
+    if (idx < slice.length) vals.push({ name: chNames[c] || `CH${c}`, v: slice[idx] });
+  });
+  drawCrosshairReadout(vals);
+}
+
+function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
+  const el = document.getElementById('hoverReadout');
+  if (!el) return;
+  if (!vals || vals.length === 0) { el.innerHTML = ''; el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  const n = vals.slice(0, 12).map(({ name, v }) => {
+    const c = chNames.indexOf(name);
+    const color = channelColor(c >= 0 ? c : 0);
+    const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(2)}k` : v.toFixed(2);
+    return `<span class="xr-item"><i class="xr-dot" style="background:${color}"></i>${name} <b>${label}</b></span>`;
+  }).join('');
+  el.innerHTML = n;
 }
 
 // === Canvas: Fingerprint (radar) ===
@@ -354,7 +547,7 @@ function drawFingerprint(values: number[]) {
     const norm = values[i] !== undefined ? values[i] / maxVal : 0;
     const x = cx + Math.cos(angle) * r * norm;
     const y = cy + Math.sin(angle) * r * norm;
-    fpCtx.fillStyle = CH_COLORS[i % CH_COLORS.length];
+    fpCtx.fillStyle = channelColor(i);
     fpCtx.beginPath();
     fpCtx.arc(x, y, 3, 0, Math.PI * 2);
     fpCtx.fill();
@@ -408,7 +601,7 @@ function drawSessionFingerprint(values: number[]) {
   for (let i = 0; i < n; i++) {
     const a = (i / n) * Math.PI * 2 - Math.PI / 2;
     const norm = values[i] !== undefined ? values[i] / maxVal : 0;
-    sfpCtx.fillStyle = CH_COLORS[i % CH_COLORS.length];
+    sfpCtx.fillStyle = channelColor(i);
     sfpCtx.beginPath(); sfpCtx.arc(cx + Math.cos(a) * rr * norm, cy + Math.sin(a) * rr * norm, 3, 0, Math.PI * 2); sfpCtx.fill();
     sfpCtx.fillStyle = '#666';
     sfpCtx.fillText(chNames[i] || `CH${i}`, cx + Math.cos(a) * (rr + 10), cy + Math.sin(a) * (rr + 10) + 3);
@@ -416,23 +609,54 @@ function drawSessionFingerprint(values: number[]) {
 }
 
 // === Trace Legend ===
+// Toggleable, hover-to-highlight channels (trading-view style). Hovering a chip
+// dims other channels so you can isolate a sensor; clicking toggles it on/off.
+let hiddenChannels = new Set<number>();
 function buildLegend() {
   const el = document.getElementById('traceLegend')!;
   el.innerHTML = chNames.map((name, i) =>
-    `<span><span class="swatch" style="background:${CH_COLORS[i % CH_COLORS.length]}"></span>${name}</span>`
+    `<span class="tl-chip" data-ch="${i}" title="Hover to isolate · click the eye to show/hide"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span>${name}</span>`
   ).join('');
+  el.querySelectorAll<HTMLElement>('.tl-chip').forEach((chip) => {
+    chip.addEventListener('mouseenter', () => { hoverSeries = parseInt(chip.dataset.ch || '-1', 10); });
+    chip.addEventListener('mouseleave', () => { hoverSeries = -1; });
+    chip.addEventListener('click', (e) => {
+      const c = parseInt(chip.dataset.ch || '-1', 10);
+      if (c < 0) return;
+      if (hiddenChannels.has(c)) hiddenChannels.delete(c); else hiddenChannels.add(c);
+      syncLegendState(chip, c);
+    });
+  });
+}
+function syncLegendState(chip: HTMLElement, c: number) {
+  chip.classList.toggle('tl-off', hiddenChannels.has(c));
+  const eye = chip.querySelector('.tl-eye') as HTMLElement | null;
+  if (eye) eye.textContent = hiddenChannels.has(c) ? '○' : '◉';
 }
 buildLegend();
+
+// Hover crosshair over the trace canvas.
+tracesCanvas?.addEventListener('mousemove', (e) => {
+  const r = tracesCanvas.getBoundingClientRect();
+  cursorPX = e.clientX - r.left;
+  cursorPY = e.clientY - r.top;
+});
+tracesCanvas?.addEventListener('mouseleave', () => { cursorPX = -1; cursorPY = -1; drawCrosshairReadout(null); });
+tracesCanvas?.addEventListener('click', () => { cursorPX = -1; cursorPY = -1; drawCrosshairReadout(null); });
 
 // === Data Ingestion ===
 async function ingestReading(values: number[]) {
   if (values.length === 0) return;
-  if (values.length !== channelCount && connected) {
-    setChannelCount(values.length);
-  }
+  // The rig picker (not the stream shape) decides how many channels are shown.
+  // A 3-sensor rig plugged into firmware that always reports 6 pins stays at
+  // 3 plotted channels — no silent re-size, no mystery extra traces.
+  streamWidth = values.length;
+  if (connected && streamWidth !== channelCount) updateRigNote();
   for (let ch = 0; ch < Math.min(values.length, traceData.length); ch++) {
     traceData[ch].push(values[ch]);
     if (traceData[ch].length > MAX_TRACE) traceData[ch].shift();
+    historyData[ch].push(values[ch]);
+    if (historyData[ch].length > MAX_HISTORY) historyData[ch].shift();
   }
   sampleCount++;
 
@@ -477,9 +701,17 @@ async function ingestReading(values: number[]) {
   const now = Date.now();
   if (lastSampleTime > 0) {
     const rate = 1000 / (now - lastSampleTime);
+    liveRateHz = Math.min(200, Math.max(1, rate));
     document.getElementById('fRate')!.textContent = `${rate.toFixed(1)} Hz`;
   }
   lastSampleTime = now;
+  lastDataAt = now;
+  if (bootloaderHinted) {
+    // Real data is flowing again — clear the bootloader diagnosis.
+    bootloaderHinted = false;
+    const banner = document.getElementById('bootBanner');
+    if (banner) banner.classList.remove('show');
+  }
   document.getElementById('fSamples')!.textContent = sampleCount.toString();
 }
 
@@ -546,8 +778,36 @@ function setPlotLink(on: boolean) {
   const el = document.getElementById('plotLinkState');
   if (!el) return;
   el.textContent = on ? '● LIVE LINK' : '● NO LINK';
+  el.classList.remove('stall');
   el.classList.toggle('on', on);
 }
+
+// Stall watchdog: if we claim to be connected but no reading has arrived for a
+// few seconds, flag it — a plugged device that isn't streaming now visibly
+// shows as "NO DATA" instead of silently looking live.
+function updatePlotLinkState() {
+  const el = document.getElementById('plotLinkState');
+  if (!el) return;
+  if (!connected) {
+    el.textContent = '● NO LINK';
+    el.classList.remove('stall', 'on');
+    return;
+  }
+  const stalled = Date.now() - lastDataAt > 3000;
+  el.textContent = stalled ? '● NO DATA' : '● LIVE LINK';
+  el.classList.toggle('stall', stalled);
+  el.classList.toggle('on', !stalled);
+  // Only surface the bootloader diagnosis once we've actually lost data — a
+  // working device also emits a bootloader hint during its first lines, so on
+  // a normal connect this banner must never flash. The modal is offered once.
+  const banner = document.getElementById('bootBanner');
+  if (banner) banner.classList.toggle('show', stalled && bootloaderHinted);
+  if (stalled && bootloaderHinted && !bootFlashShown) {
+    bootFlashShown = true;
+    openFlashModal();
+  }
+}
+setInterval(updatePlotLinkState, 1000);
 
 async function toggleConnection() {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
@@ -576,6 +836,10 @@ async function toggleConnection() {
     return;
   }
 
+  streamWidth = 0;
+  bootFlashShown = false;
+  updateRigNote();
+
   if (mode === 'wifi') {
     const addr = (document.getElementById('wifiAddr') as HTMLInputElement).value.trim();
     if (!addr) {
@@ -599,6 +863,9 @@ async function toggleConnection() {
       setPlotLink(true);
       document.getElementById('fDevice')!.textContent = addr;
       sampleCount = 0;
+      lastDataAt = Date.now();
+      bootloaderHinted = false;
+      document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('WiFi connected', true);
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
@@ -621,6 +888,9 @@ async function toggleConnection() {
       setPlotLink(true);
       document.getElementById('fDevice')!.textContent = addr;
       sampleCount = 0;
+      lastDataAt = Date.now();
+      bootloaderHinted = false;
+      document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('BLE connected', true);
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
@@ -639,6 +909,9 @@ async function toggleConnection() {
       setPlotLink(true);
       document.getElementById('fDevice')!.textContent = port;
       sampleCount = 0;
+      lastDataAt = Date.now();
+      bootloaderHinted = false;
+      document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('Serial connected', true);
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
@@ -654,18 +927,29 @@ async function updateSensorHealth() {
     const health = await invoke<Array<{ channel: number; health_score: number; status: string; mean: number }>>('get_sensor_health');
     const el = document.getElementById('sensorHealthList')!;
     if (health.length === 0) {
-      el.innerHTML = '<div style="font-size:10px;color:var(--text-3)">No data</div>';
+      el.innerHTML = '<div style="font-size:10px;color:var(--text-3)">No data yet</div>';
       return;
     }
-    el.innerHTML = health.map((h, i) => {
+    el.innerHTML = '<div class="health-grid">' + health.map((h, i) => {
       const color = h.status === 'OK' ? 'var(--green)' : h.status === 'WARNING' ? 'var(--yellow)' : 'var(--red)';
-      return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
-        <div style="width:6px;height:6px;border-radius:50%;background:${color}"></div>
-        <span style="font-size:10px;flex:1;color:var(--text-2)">${chNames[i] || `CH${i}`}</span>
-        <span style="font-size:10px;color:var(--text-3)">${h.mean.toFixed(1)}</span>
+      return `<div class="health-cell" title="${h.status} · mean ${h.mean.toFixed(1)}">
+        <span class="hd-dot" style="background:${color}"></span>
+        <span class="hd-name">${chNames[i % chNames.length] || `CH${i + 1}`}</span>
+        <span class="hd-mean">${h.mean.toFixed(0)}</span>
       </div>`;
-    }).join('');
+    }).join('') + '</div>';
   } catch {}
+}
+
+// === Quality ===
+// One shared 0-100 quality grader, matching the Rust `opensmell` scorer
+// thresholds (quality.rs): >=90 Excellent, >=75 Good, >=50 Fair, else Poor.
+// The same labels/buckets are used in the Library, Train, and inspector UI so
+// a score always means the same thing no matter where you see it.
+function qualityBadge(q: number): { label: string; cls: string } {
+  const label = q >= 90 ? 'Excellent' : q >= 75 ? 'Good' : q >= 50 ? 'Fair' : 'Poor';
+  const cls = q >= 75 ? 'good' : q >= 50 ? 'ok' : 'bad';
+  return { label, cls };
 }
 
 // === Library ===
@@ -677,19 +961,37 @@ function renderLibrary() {
     return;
   }
   body.innerHTML = sessions.map((s, i) => {
-    const qBadge = s.quality >= 70 ? 'good' : s.quality >= 40 ? 'ok' : 'bad';
+    const analyzed = s.quality_report && typeof s.quality_report.total === 'number';
+    let badge = '';
+    let statusCell: string;
+    if (analyzed) {
+      const q = qualityBadge(s.quality);
+      const prov = s.quality_report ? '' : '<em class="quality-prov" title="Provisional estimate — click Analyze for the full 7-factor report">prov</em>';
+      statusCell = `<span class="quality-badge ${q.cls}">${q.label} ${s.quality}${prov}</span>`;
+    } else {
+      // Unanalyzed: show a neutral "not scored yet" tag instead of a plausible
+      // Excellent score, so unanalyzed data is never mistaken for a great result.
+      statusCell = `<button class="lib-analyze" data-idx="${i}" title="Run the full 7-factor quality analysis">⚡ Not analyzed — analyze</button>`;
+    }
     const ticked = s.file_id ? compareFiles.includes(s.file_id) : false;
     return `<tr class="${i === selectedSession ? 'selected' : ''}" data-idx="${i}">
       <td><input type="checkbox" class="compare-tick" data-idx="${i}" ${ticked ? 'checked' : ''} title="Overlay in Compare"></td>
-      <td>${s.time}</td><td>${s.substance}</td><td>${s.label}</td>
+      <td>${s.time}</td><td class="lib-sub" data-idx="${i}" title="Double-click to rename the recording + its file">${s.substance}</td><td>${s.label}</td>
       <td>${s.format}</td><td>${s.duration}</td><td>${s.sensors}</td>
-      <td><span class="quality-badge ${qBadge}">${s.quality}</span></td>
+      <td>${statusCell}</td>
     </tr>`;
   }).join('');
   document.getElementById('libStatus')!.textContent = `${sessions.length} sessions`;
+  const stamp = document.getElementById('libFilterStamp');
+  if (stamp) stamp.textContent = `${sessions.length} records · ${sessions.filter(s => s.quality_report).length} analyzed`;
   body.querySelectorAll('tr').forEach(tr => {
     tr.addEventListener('click', (ev) => {
       if ((ev.target as HTMLElement).closest('.compare-tick')) return;
+      if ((ev.target as HTMLElement).closest('.lib-analyze')) {
+        const btn = ev.target as HTMLElement;
+        analyzeLibrarySession(parseInt(btn.getAttribute('data-idx') || '-1', 10));
+        return;
+      }
       selectedSession = parseInt(tr.getAttribute('data-idx')!);
       renderLibrary();
       inspectSession(sessions[selectedSession]);
@@ -710,16 +1012,66 @@ function renderLibrary() {
       updateCompare();
     });
   });
+  body.querySelectorAll('.lib-sub').forEach(cell => {
+    cell.addEventListener('dblclick', (ev) => {
+      ev.stopPropagation();
+      beginRenameCell(cell as HTMLElement);
+    });
+  });
+}
+
+// === Rename a session from the library (file + index, keeps timestamp prefix) ===
+async function doRename(idx: number, name: string): Promise<boolean> {
+  const s = sessions[idx];
+  if (!s || !s.file_id) return false;
+  try {
+    await invoke('rename_session', { fileId: s.file_id, newName: name });
+    s.substance = name;
+    s.label = name;
+    return true;
+  } catch (e) {
+    await flashStatus('libStatus', `Rename failed: ${e}`, 'var(--red)');
+    return false;
+  }
+}
+
+function beginRenameCell(td: HTMLElement) {
+  const idx = parseInt(td.getAttribute('data-idx')!, 10);
+  const s = sessions[idx];
+  if (!s) return;
+  const cur = s.substance;
+  td.innerHTML = `<input class="rename-input" value="${cur.replace(/"/g, '&quot;')}" style="width:100%;background:var(--bg-2);border:1px solid var(--green);color:var(--text-1);border-radius:var(--radius-sm);padding:2px 4px;font-size:11px" />`;
+  const input = td.querySelector('input');
+  if (!input) return;
+  input.focus();
+  input.select();
+  let cancel = false;
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); input.blur(); }
+    else if (e.key === 'Escape') { cancel = true; input.blur(); }
+  });
+  input.addEventListener('blur', async () => {
+    const val = input.value.trim();
+    if (!cancel && val && val !== cur) {
+      const ok = await doRename(idx, val);
+      if (ok) await flashStatus('libStatus', `Renamed to "${val}"`, 'var(--green)');
+    }
+    renderLibrary();
+    if (idx === selectedSession) inspectSession(sessions[idx]);
+  });
 }
 
 function inspectSession(s: SessionRecord) {
   const details = `
     <div style="margin-bottom:6px"><strong>${s.substance}</strong></div>
-    <div>Label: ${s.label}</div>
-    <div>Format: ${s.format}</div>
-    <div>Duration: ${s.duration}</div>
-    <div>Sensors: ${s.sensors}</div>
-    <div>Quality: ${s.quality}/100</div>
+    <div class="kv-row">
+      <span class="k">Label</span><span class="v">${s.label || '—'}</span>
+      <span class="k">Format</span><span class="v">${s.format}</span>
+      <span class="k">Duration</span><span class="v">${s.duration}</span>
+      <span class="k">Sensors</span><span class="v">${s.sensors}</span>
+      <span class="k">Quality</span><span class="v">${s.quality}/100</span>
+    </div>
   `;
   document.getElementById('inspectorDetails')!.innerHTML = details;
   if (s.quality_report) {
@@ -797,7 +1149,7 @@ function renderQualityReport(q: QualityReport) {
     </div>`;
 }
 
-// === Compare Panel (Python `viz/compare_panel.py` parity) ===
+// === Compare Panel (Python `viz/compare_panel.py` parity, supersized) ===
 const CHART_COLORS = CH_COLORS;
 const COMPARE_R0_SAMPLES = 15;
 
@@ -826,16 +1178,220 @@ function compareR0(values: number[]): number | null {
   return r0 !== 0 ? r0 : null;
 }
 
+function cmpNorm(s: SessionSeries, ci: number): number[] | null {
+  const r0 = compareR0(s.values[ci]);
+  if (r0 === null || r0 <= 0) return null;
+  return s.values[ci].map(v => (v - r0) / r0);
+}
+
+function meanOf(v: number[]): number {
+  const f = v.filter(Number.isFinite);
+  return f.length ? f.reduce((a, b) => a + b, 0) / f.length : NaN;
+}
+function meanAbs(v: number[]): number {
+  const f = v.filter(Number.isFinite);
+  return f.length ? Math.abs(f.reduce((a, b) => a + b, 0)) / f.length : NaN;
+}
+
+interface CompareMetrics {
+  peak: number;
+  peakDir: 1 | -1;
+  t90: number;
+  auc: number;
+  baseCv: number;
+  recover: number;
+  sampleCount: number;
+}
+
+function compareMetricsFor(s: SessionSeries, name: string): CompareMetrics | null {
+  const ci = s.channels.indexOf(name);
+  if (ci < 0) return null;
+  const norm = cmpNorm(s, ci);
+  if (!norm) return null;
+  const time = s.time.slice(0, norm.length);
+  const finite = norm.filter(Number.isFinite);
+  if (finite.length < 10) return null;
+  const peakPos = finite.reduce((a, v) => Math.max(a, v), -Infinity);
+  const peakNeg = finite.reduce((a, v) => Math.min(a, v), Infinity);
+  const peak = Math.max(Math.abs(peakPos), Math.abs(peakNeg));
+  const peakDir: 1 | -1 = peakPos >= Math.abs(peakNeg) ? 1 : -1;
+  let t90 = NaN;
+  if (peak > 0) {
+    const target = 0.9 * peak;
+    for (let i = 0; i < norm.length; i++) {
+      if (Math.abs(norm[i]) >= target) { t90 = time[i] - time[0]; break; }
+    }
+  }
+  let auc = 0;
+  for (let i = 1; i < norm.length; i++) {
+    const dt = time[i] - time[i - 1];
+    if (!Number.isFinite(dt) || dt <= 0) continue;
+    const a = Math.max(0, norm[i - 1]), b = Math.max(0, norm[i]);
+    auc += 0.5 * (a + b) * dt;
+  }
+  const base = s.values[ci].slice(0, COMPARE_R0_SAMPLES).filter(Number.isFinite);
+  const bm = meanOf(base);
+  const bsd = Math.sqrt(base.reduce((a, v) => a + (v - bm) ** 2, 0) / Math.max(1, base.length));
+  const baseCv = bm !== 0 && bm !== 0 ? (bsd / bm) * 100 : 0;
+  const lastWin = meanAbs(norm.slice(-15));
+  const recover = peak > 0 ? Math.max(0, Math.min(1, 1 - lastWin / peak)) : 1;
+  return { peak, peakDir, t90, auc, baseCv, recover, sampleCount: finite.length };
+}
+
+function pearson(x: number[], y: number[]): number | null {
+  const n = Math.min(x.length, y.length);
+  if (n < 8) return null;
+  let sx = 0, sy = 0;
+  for (let i = 0; i < n; i++) { sx += x[i]; sy += y[i]; }
+  const mx = sx / n, my = sy / n;
+  let num = 0, dx = 0, dy = 0;
+  for (let i = 0; i < n; i++) {
+    const a = x[i] - mx, b = y[i] - my;
+    num += a * b; dx += a * a; dy += b * b;
+  }
+  if (dx === 0 || dy === 0) return null;
+  return num / Math.sqrt(dx * dy);
+}
+
+// Chemoprint similarity: Pearson over the shared overlap of the active channels,
+// each channel normalized to its own R0, channels concatenated.
+function cmpCorrelation(a: SessionSeries, b: SessionSeries): number | null {
+  const X: number[] = [], Y: number[] = [];
+  for (const name of activeCompareChannels) {
+    const ia = a.channels.indexOf(name), ib = b.channels.indexOf(name);
+    if (ia < 0 || ib < 0) continue;
+    const na = cmpNorm(a, ia), nb = cmpNorm(b, ib);
+    if (!na || !nb) continue;
+    const n = Math.min(na.length, nb.length);
+    for (let i = 0; i < n; i++) {
+      const x = na[i], y = nb[i];
+      if (Number.isFinite(x) && Number.isFinite(y)) { X.push(x); Y.push(y); }
+    }
+  }
+  return pearson(X, Y);
+}
+
+function truncateLabel(s: string, max = 16): string {
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
 function renderCompareLabels() {
   const el = document.getElementById('compareLabels')!;
+  const delta = compareMode === 'delta';
   const parts = compareLoaded.map((r, i) => {
     const name = r ? r.label : '(unreadable)';
-    return `<b style="color:${CHART_COLORS[i % CHART_COLORS.length]};">${i + 1}. </b>${name}`;
+    const refTag = delta && i === compareRefIdx ? ' <i style="color:var(--yellow)">(ref)</i>' : '';
+    return `<b style="color:${CHART_COLORS[i % CHART_COLORS.length]};">${i + 1}. </b>${name}${refTag}`;
   }).join(' · ');
-  el.innerHTML = parts;
+  el.innerHTML = parts || '<span style="color:var(--text-3)">Tick sessions in the Library to compare.</span>';
+}
+
+function renderCompareChips() {
+  const el = document.getElementById('compareChs')!;
+  const all: string[] = [];
+  for (const s of compareLoaded) { if (s) for (const c of s.channels) if (!all.includes(c)) all.push(c); }
+  if (all.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = all.map(c =>
+    `<button class="cmp-chip ${activeCompareChannels.includes(c) ? 'on' : 'off'}" data-ch="${c}">${c}</button>`
+  ).join('');
+  el.querySelectorAll<HTMLElement>('.cmp-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const c = btn.dataset.ch!;
+      if (activeCompareChannels.includes(c)) {
+        if (activeCompareChannels.length > 1) activeCompareChannels = activeCompareChannels.filter(x => x !== c);
+      } else {
+        activeCompareChannels.push(c);
+      }
+      renderCompareChips();
+      renderCompareRef();
+      renderCompareMetrics();
+      drawCompare();
+    });
+  });
+}
+
+function renderCompareRef() {
+  const el = document.getElementById('compareRef') as HTMLSelectElement | null;
+  if (!el) return;
+  const items = compareLoaded.filter(Boolean) as SessionSeries[];
+  if (items.length < 2 || compareMode !== 'delta') {
+    el.style.display = 'none';
+    document.getElementById('cmpRefLabel')!.style.display = 'none';
+    return;
+  }
+  el.style.display = '';
+  document.getElementById('cmpRefLabel')!.style.display = '';
+  const prev = items[compareRefIdx]?.label;
+  el.innerHTML = items.map((s, i) => `<option value="${i}" ${s.label === prev ? 'selected' : ''}>${truncateLabel(s.label, 20)}</option>`).join('');
+  compareRefIdx = Math.min(compareRefIdx, items.length - 1);
+  el.value = String(compareRefIdx);
+}
+
+function renderCompareMetrics() {
+  const el = document.getElementById('compareMetrics')!;
+  const stamp = document.getElementById('cmpMetricStamp')!;
+  const items = compareLoaded.filter(Boolean) as SessionSeries[];
+  if (items.length === 0) {
+    el.innerHTML = '<div style="font-size:10px;color:var(--text-3);padding:6px 0">No sessions selected.</div>';
+    stamp.textContent = '—';
+    return;
+  }
+  const perSession = items.map((s, si) => {
+    const m: Record<string, number> = {};
+    for (const name of activeCompareChannels) {
+      const mem = compareMetricsFor(s, name);
+      if (mem) m[name] = 0; // placeholder; real aggregation below
+    }
+    const peaks: number[] = [], t90s: number[] = [], aucs: number[] = [], cvs: number[] = [], recs: number[] = [];
+    for (const name of activeCompareChannels) {
+      const mem = compareMetricsFor(s, name);
+      if (!mem) continue;
+      peaks.push(mem.peak);
+      if (!isNaN(mem.t90)) t90s.push(mem.t90);
+      aucs.push(mem.auc);
+      cvs.push(mem.baseCv);
+      recs.push(mem.recover);
+    }
+    return { si, s, peaks, t90s, aucs, cvs, recs, peak: peaks.length ? Math.max(...peaks) : NaN };
+  }).filter(x => x.peaks.length);
+  if (perSession.length === 0) {
+    el.innerHTML = '<div style="font-size:10px;color:var(--text-3);padding:6px 0">No overlapping channel data.</div>';
+    stamp.textContent = '—';
+    return;
+  }
+  const bestPeak = Math.max(...perSession.map(x => x.peak));
+  const bestAuc = Math.max(...perSession.map(x => x.aucs.reduce((a, b) => a + b, 0)));
+  const bestCv = Math.min(...perSession.map(x => (x.cvs.length ? Math.max(...x.cvs) : Infinity)));
+  const bestRec = Math.max(...perSession.map(x => (x.recs.length ? Math.min(...x.recs) : 0)));
+  const rows = perSession.map(p => {
+    const t90v = p.t90s.length ? Math.max(...p.t90s) : NaN;
+    const auc = p.aucs.reduce((a, b) => a + b, 0);
+    const baseCv = p.cvs.length ? Math.max(...p.cvs) : NaN;
+    const recover = p.recs.length ? Math.min(...p.recs) : 0;
+    return `<tr data-si="${p.si}" ${'class="' + (p.peak === bestPeak ? 'cmp-best' : '') + '"'} 
+      <td title="${p.s.label}">${truncateLabel(p.s.label, 22)}</td>
+      <td>${p.peak.toFixed(3)}</td>
+      <td>${isNaN(t90v) ? '—' : t90v.toFixed(1)}</td>
+      <td>${auc.toFixed(2)}</td>
+      <td class=${isNaN(baseCv) ? '' : baseCv <= 2 ? 'cmp-recover-hi' : baseCv >= 10 ? 'cmp-recover-lo' : ''}>${isNaN(baseCv) ? '—' : baseCv.toFixed(1)}%</td>
+      <td>${Math.round(recover * 100)}%</td>
+    </tr>`;
+  }).join('');
+  el.innerHTML = `<table class="cmp-metrics-table">
+    <thead><tr><th>Session</th><th>Peak ΔR/R0</th><th>T90 s</th><th>AUC</th><th>Base CV</th><th>Recover</th></tr></thead>
+    <tbody>${rows}</tbody></table>`;
+  stamp.textContent = `${perSession.length} sessions · ${activeCompareChannels.length} ch`;
 }
 
 function drawCompare() {
+  const ctx = compareCtx;
+  const canvas = compareCanvas;
+  if (!ctx || !canvas) return;
+  if (compareMode === 'heatmap') { drawCompareHeatmap(); return; }
+  drawComparePanels();
+}
+
+function drawComparePanels() {
   const ctx = compareCtx;
   const canvas = compareCanvas;
   if (!ctx || !canvas) return;
@@ -846,127 +1402,224 @@ function drawCompare() {
   const w = canvas.width, h = canvas.height;
   ctx.clearRect(0, 0, w, h);
 
-  if (!compareChannel) {
+  const showEmpty = (msg: string) => {
     ctx.fillStyle = '#666';
     ctx.font = '12px -apple-system, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(
-      compareFiles.length === 0
-        ? 'No sessions selected. Tick sessions in the Library to overlay them here.'
-        : 'No readable sessions selected.',
-      w / 2, h / 2,
-    );
-    return;
-  }
+    ctx.fillText(msg, w / 2, h / 2);
+  };
+  const delta = compareMode === 'delta';
+  const ref = delta ? (compareLoaded[compareRefIdx] ?? null) : null;
 
-  type Curve = { x: number[]; y: number[] };
-  const curves: Curve[] = [];
-  for (const s of compareLoaded) {
-    if (!s) continue;
-    const ci = s.channels.indexOf(compareChannel);
-    if (ci < 0) continue;
-    const r0 = compareR0(s.values[ci]);
-    if (r0 === null) continue;
-    curves.push({
-      x: s.time.slice(0, s.values[ci].length),
-      y: s.values[ci].map(v => (v - r0) / r0),
+  const lanes: { name: string; curves: { x: number[]; y: number[]; s: number }[] }[] = [];
+  let x0 = Infinity, x1 = -Infinity;
+  for (const name of activeCompareChannels) {
+    const curves: { x: number[]; y: number[]; s: number }[] = [];
+    compareLoaded.forEach((s, si) => {
+      if (!s) return;
+      const ci = s.channels.indexOf(name);
+      if (ci < 0) return;
+      const norm = cmpNorm(s, ci);
+      if (!norm) return;
+      const refCi = ref ? ref.channels.indexOf(name) : -1;
+      const refNorm = ref && refCi >= 0 ? cmpNorm(ref, refCi) : null;
+      let n = norm.length;
+      if (delta && refNorm) n = Math.min(n, refNorm.length);
+      if (n < 2) return;
+      const x = s.time.slice(0, n);
+      let y: number[];
+      if (delta && refNorm) {
+        y = new Array(n);
+        for (let i = 0; i < n; i++) {
+          const dv = norm[i] - refNorm[i];
+          y[i] = Number.isFinite(dv) ? dv : NaN;
+        }
+      } else {
+        y = norm.slice(0, n);
+      }
+      x0 = Math.min(x0, x[0]);
+      x1 = Math.max(x1, x[n - 1]);
+      curves.push({ x, y, s: si });
     });
+    if (curves.length) lanes.push({ name, curves });
   }
-  if (curves.length === 0) {
-    ctx.fillStyle = '#666';
-    ctx.font = '12px -apple-system, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(`Channel "${compareChannel}" not present in selected sessions.`, w / 2, h / 2);
+
+  if (lanes.length === 0) {
+    showEmpty(compareFiles.length === 0
+      ? 'No sessions selected. Tick sessions in the Library to compare them here.'
+      : 'No overlapping channels in the selected sessions.');
     return;
   }
 
-  const pad = { left: 54, right: 16, top: 14, bottom: 32 };
-  const pw = w - pad.left - pad.right;
-  const ph = h - pad.top - pad.bottom;
-  let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
-  for (const c of curves) {
-    for (const v of c.x) { if (v < xMin) xMin = v; if (v > xMax) xMax = v; }
-    for (const v of c.y) { if (v < yMin) yMin = v; if (v > yMax) yMax = v; }
-  }
-  if (xMin === xMax) { xMin -= 0.5; xMax += 0.5; }
-  if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
-  const sx = (v: number) => pad.left + (v - xMin) / (xMax - xMin) * pw;
-  const sy = (v: number) => pad.top + ph - (v - yMin) / (yMax - yMin) * ph;
+  const padL = 66, padR = 12, padT = 6, padB = 26, gap = 8;
+  const rows = lanes.length;
+  const laneH = (h - padT - padB - gap * (rows - 1)) / rows;
+  if (x0 === x1) { x0 -= 0.5; x1 += 0.5; }
+  const sx = (v: number) => padL + (v - x0) / (x1 - x0) * (w - padL - padR);
 
-  ctx.strokeStyle = 'rgba(8,8,12,0.06)';
-  ctx.lineWidth = 1;
-  for (let g = 0; g <= 5; g++) {
-    const gy = pad.top + (ph / 5) * g;
-    ctx.beginPath(); ctx.moveTo(pad.left, gy); ctx.lineTo(w - pad.right, gy); ctx.stroke();
-    const gx = pad.left + (pw / 5) * g;
-    ctx.beginPath(); ctx.moveTo(gx, pad.top); ctx.lineTo(gx, pad.top + ph); ctx.stroke();
-  }
-  ctx.strokeStyle = '#333';
-  ctx.strokeRect(pad.left, pad.top, pw, ph);
+  lanes.forEach((lane, r) => {
+    const top = padT + r * (laneH + gap);
+    const yMin = Math.min(...lane.curves.map(c => c.y.filter(Number.isFinite).reduce((a, v) => Math.min(a, v), Infinity)));
+    const yMax = Math.max(...lane.curves.map(c => c.y.filter(Number.isFinite).reduce((a, v) => Math.max(a, v), -Infinity)));
+    const yLo = Number.isFinite(yMin) ? yMin : -1;
+    const yHi = Number.isFinite(yMax) ? yMax : 1;
+    let yA = yLo, yB = yHi;
+    if (yB - yA < 1e-9) { yA -= 0.5; yB += 0.5; }
+    const sy = (v: number) => top + laneH - (v - yA) / (yB - yA) * laneH;
 
-  ctx.font = '9px -apple-system, sans-serif';
+    // Lane frame + grid
+    ctx.strokeStyle = 'rgba(8,8,12,0.06)';
+    ctx.lineWidth = 1;
+    for (let g = 0; g <= 2; g++) {
+      const gy = top + (laneH / 2) * g;
+      ctx.beginPath(); ctx.moveTo(padL, gy); ctx.lineTo(w - padR, gy); ctx.stroke();
+    }
+    ctx.strokeStyle = '#333';
+    ctx.strokeRect(padL, top, w - padL - padR, laneH);
+    // Channel label
+    ctx.fillStyle = '#9aa0a6';
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(lane.name, padL - 6 - ctx.measureText(lane.name).width, top + laneH / 2);
+    // Y axis labels
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#666';
+    ctx.font = '8px -apple-system, sans-serif';
+    ctx.fillText(yB.toFixed(2), padL - 6, top + 2);
+    ctx.fillText(yA.toFixed(2), padL - 6, top + laneH - 2);
+    // Zero line (overlay: baseline; delta: reference)
+    ctx.strokeStyle = delta ? 'rgba(246,193,119,0.6)' : 'rgba(8,8,12,0.25)';
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    const zy = delta ? sy(0) : top + laneH - sy(0) + top; // delta zero is sy(0)
+    if (delta) {
+      ctx.moveTo(padL, zy); ctx.lineTo(w - padR, zy); ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    lane.curves.forEach((c) => {
+      ctx.strokeStyle = CHART_COLORS[c.s % CHART_COLORS.length];
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      let started = false;
+      for (let k = 0; k < c.x.length; k++) {
+        const X = sx(c.x[k]);
+        const Yv = c.y[k];
+        if (!Number.isFinite(Yv)) { started = false; continue; }
+        const Y = sy(Yv);
+        if (!started) { ctx.moveTo(X, Y); started = true; } else ctx.lineTo(X, Y);
+      }
+      ctx.stroke();
+    });
+  });
+
+  // X axis
   ctx.fillStyle = '#666';
+  ctx.font = '9px -apple-system, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   for (let g = 0; g <= 5; g++) {
-    const val = xMin + (xMax - xMin) * (g / 5);
+    const val = x0 + (x1 - x0) * (g / 5);
     ctx.fillText(val >= 100 || val <= -100 ? val.toFixed(0) : val.toFixed(1),
-      pad.left + (pw / 5) * g, pad.top + ph + 4);
+      sx(val), padT + rows * laneH + gap * (rows - 1) + 4);
   }
+  ctx.fillText(delta ? 'relative time (s) · Δ vs reference' : 'relative time (s)', padL + (w - padL - padR) / 2, h - 10);
+}
+
+function drawCompareHeatmap() {
+  const ctx = compareCtx;
+  const canvas = compareCanvas;
+  if (!ctx || !canvas) return;
+  const wrap = document.getElementById('compareWrap')!;
+  const rect = wrap.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(rect.width - 2));
+  canvas.height = Math.max(1, Math.floor(rect.height - 2));
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.setLineDash([]);
+
+  const items = compareLoaded.filter(Boolean) as SessionSeries[];
+  if (items.length === 0) {
+    ctx.fillStyle = '#666';
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Tick sessions in the Library to see their similarity.', w / 2, h / 2);
+    return;
+  }
+  const n = items.length;
+  const padL = 74, padT = 6, padR = 10;
+  const cell = Math.min((w - padL - padR) / n, (h - padT - 20) / n);
+  const cw = cell * n;
+
+  const heat = (v: number) => {
+    const t = Math.max(-1, Math.min(1, v));
+    if (t >= 0) {
+      const k = t; // 0->gray-green, 1->green
+      return `rgba(${Math.round(70 + 130 * (1 - k))}, ${Math.round(200 - 40 * (1 - k))}, ${Math.round(120 + 90 * (1 - k))}, ${0.35 + 0.6 * k})`;
+    }
+    const k = -t;
+    return `rgba(${Math.round(190 + 60 * (1 - k))}, ${Math.round(90 + 100 * (1 - k))}, ${Math.round(90 + 60 * (1 - k))}, ${0.35 + 0.6 * k})`;
+  };
+
+  ctx.font = '9px -apple-system, sans-serif';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  for (let g = 0; g <= 5; g++) {
-    const val = yMax - (yMax - yMin) * (g / 5);
-    ctx.fillText(val.toFixed(2), pad.left - 6, pad.top + (ph / 5) * g);
+  for (let i = 0; i < n; i++) {
+    ctx.fillStyle = CHART_COLORS[i % CHART_COLORS.length];
+    ctx.fillText(`${i + 1}. ${truncateLabel(items[i].label, 12)}`, padL - 4, padT + i * cell + cell / 2);
   }
-  ctx.textBaseline = 'alphabetic';
-
-  ctx.font = '10px -apple-system, sans-serif';
   ctx.textAlign = 'center';
-  ctx.fillText('relative time (s)', pad.left + pw / 2, h - 3);
-  ctx.save();
-  ctx.translate(12, pad.top + ph / 2);
-  ctx.rotate(-Math.PI / 2);
-  ctx.fillText('(R - R0)/R0', 0, 0);
-  ctx.restore();
+  ctx.textBaseline = 'top';
+  for (let j = 0; j < n; j++) {
+    ctx.fillStyle = CHART_COLORS[j % CHART_COLORS.length];
+    ctx.fillText(`${j + 1}`, padL + j * cell + cell / 2, padT + n * cell + 2);
+  }
 
-  curves.forEach((c, i) => {
-    ctx.strokeStyle = CHART_COLORS[i % CHART_COLORS.length];
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    c.x.forEach((xv, k) => {
-      const X = sx(xv), Y = sy(c.y[k]);
-      k === 0 ? ctx.moveTo(X, Y) : ctx.lineTo(X, Y);
-    });
-    ctx.stroke();
-  });
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < n; j++) {
+      const x = padL + j * cell, y = padT + i * cell;
+      const corr = i === j ? 1 : cmpCorrelation(items[i], items[j]);
+      ctx.fillStyle = corr === null ? 'rgba(30,30,30,0.4)' : heat(corr);
+      ctx.fillRect(x + 0.5, y + 0.5, cell - 1, cell - 1);
+      if (cell >= 26) {
+        ctx.fillStyle = corr !== null && Math.abs(corr) > 0.5 ? '#0b0f12' : (corr === null ? 'var(--text-3)' : '#e6e6e6');
+        ctx.font = cell >= 40 ? '10px -apple-system, sans-serif' : '8px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(corr === null ? '·' : corr.toFixed(2), x + cell / 2, y + cell / 2 + 1);
+      }
+    }
+  }
 }
 
 async function updateCompare() {
   const countEl = document.getElementById('compareCount')!;
-  const channelEl = document.getElementById('compareChannel') as HTMLSelectElement;
   if (compareFiles.length === 0) {
     compareLoaded = [];
     countEl.textContent = '';
     document.getElementById('compareLabels')!.innerHTML = '';
-    channelEl.innerHTML = '';
-    channelEl.disabled = true;
-    compareChannel = '';
+    document.getElementById('compareChs')!.innerHTML = '';
+    activeCompareChannels = [];
+    compareRefIdx = 0;
+    renderCompareRef();
+    renderCompareMetrics();
     drawCompare();
     return;
   }
   compareLoaded = await Promise.all(compareFiles.map(id => loadCompareSeries(id)));
   countEl.textContent = `${compareLoaded.filter(Boolean).length} session(s)`;
-  renderCompareLabels();
-  let channels: string[] = [];
-  for (const s of compareLoaded) {
-    if (s && s.channels.length) { channels = s.channels; break; }
+  // Default channel selection: everything the first readable session provides.
+  const first = compareLoaded.find(Boolean);
+  const channels = first ? first.channels : [];
+  if (activeCompareChannels.length === 0 && channels.length) {
+    activeCompareChannels = channels.slice();
   }
-  const prev = compareChannel;
-  channelEl.innerHTML = channels.map(c => `<option value="${c}">${c}</option>`).join('');
-  channelEl.disabled = channels.length === 0;
-  compareChannel = channels.includes(prev) ? prev : (channels[0] || '');
-  channelEl.value = compareChannel;
+  if (compareRefIdx >= compareLoaded.length) compareRefIdx = 0;
+  renderCompareChips();
+  renderCompareRef();
+  renderCompareLabels();
+  renderCompareMetrics();
   drawCompare();
 }
 
@@ -1084,7 +1737,39 @@ function setChannelCount(n: number, names?: string[]) {
   buildLegend();
   const sc = document.getElementById('sysChannels') as HTMLInputElement | null;
   if (sc && sc.value !== String(next)) sc.value = String(next);
+  const pc = document.getElementById('plotChCount');
+  if (pc) pc.textContent = String(next);
+  syncRigChips();
+  updateRigNote();
   updateRailCoord();
+  refreshCalibrationViews();
+}
+
+// === Rig picker (how many sensors the rig actually has) ===
+// The picker is the source of truth for how many channels are plotted. The
+// graph stays at the picked size even when the firmware always reports more
+// pins than there are sensors wired up.
+function syncRigChips() {
+  document.querySelectorAll<HTMLElement>('.rg-chip').forEach((chip) => {
+    const preset = chip.getAttribute('data-preset');
+    chip.classList.toggle('active', preset === activePreset);
+  });
+}
+
+function defaultRigNote(): string {
+  return 'Pick how many sensors your rig has — only those are plotted.';
+}
+
+function updateRigNote() {
+  const note = document.getElementById('rigNote');
+  if (!note) return;
+  if (streamWidth > 0 && streamWidth !== channelCount) {
+    note.textContent = `Device streams ${streamWidth} channels — ${channelCount} are plotted. Match the picker to your rig.`;
+    note.classList.add('warn');
+  } else {
+    note.textContent = defaultRigNote();
+    note.classList.remove('warn');
+  }
 }
 
 function updateRailCoord() {
@@ -1101,12 +1786,17 @@ function onPresetChange(preset: string) {
   channelCount = p.sensors.length;
   traceData = chNames.map(() => []);
   buildLegend();
+  syncRigChips();
+  updateRigNote();
+  const pc = document.getElementById('plotChCount');
+  if (pc) pc.textContent = String(channelCount);
   updateRailCoord();
+  refreshCalibrationViews();
   const detail = document.getElementById('presetDetail');
   if (detail) {
     detail.innerHTML = `<div style="font-size:11px;color:var(--text-2)">
       <strong>${p.name}</strong> — ${p.sensors.length} sensor array<br/>
-      ${p.sensors.map((s, i) => `<span class="preset-chip" style="border-color:${CH_COLORS[i]};color:${CH_COLORS[i]}">${s}</span>`).join(' ')}
+      ${p.sensors.map((s, i) => `<span class="preset-chip" style="border-color:${channelColor(i)};color:${channelColor(i)}">${s}</span>`).join(' ')}
     </div>`;
   }
   // Channel mapping — a coherent CH → sensor → target-gas table.
@@ -1115,7 +1805,7 @@ function onPresetChange(preset: string) {
     mapping.innerHTML = p.sensors.map((s, i) => {
       const info = SENSOR_INFO[s] || { name: s, target: 'Unspecified target', range: '—' };
       return `<div class="map-row">
-        <div class="map-ch" style="color:${CH_COLORS[i]}">CH${i + 1}</div>
+        <div class="map-ch" style="color:${channelColor(i)}">CH${i + 1}</div>
         <div class="map-sensor">
           <div class="map-name">${info.name}</div>
           <div class="map-target">${info.target} · ${info.range}</div>
@@ -1129,22 +1819,31 @@ function onPresetChange(preset: string) {
 // === Classifier: Train Tab ===
 function renderTrain() {
   const body = document.getElementById('trainBody')!;
+  const minQ = trainMinQualityValue();
   body.innerHTML = sessions.map((s, i) => {
     const fid = s.file_id || '';
     const checked = fid ? trainSelected.has(fid) : false;
-    const qBadge = s.quality >= 70 ? 'good' : s.quality >= 40 ? 'ok' : 'bad';
+    const q = qualityBadge(s.quality);
+    const analyzed = s.quality_report && typeof s.quality_report.total === 'number';
+    const prov = analyzed ? '' : '<em class="quality-prov" title="Provisional estimate — auto-analyzed before training">prov</em>';
+    const below = minQ > 0 && s.quality < minQ * 100;
+    const rowCls = below ? ' class="train-blocked"' : '';
     const filename = s.path ? String(s.path).split('/').pop() || s.label : s.substance;
-    return `<tr>
+    return `<tr${rowCls}>
       <td><input type="checkbox" class="train-tick" data-fid="${fid}" ${checked ? 'checked' : ''} ${fid ? '' : 'disabled'}></td>
       <td>${s.time}</td>
       <td>${s.substance}</td>
       <td><input type="text" class="train-label" data-fid="${fid}" value="${s.substance.replace(/"/g, '&quot;')}" placeholder="label" ${fid ? '' : 'disabled'} /></td>
       <td style="overflow:hidden;text-overflow:ellipsis;color:var(--text-2)" title="${filename}">${filename}</td>
-      <td><span class="quality-badge ${qBadge}">${s.quality}</span></td>
+      <td>${below
+        ? `<span class="quality-badge bad" title="Below the ${(minQ * 100).toFixed(0)}/100 quality gate — will be excluded from training">${q.label} ${s.quality} blocked</span>`
+        : `<span class="quality-badge ${q.cls}">${q.label} ${s.quality}${prov}</span>`}</td>
     </tr>`;
   }).join('');
-  document.getElementById('trainStatus')!.textContent =
-    `${sessions.length} recordings — tick at least 2 with ≥8 windows/class to train`;
+  const analyzedCount = sessions.filter(s => s.quality_report && typeof s.quality_report.total === 'number').length;
+  const stamp = document.querySelector('#panel-train .hud-panel-head .coord-tag');
+  if (stamp) stamp.textContent = `${sessions.length} recordings · ${analyzedCount} analyzed`;
+  document.getElementById('trainStatus')!.textContent = trainSufficiencyText();
   body.querySelectorAll('.train-tick').forEach(cb => {
     cb.addEventListener('change', () => {
       const box = cb as HTMLInputElement;
@@ -1154,21 +1853,127 @@ function renderTrain() {
       updateTrainButton();
     });
   });
+  body.querySelectorAll('.train-label').forEach(inp => {
+    inp.addEventListener('input', () => updateTrainButton());
+  });
   updateTrainButton();
+}
+
+// Counts the ticked recordings per label (a "label" = a smell class). This is
+// the single source of truth for whether a training set is sufficient — the
+// rule is ≥2 recordings per smell, for at least 2 different smells. It mirrors
+// the Rust quality gate (train_classifier → TrainOptions.min_quality): ticked
+// recordings below the min-quality threshold are excluded, so the verdict the
+// user sees matches the recordings the backend will actually train on.
+function trainMinQualityValue(): number {
+  return (parseFloat((document.getElementById('trainMinQuality') as HTMLInputElement | null)?.value || '0') || 0) / 100;
+}
+function trainSufficiencyCounts(): Map<string, number> {
+  const minQ = trainMinQualityValue();
+  const counts = new Map<string, number>();
+  for (const fid of Array.from(trainSelected)) {
+    const s = sessions.find(x => x.file_id === fid);
+    if (minQ > 0 && s && s.quality < minQ * 100) continue;
+    const inp = document.querySelector(`.train-label[data-fid="${fid}"]`) as HTMLInputElement | null;
+    const label = (inp ? inp.value.trim() : '') || '(unlabeled)';
+    counts.set(label, (counts.get(label) || 0) + 1);
+  }
+  return counts;
+}
+
+// Rough window count per labelled class, so the user sees "this smell will only
+// give ~5 windows" BEFORE training instead of hitting the hard backend floor.
+// Windows ≈ (n − window) / stride + 1  (TRAIN_STRIDE=5), one edge-padded window
+// when a recording is shorter than the window; 10 Hz reference rate.
+function estimateWindowsPerClass(): Map<string, number> {
+  const minQ = trainMinQualityValue();
+  const ws = trainWindowParam();
+  const stride = 5;
+  const rate = liveRateHz > 0 ? liveRateHz : 10;
+  const windows = new Map<string, number>();
+  for (const fid of Array.from(trainSelected)) {
+    const s = sessions.find(x => x.file_id === fid);
+    if (!s) continue;
+    if (minQ > 0 && s.quality < minQ * 100) continue;
+    const inp = document.querySelector(`.train-label[data-fid="${fid}"]`) as HTMLInputElement | null;
+    const label = (inp ? inp.value.trim() : '') || '(unlabeled)';
+    const n = Math.round((parseInt(s.duration, 10) || 0) * rate);
+    const w = n >= ws ? Math.floor((n - ws) / stride) + 1 : Math.max(1, n > 0 ? 1 : 0);
+    windows.set(label, (windows.get(label) || 0) + w);
+  }
+  return windows;
+}
+
+function trainWindowParam(): number {
+  return parseInt((document.getElementById('trainWindow') as HTMLInputElement | null)?.value || '100', 10) || 100;
+}
+
+// Declares, in plain language, whether the ticked+labelled recordings are
+// sufficient to train — per smell — and what data quality they carry.
+function trainSufficiencyText(): string {
+  const counts = trainSufficiencyCounts();
+  if (counts.size === 0) return `${sessions.length} recordings — tick at least 2 per smell to train`;
+  const windows = estimateWindowsPerClass();
+  const parts: string[] = [];
+  let ready = 0;
+  for (const [label, n] of counts) {
+    const ok = n >= 2;
+    if (ok) ready++;
+    const w = windows.get(label) || 0;
+    parts.push(`${label}: ${n} rec · ~${w} win${!ok ? ' ✗ need ≥2' : w < 8 ? ' (short — more = more accurate)' : ' ✓'}`);
+  }
+  const minQ = (document.getElementById('trainMinQuality') as HTMLInputElement | null)?.value || '0';
+  const sufficient = counts.size >= 2 && ready === counts.size;
+  const verdict = sufficient ? 'sufficient ✓ — ready to train' : 'not sufficient — need ≥2 recordings in ≥2 smells (at or above the quality gate)';
+  const eligible = Array.from(counts.values()).reduce((a, n) => a + n, 0);
+  const blocked = trainSelected.size - eligible;
+  const blockedNote = blocked > 0 ? ` · ⚠ ${blocked} ticked below quality gate` : '';
+  return `${trainSelected.size} recordings · ${parts.join(' · ')} · ${verdict} · min quality ${(parseFloat(minQ) * 100).toFixed(0)}/100${blockedNote}`;
 }
 
 function updateTrainButton() {
   const btn = document.getElementById('trainBtn') as HTMLButtonElement;
-  btn.disabled = trainSelected.size < 2;
+  const counts = trainSufficiencyCounts();
+  const ready = counts.size >= 2 && Array.from(counts.values()).every(n => n >= 2);
+  btn.disabled = !ready;
+  btn.title = ready ? 'Train' : 'Select ≥2 recordings for at least 2 different smells';
+  document.getElementById('trainStatus')!.textContent = trainSufficiencyText();
+}
+
+// Run the full 7-factor quality analysis on any selected recording that only
+// has the provisional heuristic, so training-time quality filtering uses real
+// scores. Returns how many recordings were newly analyzed.
+async function ensureQualityAnalyzed(fileIds: string[]): Promise<number> {
+  let analyzed = 0;
+  for (const fid of fileIds) {
+    const s = sessions.find(x => x.file_id === fid);
+    if (!s || (s.quality_report && typeof s.quality_report.total === 'number')) continue;
+    try {
+      const json = await invoke<string>('analyze_recording', { fileId: fid });
+      const report = JSON.parse(json) as QualityReport;
+      s.quality_report = report;
+      if (typeof report.total === 'number') s.quality = Math.round(report.total);
+      analyzed++;
+    } catch (e) {
+      console.error(`Quality analysis failed for ${fid}:`, e);
+    }
+  }
+  if (analyzed > 0) {
+    renderLibrary();
+    renderTrain();
+  }
+  return analyzed;
 }
 
 async function trainClassifier() {
   const log = document.getElementById('trainLog')!;
   const name = (document.getElementById('trainName') as HTMLInputElement).value.trim();
   const windowSize = parseInt((document.getElementById('trainWindow') as HTMLInputElement).value) || 100;
-  const minQuality = parseFloat((document.getElementById('trainMinQuality') as HTMLInputElement).value) || 0;
+  const minQuality = (parseFloat((document.getElementById('trainMinQuality') as HTMLInputElement).value) || 0) / 100;
   if (!name) { log.innerHTML = '<span class="train-err">Enter a classifier name.</span>'; return; }
-  if (trainSelected.size < 2) { log.innerHTML = '<span class="train-err">Select at least 2 recordings.</span>'; return; }
+  const sufficiency = trainSufficiencyCounts();
+  const ready = sufficiency.size >= 2 && Array.from(sufficiency.values()).every(n => n >= 2);
+  if (!ready) { log.innerHTML = '<span class="train-err">Select ≥2 recordings for at least 2 different smells (each class needs ≥2 recordings).</span>'; return; }
   const fileIds = Array.from(trainSelected);
   const labels = fileIds.map(fid => {
     const inp = document.querySelector(`.train-label[data-fid="${fid}"]`) as HTMLInputElement;
@@ -1176,15 +1981,67 @@ async function trainClassifier() {
   });
   log.innerHTML = 'Training…';
   try {
+    // The min-quality gate is only as honest as the scores it reads. Selected
+    // recordings that only carry the provisional heuristic are analyzed with
+    // the full 7-factor scorer first, so quality filtering happens on real
+    // scores, not estimates.
+    const analyzed = await ensureQualityAnalyzed(fileIds);
+    if (analyzed > 0) {
+      log.innerHTML = `Analyzed quality for ${analyzed} recording(s), then training…`;
+    }
     const res = await invoke<{ report: TrainingReport; path: string }>('train_classifier', {
       fileIds, labels, name, windowSize, minQuality,
     });
     renderModelCard(res.report);
     log.innerHTML = '<span style="color:var(--green)">✓ Trained and saved: ' + res.report.name + ' (JSON)</span>';
-    onPresetChange(activePreset); // refresh dashboard live-classifier model list
+    // Load the freshly-trained model into the Dashboard live classifier right
+    // away, so Train → the model is immediately live, no extra clicks.
+    try {
+      liveSnapshot = await invoke<LiveSnapshot>('load_live_classifier', { name: res.report.name });
+      renderLiveState();
+      log.innerHTML = '<span style="color:var(--green)">✓ Trained and saved: ' + res.report.name
+        + ' (JSON) — now live on the Dashboard classifies new samples.</span>';
+    } catch { /* model card stands alone if loading fails */ }
+    reloadClassifiers();
   } catch (e) {
-    log.innerHTML = `<span class="train-err">${String(e)}</span>`;
+    const msg = String(e);
+    const tooFew = msg.match(/Class '([^']+)' has too few windows \((\d+); need at least (\d+)\)/);
+    if (tooFew) {
+      renderTrainShortfall(tooFew[1], parseInt(tooFew[2], 10), parseInt(tooFew[3], 10));
+      return;
+    }
+    const tooFewRecs = msg.match(/Select at least (\d+) recordings to train \((\d+) usable\)/);
+    if (tooFewRecs) {
+      log.innerHTML = `<span class="train-err">Not enough usable recordings (${tooFewRecs[2]} usable, need ${tooFewRecs[1]}). Record more or lower the quality gate above.</span>`;
+      return;
+    }
+    const friendly = msg
+      .replace(/^Error invoking remote method '[^']*':\s*/, '')
+      .replace(/^Error:\s*/, '');
+    log.innerHTML = `<span class="train-err">${friendly}</span>`;
   }
+}
+
+// A class came up short of the backend window floor. Say *what to do* instead
+// of dumping the raw feature-extraction error on the user.
+function renderTrainShortfall(label: string, got: number, need: number) {
+  const log = document.getElementById('trainLog')!;
+  log.innerHTML = `
+    <div class="train-shortfall">
+      <div class="ts-title">One class needs more data — ${label}</div>
+      <div>That smell only produced <b>${got}</b> feature windows (needs ${need}). Each ~30–60s of clean exposure gives several windows — record a little longer, or add one more sample of <b>${label}</b>, then train again.</div>
+      <div class="ts-actions">
+        <button id="tsRecord" class="green">Record '${label}' now</button>
+        <button id="tsDismiss">Dismiss</button>
+      </div>
+    </div>`;
+  const record = document.getElementById('tsRecord');
+  record?.addEventListener('click', () => {
+    const sub = document.getElementById('recSubstance') as HTMLInputElement;
+    if (sub) sub.value = label;
+    openRecordModal();
+  });
+  document.getElementById('tsDismiss')?.addEventListener('click', () => { log.innerHTML = ''; });
 }
 
 function renderModelCard(report: TrainingReport) {
@@ -1212,8 +2069,34 @@ function renderModelCard(report: TrainingReport) {
     ${similarity.map(s =>
       `<div class="train-metric"><span>${s.class_a} ↔ ${s.class_b}</span><span style="color:${s.fdr_mean < 0.25 ? 'var(--yellow)' : 'var(--text-2)'}">cos ${s.cosine.toFixed(2)} · FDR ${s.fdr_mean.toFixed(2)}</span></div>`
     ).join('') || '<div style="color:var(--text-3)">—</div>'}
+
+    ${renderAdequacyVerdict(report, similarity)}
+
     ${warnings}
   `;
+}
+
+// Declares, in plain language, whether the training set was healthy enough to
+// trust — flagging smells that were too similar to one another to separate.
+function renderAdequacyVerdict(report: TrainingReport, similarity: { class_a: string; class_b: string; cosine: number; fdr_mean: number }[]): string {
+  const confusing = similarity.filter(s => s.fdr_mean < 0.25);
+  const lowAcc = report.accuracy < 0.6;
+  const parts: string[] = [];
+  if (confusing.length) {
+    parts.push(`⚠ Smells too similar to separate well: ${confusing.map(s => `${s.class_a} ↔ ${s.class_b}`).join(', ')} — consider re-recording with more distinct samples or a longer exposure.`);
+  }
+  if (lowAcc) {
+    parts.push('⚠ Out-of-sample accuracy below 60% — the smells may be too similar, or there may be too few recordings per class.');
+  }
+  if (!parts.length) {
+    parts.push('✓ Training set is sufficiently distinct — smells separate cleanly out-of-sample.');
+  }
+  return parts.map(p => {
+    if (confusing.length || lowAcc) {
+      return `<div class="train-warn">${p}</div>`;
+    }
+    return `<div class="adequacy-ok">${p}</div>`;
+  }).join('');
 }
 
 function parseSimilarityFromJson(modelJson: string): { class_a: string; class_b: string; cosine: number; fdr_mean: number }[] {
@@ -1267,10 +2150,9 @@ function renderLiveState() {
   }
   const probs = liveSnapshot.current_probs;
   const classes = liveSnapshot.classes;
-  const colors = CH_COLORS;
   wrap.innerHTML = classes.map((c, i) => {
     const p = probs[i] || 0;
-    const color = colors[i % colors.length];
+    const color = channelColor(i);
     return `<div class="live-row">
       <span class="p-name" title="${c}">${c}</span>
       <div class="p-track"><div class="p-fill" style="width:${(p * 100).toFixed(1)}%;background:${color}"></div></div>
@@ -1313,6 +2195,9 @@ document.getElementById('modeSelect')!.addEventListener('change', () => {
   if (value === 'ble') scanBleDevices();
 });
 document.getElementById('connectBtn')!.addEventListener('click', toggleConnection);
+document.querySelectorAll<HTMLElement>('.rg-chip').forEach((chip) => {
+  chip.addEventListener('click', () => onPresetChange(chip.getAttribute('data-preset') || activePreset));
+});
 document.getElementById('refreshBtn')!.addEventListener('click', () => {
   const mode = (document.getElementById('modeSelect') as HTMLSelectElement).value;
   if (mode === 'ble') scanBleDevices();
@@ -1343,8 +2228,30 @@ document.getElementById('detectBtn')!.addEventListener('click', async () => {
   }
 });
 
-document.getElementById('compareChannel')!.addEventListener('change', (e) => {
-  compareChannel = (e.target as HTMLSelectElement).value;
+// Compare mode switching + delta reference
+document.querySelectorAll<HTMLElement>('#compareModes .cmp-mode').forEach(btn => {
+  btn.addEventListener('click', () => {
+    compareMode = (btn.dataset.mode as 'overlay' | 'delta' | 'heatmap') || 'overlay';
+    document.querySelectorAll<HTMLElement>('#compareModes .cmp-mode').forEach(b => b.classList.toggle('active', b === btn));
+    const title = document.getElementById('cmpVizTitle')!;
+    const foot = document.getElementById('compareFoot')!;
+    title.textContent = compareMode === 'heatmap'
+      ? 'Similarity — Pearson correlation across sessions'
+      : compareMode === 'delta'
+        ? 'Δ vs ref — each session minus the reference'
+        : 'Overlay — per-channel normalized response';
+    foot.textContent = compareMode === 'heatmap'
+      ? 'Similarity: Pearson correlation over the shared overlap of the selected channels.'
+      : 'Overlay / Δ: one lane per sensor channel, sessions overlaid (Δ shows each session minus the reference).';
+    renderCompareRef();
+    renderCompareMetrics();
+    drawCompare();
+  });
+});
+
+document.getElementById('compareRef')!.addEventListener('change', (e) => {
+  compareRefIdx = Number((e.target as HTMLSelectElement).value) || 0;
+  renderCompareLabels();
   drawCompare();
 });
 
@@ -1353,23 +2260,31 @@ document.getElementById('libRefresh')!.addEventListener('click', () => reloadLib
 document.getElementById('inspAnalyze')!.addEventListener('click', async () => {
   const s = sessions[selectedSession ?? -1];
   if (!s) return;
-  const btn = document.getElementById('inspAnalyze') as HTMLButtonElement;
-  const prev = btn.textContent;
-  btn.textContent = 'Analyzing…';
+  await analyzeLibrarySession(selectedSession ?? -1);
+});
+
+// Run the full 7-factor quality analysis on a library session. Shared by the
+// Inspector "Analyze" button and the in-row library "Analyze" tag.
+async function analyzeLibrarySession(idx: number) {
+  const s = sessions[idx];
+  if (!s) return;
+  const btn = document.getElementById('inspAnalyze') as HTMLButtonElement | null;
+  const prev = btn ? btn.textContent : '';
+  if (btn) btn.textContent = 'Analyzing…';
   try {
     const json = await invoke<string>('analyze_recording', { fileId: s.file_id });
     const report = JSON.parse(json) as QualityReport;
     s.quality_report = report;
     if (report.total !== null && report.total !== undefined) s.quality = report.total;
     renderLibrary();
-    inspectSession(s);
+    if (idx === (selectedSession ?? -1)) inspectSession(s);
   } catch (e) {
     document.getElementById('inspectorDetails')!.innerHTML =
       `<div style="color:var(--red);font-size:11px">Analysis failed: ${e}</div>`;
   } finally {
-    btn.textContent = prev;
+    if (btn) btn.textContent = prev;
   }
-});
+}
 
 async function reloadLibrary() {
   try {
@@ -1385,6 +2300,10 @@ async function reloadLibrary() {
       if (r.quality_report) {
         try { report = JSON.parse(r.quality_report) as QualityReport; } catch {}
       }
+      // Prefer the full analyzed score when available; fall back to the
+      // provisional heuristic only when no real report exists yet.
+      let quality = r.quality;
+      if (report && typeof report.total === 'number') quality = Math.round(report.total);
       return {
         id: `s-${r.file_id}`,
         time: new Date(r.timestamp * 1000).toLocaleString(),
@@ -1393,7 +2312,7 @@ async function reloadLibrary() {
         format: 'CSV',
         duration: `${Math.round(r.duration_sec)}s`,
         sensors: r.sensor_count,
-        quality: r.quality,
+        quality,
         path: r.csv_path,
         file_id: r.file_id,
         quality_report: report,
@@ -1405,8 +2324,80 @@ async function reloadLibrary() {
   renderLibrary();
 }
 
-document.getElementById('libImport')!.addEventListener('click', reloadLibrary);
-document.getElementById('libImportFolder')!.addEventListener('click', reloadLibrary);
+// Import files/folders from anywhere via the native picker (Tauri dialog
+// plugin). The Rust `import_paths` command registers the chosen absolute
+// paths with the session index; we then refresh the library.
+document.getElementById('libImport')!.addEventListener('click', async () => {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const paths = await open({
+      multiple: true,
+      directory: false,
+      filters: [{ name: 'Recordings', extensions: ['csv', 'osmell'] }],
+    });
+    if (!paths) return; // cancelled
+    const list = Array.isArray(paths) ? paths : [paths];
+    if (list.length === 0) return;
+    await invoke('import_paths', { paths: list });
+    await reloadLibrary();
+    await flashStatus('libStatus', `Imported ${list.length} file(s)`);
+  } catch (e) {
+    await flashStatus('libStatus', `Import failed: ${e}`, 'var(--red)');
+  }
+});
+
+document.getElementById('libImportFolder')!.addEventListener('click', async () => {
+  try {
+    const { open } = await import('@tauri-apps/plugin-dialog');
+    const dir = await open({ directory: true, multiple: false });
+    if (!dir) return; // cancelled
+    await invoke('import_paths', { paths: [dir as string] });
+    await reloadLibrary();
+    await flashStatus('libStatus', `Imported folder: ${dir}`);
+  } catch (e) {
+    await flashStatus('libStatus', `Import failed: ${e}`, 'var(--red)');
+  }
+});
+
+// === Drag & drop import (whole library area) ===
+// Tauri v2 webview exposes dropped files with their real filesystem path on
+// `File.path`, so dropping CSVs / .osmell files imports them straight in.
+const libMainEl = document.getElementById('libMain');
+const libDropHint = document.getElementById('libDropHint');
+let libDragDepth = 0;
+if (libMainEl) {
+  libMainEl.addEventListener('dragenter', (e) => {
+    e.preventDefault();
+    libDragDepth++;
+    if (libDropHint) libDropHint.style.display = 'flex';
+  });
+  libMainEl.addEventListener('dragover', (e) => { e.preventDefault(); });
+  libMainEl.addEventListener('dragleave', (e) => {
+    e.preventDefault();
+    libDragDepth--;
+    if (libDragDepth <= 0 && libDropHint) libDropHint.style.display = 'none';
+  });
+  libMainEl.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    libDragDepth = 0;
+    if (libDropHint) libDropHint.style.display = 'none';
+    const files = Array.from(e.dataTransfer?.files || []);
+    const paths = files
+      .map(f => (f as File & { path?: string }).path)
+      .filter((p: string | undefined): p is string => typeof p === 'string' && p.length > 0);
+    if (paths.length === 0) {
+      await flashStatus('libStatus', 'No readable files dropped — use Import instead.', 'var(--yellow)');
+      return;
+    }
+    try {
+      await invoke('import_paths', { paths });
+      await reloadLibrary();
+      await flashStatus('libStatus', `Imported ${paths.length} file(s) by drag & drop`, 'var(--green)');
+    } catch (e) {
+      await flashStatus('libStatus', `Import failed: ${e}`, 'var(--red)');
+    }
+  });
+}
 
 async function selectedSessionRecord(): Promise<SessionRecord | null> {
   const s = sessions[selectedSession ?? -1];
@@ -1425,6 +2416,13 @@ async function flashStatus(id: string, msg: string, color?: string) {
   await new Promise(r => setTimeout(r, 2500));
   (el as HTMLElement).style.color = '';
 }
+
+document.getElementById('inspRename')!.addEventListener('click', () => {
+  const idx = selectedSession;
+  if (idx === null || idx === undefined) { flashStatus('libStatus', 'Select a session first'); return; }
+  const td = document.querySelector<HTMLElement>(`tr[data-idx="${idx}"] .lib-sub`);
+  if (td) beginRenameCell(td);
+});
 
 document.getElementById('inspDelete')!.addEventListener('click', async () => {
   const s = await selectedSessionRecord();
@@ -1700,6 +2698,9 @@ document.getElementById('trainName')!.addEventListener('input', () => {
   const btn = document.getElementById('trainBtn') as HTMLButtonElement;
   btn.disabled = trainSelected.size < 2 || !(document.getElementById('trainName') as HTMLInputElement).value.trim();
 });
+document.getElementById('trainMinQuality')!.addEventListener('input', () => {
+  renderTrain();
+});
 document.getElementById('fleetScan')!.addEventListener('click', async () => {
   try {
     fleetDevices = await invoke<FleetDevice[]>('fleet_scan');
@@ -1874,15 +2875,28 @@ async function stopPhaseRecordingFromUI() {
   }
   recPhaseActive = false;
   sessionStart = null;
-  document.getElementById('recordBtn')!.textContent = '● Record';
+  setRecordButton(false);
   closeRecordModal();
+}
+
+// Sync both record controls (header + graph-proximate) to the recording state.
+function setRecordButton(active: boolean) {
+  const header = document.getElementById('recordBtn');
+  const near = document.getElementById('liveRecord');
+  const label = active ? '■ Stop' : '● Rec';
+  if (header) header.textContent = active ? '■ Stop' : '● Record';
+  if (near) {
+    near.textContent = label;
+    near.classList.toggle('recording', active);
+    near.title = active ? 'Stop recording' : 'Start a recording session';
+  }
 }
 
 async function pollPhaseRecorder() {
   try {
     const s = await invoke<PhaseRecorderState>('get_phase_recorder_state');
     renderPhaseState(s);
-    document.getElementById('recordBtn')!.textContent = s.active ? '■ Stop' : '● Record';
+    setRecordButton(s.active);
     if (!s.active && prevPhaseActive && !autoFinalized) {
       autoFinalized = true;
       await stopPhaseRecordingFromUI();
@@ -1905,8 +2919,31 @@ document.getElementById('recordBtn')!.addEventListener('click', async () => {
     openRecordModal();
   }
 });
+// Graph-proximate record control (next to the live trace transport).
+(document.getElementById('liveRecord') as HTMLButtonElement | null)?.addEventListener('click', async () => {
+  if (recPhaseActive || prevPhaseActive) {
+    stopPhaseRecordingFromUI();
+  } else {
+    openRecordModal();
+  }
+});
 
 document.getElementById('recModalClose')!.addEventListener('click', closeRecordModal);
+
+// Live protocol summary chips (Baseline → Exposure → Recovery) in the modal.
+function updateProtocolSeq() {
+  const set = (outId: string, inputId: string) => {
+    const el = document.getElementById(outId);
+    const inp = document.getElementById(inputId) as HTMLInputElement | null;
+    if (el && inp) el.textContent = (inp.value || '0') + 's';
+  };
+  set('psBaseline', 'recBaseline');
+  set('psExposure', 'recExposure');
+  set('psRecovery', 'recRecovery');
+}
+['recBaseline', 'recExposure', 'recRecovery'].forEach(id => {
+  document.getElementById(id)?.addEventListener('input', updateProtocolSeq);
+});
 
 document.getElementById('recStart')!.addEventListener('click', async () => {
   const substance = (document.getElementById('recSubstance') as HTMLInputElement).value.trim();
@@ -1933,7 +2970,7 @@ document.getElementById('recStart')!.addEventListener('click', async () => {
     prevPhaseActive = true;
     autoFinalized = false;
     sessionStart = Date.now() / 1000;
-    document.getElementById('recordBtn')!.textContent = '■ Stop';
+    setRecordButton(true);
     document.getElementById('recSetup')!.style.display = 'none';
     document.getElementById('recLive')!.style.display = '';
     renderPhaseState(state);
@@ -2109,6 +3146,96 @@ document.getElementById('eraseBtn')!.addEventListener('click', async () => {
   }
 });
 
+// === Flash modal — one-click firmware programming (Python-app parity) ===
+// The header ⚡ Flash button and the bootloader-stall diagnosis both open this;
+// it drives the same `flash_firmware` backend as the System tab.
+function openFlashModal() {
+  const modal = document.getElementById('flashModal');
+  if (!modal) return;
+  populateFmPort();
+  const presetSelect = document.getElementById('fmPreset') as HTMLSelectElement;
+  if (presetSelect && activePreset && PRESETS[activePreset]) presetSelect.value = activePreset;
+  const ssid = document.getElementById('fwSsid') as HTMLInputElement | null;
+  if (ssid && ssid.value) {
+    (document.getElementById('fmSsid') as HTMLInputElement).value = ssid.value;
+  }
+  void checkFmToolchain();
+  modal.style.display = 'flex';
+}
+
+function closeFlashModal() {
+  const modal = document.getElementById('flashModal');
+  if (modal) modal.style.display = 'none';
+}
+
+async function populateFmPort() {
+  const sel = document.getElementById('fmPort') as HTMLSelectElement;
+  if (!sel) return;
+  const cur = document.getElementById('portSelect') as HTMLSelectElement | null;
+  const opts = cur ? Array.from(cur.options).map(o => o.value).filter(Boolean) : [];
+  if (opts.length) {
+    sel.innerHTML = '<option value="">Select port...</option>' + opts.map(o => `<option value="${o}">${o}</option>`).join('');
+    sel.value = cur!.value || '';
+  } else {
+    try {
+      const ports = await invoke<{ name: string; description: string }[]>('list_serial_ports');
+      sel.innerHTML = '<option value="">Select port...</option>' + ports.map(p => `<option value="${p.name}">${p.name} — ${p.description || ''}</option>`).join('');
+    } catch { /* flow through */ }
+  }
+}
+
+async function checkFmToolchain() {
+  const el = document.getElementById('fmToolchain');
+  if (!el) return;
+  try {
+    const tc = await invoke<{ platformio: boolean; arduino_cli: boolean; esptool: boolean; message: string }>('check_flash_toolchain');
+    el.textContent = tc.message;
+    el.style.color = tc.esptool ? 'var(--green)' : 'var(--yellow)';
+  } catch (e) {
+    el.textContent = 'Toolchain check failed: ' + e;
+    el.style.color = 'var(--red)';
+  }
+}
+
+document.getElementById('flashQuick')?.addEventListener('click', () => openFlashModal());
+document.getElementById('fmClose')?.addEventListener('click', closeFlashModal);
+
+document.getElementById('fmFlash')?.addEventListener('click', async () => {
+  const port = (document.getElementById('fmPort') as HTMLSelectElement).value;
+  const preset = (document.getElementById('fmPreset') as HTMLSelectElement).value;
+  const wifiSsid = (document.getElementById('fmSsid') as HTMLInputElement).value.trim();
+  const wifiPassword = (document.getElementById('fmPass') as HTMLInputElement).value;
+  const progress = document.getElementById('fmProgress') as HTMLDivElement;
+  const bar = document.getElementById('fmBar') as HTMLDivElement;
+  const status = document.getElementById('fmStatus') as HTMLDivElement;
+  const btn = document.getElementById('fmFlash') as HTMLButtonElement;
+  if (!port) { status.textContent = 'Pick a port first.'; status.style.color = 'var(--yellow)'; return; }
+  btn.disabled = true;
+  bar.style.width = '0%';
+  progress.style.display = '';
+  status.textContent = 'Flashing…';
+  status.style.color = '';
+  const timer = setInterval(() => {
+    const w = parseFloat(bar.style.width || '0');
+    bar.style.width = Math.min(90, w + (w < 30 ? 12 : 6)) + '%';
+  }, 700);
+  try {
+    const done = await invoke<string>('flash_firmware', { port, preset, wifiSsid, wifiPassword });
+    clearInterval(timer);
+    bar.style.width = '100%';
+    status.textContent = done || 'Complete — mDNS: osmograph.local (_osmograph._tcp)';
+    status.style.color = 'var(--green)';
+    btn.disabled = false;
+    setTimeout(closeFlashModal, 900);
+  } catch (e) {
+    clearInterval(timer);
+    bar.style.width = '0%';
+    status.textContent = `Failed: ${e}`;
+    status.style.color = 'var(--red)';
+    btn.disabled = false;
+  }
+});
+
 // === Tauri Serial Data Event ===
 listen<{ channels: number[]; timestamp: number; raw_line: string }>('serial-data', (event) => {
   const { channels } = event.payload;
@@ -2122,12 +3249,36 @@ listen<{ device_id: string; firmware_version: string; n_sensors: number }>('seri
 
 listen<{ code: number; message: string }>('serial-error', (event) => {
   console.error(`Serial error ${event.payload.code}: ${event.payload.message}`);
+  const cm = document.getElementById('connMsg');
+  if (cm) {
+    cm.textContent = `Serial error ${event.payload.code}: ${event.payload.message}`;
+    cm.style.color = 'var(--red)';
+  }
 });
 
-listen('serial-disconnected', () => {
+function dropLink(reason: string) {
   connected = false;
+  bootloaderHinted = false;
+  streamWidth = 0;
+  bootFlashShown = false;
+  updateRigNote();
+  document.getElementById('bootBanner')?.classList.remove('show');
   document.getElementById('connectBtn')!.textContent = 'Connect';
   document.getElementById('statusDot')!.className = 'status-dot';
+  setPlotLink(false);
+  const cm = document.getElementById('connMsg');
+  if (cm) {
+    cm.textContent = reason;
+    cm.style.color = 'var(--yellow)';
+  }
+}
+
+listen('serial-disconnected', () => {
+  dropLink('Device disconnected — replug or reselect the port and reconnect.');
+});
+
+listen('wifi-disconnected', () => {
+  dropLink('WiFi device disconnected from the network.');
 });
 
 // === BLE Events ===
@@ -2136,9 +3287,32 @@ listen<string>('ble-connected', (event) => {
 });
 
 listen('ble-disconnected', () => {
-  connected = false;
-  document.getElementById('connectBtn')!.textContent = 'Connect';
-  document.getElementById('statusDot')!.className = 'status-dot';
+  dropLink('BLE device disconnected.');
+});
+
+// A device answering in bootloader streams nothing, so the graph looks "dead"
+// while it's really unflashed. Surface the diagnosis and offer the flash path
+// instead of leaving the user guessing why the traces stopped moving.
+listen<string>('bootloader-detected', () => {
+  bootloaderHinted = true;
+  const st = document.getElementById('statusDot');
+  if (st) st.className = 'status-dot warn';
+  updatePlotLinkState();
+});
+
+document.getElementById('bootDismiss')?.addEventListener('click', () => {
+  bootloaderHinted = false;
+  document.getElementById('bootBanner')?.classList.remove('show');
+});
+
+document.getElementById('bootToFlash')?.addEventListener('click', () => {
+  document.getElementById('bootBanner')?.classList.remove('show');
+  const tab = document.querySelector<HTMLElement>('.tab-btn[data-tab="system"]');
+  tab?.click();
+  const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
+  const fwPort = document.getElementById('fwPort');
+  if (fwPort) fwPort.textContent = port || 'No port selected';
+  document.getElementById('flashBtn')?.focus();
 });
 
 listen<string>('ble-error', (event) => {
@@ -2210,8 +3384,18 @@ function closeReplayPanel() {
 
 async function loadReplay() {
   const sel = document.getElementById('replaySession') as HTMLSelectElement;
+  const note = document.getElementById('replayNote');
+  if (!sel) return;
   const fid = sel.value;
-  if (!fid) return;
+  if (!fid) {
+    replayPlaying = false;
+    const btn = document.getElementById('replayPlay');
+    if (btn) btn.textContent = '▶ Play';
+    if (note) note.textContent = sessions.length === 0
+      ? 'Nothing to replay yet — import a recording in the Library tab (or record one live), then it will appear here.'
+      : 'No session selected — pick one from the list above, then Load again.';
+    return;
+  }
   try {
     replaySeries = await invoke<SessionSeries>('load_session_series', { fileId: fid });
     replayFrame = 0;
@@ -2278,7 +3462,7 @@ function drawReplay() {
   for (let ch = 0; ch < nCh; ch++) {
     const vals = replaySeries.values[ch] || [];
     if (vals.length < 2) continue;
-    ctx.strokeStyle = CH_COLORS[ch % CH_COLORS.length];
+    ctx.strokeStyle = channelColor(ch);
     ctx.lineWidth = 1.2;
     ctx.beginPath();
     const count = Math.min(limit, vals.length);
@@ -2332,11 +3516,14 @@ function pauseReplay() {
   if (btn) btn.textContent = '▶ Play';
 }
 
-function toggleReplay() {
+async function toggleReplay() {
   if (replayPlaying) { pauseReplay(); return; }
-  if (!replaySeries) { loadReplay(); }
+  if (!replaySeries) {
+    await loadReplay();
+    if (!replaySeries) return;
+  }
   replayPlaying = true;
-  replayLastTs = replaySeries ? null : null;
+  replayLastTs = null;
   const btn = document.getElementById('replayPlay');
   if (btn) btn.textContent = '❚❚ Pause';
 }
@@ -2416,10 +3603,210 @@ document.getElementById('replaySpeed')!.addEventListener('change', () => { repla
 });
 requestAnimationFrame(replayLoop);
 
+// === Live transport controls (pause / rewind-seek / window zoom / clear) ===
+function toggleLivePause() {
+  livePaused = !livePaused;
+  if (livePaused) {
+    frozenTrace = traceData.map(ch => ch.slice());
+  } else {
+    frozenTrace = [];
+    // Resuming from pause: snap back to live so the reader isn't stuck on a stale
+    // frozen window from a long time ago.
+    liveScrollSeek = 0;
+    isLiveScrubbing = false;
+  }
+  updateTransportUI();
+}
+function setLiveWindow(samples: number) {
+  liveWindowSamples = Math.min(MAX_HISTORY, Math.max(2, Math.round(samples)));
+  // Keep the seek within the new window's valid range.
+  const maxSeek = (historyData[0] ? historyData[0].length : 0) - liveWindowSamples;
+  if (liveScrollSeek > maxSeek) {
+    liveScrollSeek = Math.max(0, maxSeek);
+    isLiveScrubbing = liveScrollSeek > 0;
+  }
+  updateTransportUI();
+}
+function clearLiveView() {
+  traceData = traceData.map(() => []);
+  historyData = historyData.map(() => []);
+  frozenTrace = [];
+  liveScrollSeek = 0;
+  isLiveScrubbing = false;
+  lastSampleTime = 0;
+  updateTransportUI();
+  updateScrubber();
+}
+// Seek: samples back from the newest sample. 0 = live following.
+function setLiveSeek(offsetSamples: number) {
+  const maxSeek = Math.max(0, (historyData[0] ? historyData[0].length : 0) - liveWindowSamples);
+  liveScrollSeek = Math.max(0, Math.min(maxSeek, Math.round(offsetSamples)));
+  isLiveScrubbing = liveScrollSeek > 0;
+  updateTransportUI();
+  updateScrubber();
+}
+// Jump control helpers.
+function liveTotalHistory(): number { return historyData[0] ? historyData[0].length : 0; }
+function liveMaxSeek(): number { return Math.max(0, liveTotalHistory() - liveWindowSamples); }
+function goLive() { liveScrollSeek = 0; isLiveScrubbing = false; livePaused = false; frozenTrace = []; updateTransportUI(); updateScrubber(); }
+function stepLiveBack() { setLiveSeek(liveScrollSeek + liveWindowSamples); }
+function stepLiveFwd() { setLiveSeek(liveScrollSeek - liveWindowSamples); }
+// Scrubber (timeline): right end = live/now, left = oldest history.
+function updateScrubber() {
+  const scrub = document.getElementById('liveScrub') as HTMLInputElement | null;
+  const stamp = document.getElementById('liveScrubStamp') as HTMLElement | null;
+  const total = liveTotalHistory();
+  if (!scrub) return;
+  if (total <= 1 || !isLiveScrubbing) {
+    scrub.value = '1000';
+    scrub.disabled = true;
+    if (stamp) stamp.textContent = livePaused ? 'PAUSED' : ''; // live: LIVE button already says it
+    return;
+  }
+  scrub.disabled = false;
+  let pct: number;
+  if (!isLiveScrubbing) {
+    pct = 1;
+  } else {
+    const avail = Math.max(1, total - liveWindowSamples);
+    const seekSamples = Math.min(liveScrollSeek, avail);
+    pct = 1 - seekSamples / avail;
+  }
+  scrub.value = String(Math.round(Math.max(0, Math.min(1, pct)) * 1000));
+  if (stamp) stamp.textContent = isLiveScrubbing
+    ? `rev ${Math.round(liveScrollSeek / liveRateHz)}s`
+    : (livePaused ? 'PAUSED' : '');
+}
+function updateTransportUI() {
+  const playBtn = document.getElementById('livePlayPause') as HTMLButtonElement | null;
+  if (playBtn) playBtn.textContent = livePaused ? '▶' : '⏸';
+  if (playBtn) playBtn.title = livePaused ? 'Resume live view' : 'Pause live view';
+  const rd = document.getElementById('liveWindowReadout') as HTMLElement | null;
+  if (rd) rd.textContent = `${(liveWindowSamples / liveRateHz).toFixed(0)}s · ${liveRateHz.toFixed(1)} Hz · zoom ${Math.round((liveWindowSamples / LIVE_WINDOW_DEFAULT) * 100)}%`;
+  const resetBtn = document.getElementById('liveZoomReset') as HTMLButtonElement | null;
+  if (resetBtn) resetBtn.disabled = liveWindowSamples === LIVE_WINDOW_DEFAULT;
+
+  // Accurate step disable state: rewind available while there is history to step
+  // into; fast-forward available when currently scrubbing (seek > 0).
+  const revBtn = document.getElementById('liveRev') as HTMLButtonElement | null;
+  const fwdBtn = document.getElementById('liveFwd') as HTMLButtonElement | null;
+  const jumpBtn = document.getElementById('liveJump') as HTMLButtonElement | null;
+  const canRewind = liveMaxSeek() > 0 || liveTotalHistory() > liveWindowSamples;
+  const canFwd = liveScrollSeek > 0 || isLiveScrubbing;
+  if (revBtn) revBtn.disabled = !canRewind;
+  if (fwdBtn) fwdBtn.disabled = !canFwd || (!livePaused && !isLiveScrubbing && liveScrollSeek === 0);
+  if (jumpBtn) jumpBtn.disabled = !isLiveScrubbing && !livePaused;
+  updateScrubber();
+}
+document.getElementById('livePlayPause')!.addEventListener('click', toggleLivePause);
+document.getElementById('liveClear')!.addEventListener('click', clearLiveView);
+(document.getElementById('liveRev') as HTMLButtonElement | null)?.addEventListener('click', (e) => {
+  if (e.altKey) setLiveSeek(liveMaxSeek()); else stepLiveBack();
+});
+(document.getElementById('liveFwd') as HTMLButtonElement | null)?.addEventListener('click', (e) => {
+  if (e.altKey) goLive(); else stepLiveFwd();
+});
+(document.getElementById('liveJump') as HTMLButtonElement | null)?.addEventListener('click', goLive);
+(document.getElementById('liveZoomIn') as HTMLButtonElement | null)?.addEventListener('click', () => setLiveWindow(liveWindowSamples * 0.6));
+(document.getElementById('liveZoomOut') as HTMLButtonElement | null)?.addEventListener('click', () => setLiveWindow(liveWindowSamples * 1.6));
+(document.getElementById('liveZoomReset') as HTMLButtonElement | null)?.addEventListener('click', () => { setLiveWindow(LIVE_WINDOW_DEFAULT); goLive(); });
+(document.getElementById('dockToggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
+  const dock = document.getElementById('underDock');
+  if (!dock) return;
+  dock.classList.toggle('collapsed');
+  const btn = document.getElementById('dockToggle');
+  if (btn) btn.textContent = dock.classList.contains('collapsed') ? '▦' : '—';
+});
+(document.getElementById('liveWindow') as HTMLSelectElement | null)?.addEventListener('change', (e) => {
+  setLiveWindow(parseInt((e.target as HTMLSelectElement).value, 10) || 800);
+});
+(document.getElementById('liveScrub') as HTMLInputElement | null)?.addEventListener('input', (e) => {
+  const pct = (parseInt((e.target as HTMLInputElement).value, 10) || 0) / 1000;
+  const total = liveTotalHistory();
+  const avail = Math.max(1, total - liveWindowSamples);
+  setLiveSeek(avail * (1 - pct));
+});
+
+// Pointer interactions on the trace: crosshair cursor, drag-to-pan, shift+drag
+// box-zoom, double-click to return to live.
+let dragStart: { x: number; y: number; seek: number } | null = null;
+let box: { x0: number; y0: number; x1: number; y1: number } | null = null;
+function canvasClientXY(e: MouseEvent) { const r = tracesCanvas.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+tracesCanvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
+  const p = canvasClientXY(e);
+  dragStart = { x: p.x, y: p.y, seek: liveScrollSeek };
+  box = null;
+  tracesCanvas.classList.add(e.shiftKey ? 'tl-boxing' : 'tl-panning');
+});
+window.addEventListener('mousemove', (e) => {
+  const r = tracesCanvas.getBoundingClientRect();
+  const inCanvas = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  if (!inCanvas) return;
+  const p = canvasClientXY(e);
+  if (dragStart && !e.shiftKey) {
+    // Drag-pan horizontally: shift the seek by the dragged pixel distance mapped
+    // to samples. Pausing follows naturally.
+    const dx = p.x - dragStart.x;
+    const gutter = 44, pw = (tracesCanvas.width - gutter);
+    const perPx = pw > 0 ? liveWindowSamples / pw : 0;
+    setLiveSeek(dragStart.seek + dx * perPx);
+  }
+  if (e.shiftKey && dragStart) {
+    box = { x0: dragStart.x, y0: dragStart.y, x1: p.x, y1: p.y };
+  }
+  cursorPX = p.x; cursorPY = p.y;
+});
+window.addEventListener('mouseup', (e) => {
+  if (!dragStart) return;
+  const p = canvasClientXY(e);
+  if (e.shiftKey && box) {
+    const x0 = Math.min(box.x0, box.x1), x1 = Math.max(box.x0, box.x1);
+    const perPx = (tracesCanvas.width - 44) > 0 ? liveWindowSamples / (tracesCanvas.width - 44) : 0;
+    const minX = perPx * (x0 - 44), maxX = perPx * (x1 - 44);
+    const newWlen = Math.max(8, Math.min(MAX_HISTORY, Math.round(maxX - minX)));
+    if (newWlen >= 8 && Math.abs(newWlen - liveWindowSamples) > 1) {
+      liveWindowSamples = newWlen;
+      setLiveSeek(liveScrollSeek + minX);
+    }
+  }
+  dragStart = null;
+  box = null;
+  tracesCanvas.classList.remove('tl-panning', 'tl-boxing');
+});
+tracesCanvas.addEventListener('dblclick', () => { goLive(); });
+
+// Continuous zoom with the mouse wheel over the trace canvas. Wheel up zooms in
+// (narrower window), wheel down zooms out; the zoom anchors at the cursor x.
+function handleTracesWheel(ev: WheelEvent) {
+  ev.preventDefault();
+  const rect = tracesCanvas.getBoundingClientRect();
+  const x = ev.clientX - rect.left;
+  const frac = Math.max(0, Math.min(1, x / rect.width));
+  const old = liveWindowSamples;
+  let steps = 0;
+  if (ev.deltaY < 0) steps = -1; else if (ev.deltaY > 0) steps = 1;
+  const factor = Math.pow(1.25, steps);
+  const next = Math.min(MAX_HISTORY, Math.max(8, Math.round(old * factor)));
+  if (next === old) return;
+  // Zoom around the cursor: keep the history position p that sits under the
+  // cursor fixed. p = seek + (1-frac)*window (samples back from newest).
+  // Preserve p with the new window -> seek' = p - (1-frac)*next.
+  if (isLiveScrubbing) {
+    const p = liveScrollSeek + (1 - frac) * old;
+    setLiveSeek(p - (1 - frac) * next);
+  }
+  liveWindowSamples = next;
+  updateTransportUI();
+  updateScrubber();
+}
+tracesCanvas.addEventListener('wheel', handleTracesWheel, { passive: false });
+
 // === Animation Loop ===
 function animate() {
   drawTraces();
   updateSessionTime();
+  updateTransportUI();
   requestAnimationFrame(animate);
 }
 
@@ -2430,10 +3817,412 @@ setInterval(pollPhaseRecorder, 500);
 setInterval(reloadClassifiers, 4000);
 setInterval(refreshBurnIn, 1000);
 
+// === Hardware Profile ===
+// Plain per-rig description matching the perception-layer `sensor_profile.json`
+// (schema v1). It records how the user's board is wired (circuit reference) and
+// what each channel is — NOT signal direction. Direction is the n/p + wiring
+// mirror ambiguity from `ontology/detect.py`; research is incomplete, so we do
+// not ask for it or encode it here.
+type HardwareProfile = {
+  preset: string;
+  name: string;
+  adcBits: number;
+  rloadOhm: number;
+  vcc: number;
+  sensorOnLowSide: boolean;
+};
+const HW_KEY = 'osmograph.hardware';
+let hardwareProfile: HardwareProfile = {
+  preset: 'custom', name: '', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true,
+};
+
+// Built-in profile templates (channel sensor lists mirror the desktop presets).
+const HW_PRESET_TEMPLATES: Record<string, Partial<HardwareProfile>> = {
+  custom: { name: 'My Rig', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true },
+  smellmonitor: { name: 'Example: SmellMonitor', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true },
+  reference: { name: 'Example: 6-sensor lab rig', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true },
+};
+
+function loadHardwareProfile() {
+  try {
+    const raw = localStorage.getItem(HW_KEY);
+    if (raw) hardwareProfile = { ...hardwareProfile, ...(JSON.parse(raw) as Partial<HardwareProfile>) };
+  } catch { /* defaults */ }
+}
+function persistHardwareProfile() {
+  try { localStorage.setItem(HW_KEY, JSON.stringify(hardwareProfile)); } catch { /* ignore */ }
+}
+
+function renderHardwareProfile() {
+  const presetEl = document.getElementById('hwProfilePreset') as HTMLSelectElement | null;
+  const nameEl = document.getElementById('hwProfileName') as HTMLInputElement | null;
+  const adcEl = document.getElementById('hwAdcBits') as HTMLInputElement | null;
+  const rlEl = document.getElementById('hwRload') as HTMLInputElement | null;
+  const vccEl = document.getElementById('hwVcc') as HTMLInputElement | null;
+  const lowEl = document.getElementById('hwLowSide') as HTMLSelectElement | null;
+  const status = document.getElementById('hwStatus');
+
+  if (presetEl) presetEl.value = hardwareProfile.preset;
+  if (nameEl) nameEl.value = hardwareProfile.name;
+  if (adcEl) adcEl.value = String(hardwareProfile.adcBits);
+  if (rlEl) rlEl.value = String(hardwareProfile.rloadOhm);
+  if (vccEl) vccEl.value = String(hardwareProfile.vcc);
+  if (lowEl) lowEl.value = String(hardwareProfile.sensorOnLowSide);
+
+  if (status) {
+    status.textContent = `${hardwareProfile.name || 'Unnamed rig'} · ${hardwareProfile.adcBits}bit · ${hardwareProfile.vcc}V · RL ${hardwareProfile.rloadOhm}Ω · ${hardwareProfile.sensorOnLowSide ? 'sensor on low side' : 'sensor on high side'}`;
+    status.style.color = 'var(--text-2)';
+  }
+}
+
+function wireHardwareProfile() {
+  const presetEl = document.getElementById('hwProfilePreset') as HTMLSelectElement | null;
+  presetEl?.addEventListener('change', () => {
+    const t = HW_PRESET_TEMPLATES[presetEl.value] || HW_PRESET_TEMPLATES.custom;
+    hardwareProfile = { ...hardwareProfile, ...t, preset: presetEl.value };
+    persistHardwareProfile();
+    renderHardwareProfile();
+  });
+
+  const nameEl = document.getElementById('hwProfileName') as HTMLInputElement | null;
+  nameEl?.addEventListener('input', () => { hardwareProfile.name = nameEl.value; persistHardwareProfile(); });
+
+  const adcEl = document.getElementById('hwAdcBits') as HTMLInputElement | null;
+  adcEl?.addEventListener('input', () => { hardwareProfile.adcBits = Math.max(8, Math.min(24, Number(adcEl.value) || 12)); persistHardwareProfile(); });
+  const rlEl = document.getElementById('hwRload') as HTMLInputElement | null;
+  rlEl?.addEventListener('input', () => { hardwareProfile.rloadOhm = Number(rlEl.value) || 1000; persistHardwareProfile(); });
+  const vccEl = document.getElementById('hwVcc') as HTMLInputElement | null;
+  vccEl?.addEventListener('input', () => { hardwareProfile.vcc = Number(vccEl.value) || 5.0; persistHardwareProfile(); });
+  const lowEl = document.getElementById('hwLowSide') as HTMLSelectElement | null;
+  lowEl?.addEventListener('change', () => {
+    hardwareProfile.sensorOnLowSide = lowEl.value === 'true';
+    persistHardwareProfile();
+  });
+
+  const exportBtn = document.getElementById('hwExport');
+  exportBtn?.addEventListener('click', () => exportHardwareProfile());
+  const importBtn = document.getElementById('hwImport');
+  importBtn?.addEventListener('click', () => importHardwareProfile());
+}
+
+// Serialize the current app rig config into the perception-layer sensor_profile.json (schema v1).
+function exportHardwareProfile() {
+  const model = (i: number) => chNames[i] || `CH${i + 1}`;
+  const profile = {
+    $schema: 'https://opensmell.org/schemas/sensor_profile_v1.json',
+    schema_version: '1.0.0',
+    sensor_profile: {
+      device_id: hardwareProfile.name || hardwareProfile.preset,
+      manufacturer: 'OpenSmell Desktop',
+      model: hardwareProfile.name || 'Custom rig',
+      firmware_version: 'desktop-0.1.0',
+      recording_protocol: {
+        name: 'osmell_baseline_exposure_recovery',
+        baseline_seconds: 30, exposure_seconds: 45, recovery_seconds: 120, sample_rate_hz: 10,
+      },
+      channels: Array.from({ length: Math.max(channelCount, chNames.length) }, (_, i) => {
+        const c = calibrationPerChannel[i];
+        const s = SENSOR_LIBRARY[model(i)];
+        return {
+          channel_id: i,
+          sensor_model: model(i),
+          target_gases: s ? s.target.split('/').map(x => x.trim().toLowerCase()) : [],
+          material: 'SnO2',
+          nominal_sensitivity_a: c?.a ?? s?.a ?? null,
+          nominal_exponent_b: c?.b ?? s?.b ?? null,
+          heater_voltage: hardwareProfile.vcc,
+          heater_power_w: null,
+          operating_surface_temp_c: null,
+        };
+      }),
+      circuit: {
+        supply_voltage_vcc: hardwareProfile.vcc,
+        load_resistor_rl_ohm: hardwareProfile.rloadOhm,
+        is_voltage_divider: true,
+        adc_bits: hardwareProfile.adcBits,
+        adc_reference_voltage: 3.3,
+        adc_max_count: Math.pow(2, hardwareProfile.adcBits) - 1,
+      },
+      environment: { has_temp_humidity_sensor: false, humidity_compensation: {} },
+      gas_delivery: { intake_flow_lpm: null, has_ptfe_filter: false, filter_pore_um: null, chamber_volume_ml: null, flush_time_seconds: null },
+      compliance: {
+        records_osmell_osm: false,
+        // NOTE: signal direction / doping are intentionally NOT encoded here.
+        // MOX direction is the n/p + divider-wiring mirror ambiguity described in
+        // perception-layer `detect.py`; research is incomplete, so we never guess it.
+      },
+    },
+  };
+  const pre = document.getElementById('hwExported');
+  if (pre) { pre.style.display = 'block'; pre.textContent = JSON.stringify(profile, null, 2); }
+  const status = document.getElementById('hwStatus');
+  if (status) status.textContent = `Exported sensor_profile.json for ${hardwareProfile.name || 'your rig'}`;
+}
+
+async function importHardwareProfile() {
+  const status = document.getElementById('hwStatus');
+  const pickProfile = (): Promise<string> => new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,application/json';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    input.addEventListener('change', () => {
+      const f = input.files && input.files[0];
+      document.body.removeChild(input);
+      if (!f) return reject(new Error('no file selected'));
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('read failed'));
+      reader.readAsText(f);
+    });
+    input.click();
+  });
+  try {
+    const text = await pickProfile();
+    const data = JSON.parse(text);
+    const sp = data?.sensor_profile ?? data ?? {};
+    const ckt = sp.circuit ?? {};
+    const chs = sp.channels ?? [];
+    hardwareProfile = {
+      preset: 'custom',
+      name: sp.model || sp.device_id || 'Imported rig',
+      adcBits: Number(ckt.adc_bits) || 12,
+      rloadOhm: Number(ckt.load_resistor_rl_ohm) || 1000,
+      vcc: Number(ckt.supply_voltage_vcc) || 5.0,
+      sensorOnLowSide: ckt.is_voltage_divider !== false,
+    };
+    // If the imported profile declares channel sensors, adopt them as the preset.
+    if (chs.length > 0) {
+      const names = chs.map((c: any) => c.sensor_model || `CH${c.channel_id + 1}`);
+      setChannelCount(names.length, names);
+    }
+    persistHardwareProfile();
+    renderHardwareProfile();
+    if (status) status.textContent = `Imported ${hardwareProfile.name}`;
+  } catch (e) {
+    if (status) { status.textContent = `Import failed: ${e}`; status.style.color = 'var(--red)'; }
+  }
+}
+
+// === Calibration & Sensor Library ===
+// Representative MQ-datasheet sensitivity-curve coefficients. Per the classic
+// MQ model:  RS/RO = a · C^b   (C = target-gas concentration in ppm).
+// `a` = sensitivity factor on the variable-resistance air point, `b` = log-log
+// slope. `r0_typ` and `rl` are the typical clean-air sensor resistance and the
+// board load resistor. Values are starting points — real units should be
+// tube-calibrated, but these keep the UI useful out of the box.
+const SENSOR_LIBRARY: Record<string, {
+  name: string; target: string; range: string;
+  a: number; b: number; r0_typ: number; rl: number; notes: string;
+}> = {
+  'MQ-135': { name: 'MQ-135', target: 'Air quality / NH₃ / benzene / CO₂', range: '10 – 1000 ppm', a: 102.2, b: -2.473, r0_typ: 100, rl: 20, notes: 'Low cost, general air-quality (CO₂/NH₃/VOC).' },
+  'MQ-3':   { name: 'MQ-3',   target: 'Alcohol / ethanol / smoke', range: '0.05 – 10 mg/L', a: 0.2924, b: -1.688, r0_typ: 2000, rl: 4.7, notes: 'Alcohol & smoke. Heater: 0.9 V.' },
+  'MQ-6':   { name: 'MQ-6',   target: 'LPG / butane / propane', range: '200 – 10000 ppm', a: 0.2549, b: -0.538, r0_typ: 30, rl: 20, notes: 'LPG/gas leak. Fast response.' },
+  'MQ-7':   { name: 'MQ-7',   target: 'Carbon monoxide (CO)', range: '20 – 2000 ppm', a: 99.04, b: -1.537, r0_typ: 1000, rl: 10, notes: 'CO; requires 1.4/5.0 V heater cycling.' },
+  'MQ-4':   { name: 'MQ-4',   target: 'Methane (CH₄) / natural gas', range: '300 – 10000 ppm', a: 0.5810, b: -0.5173, r0_typ: 1000, rl: 20, notes: 'Methane/natural-gas sensing.' },
+  'MQ-8':   { name: 'MQ-8',   target: 'Hydrogen (H₂)', range: '100 – 10000 ppm', a: 0.1052, b: -0.4035, r0_typ: 100, rl: 10, notes: 'H₂; also detects CO/LPG mildly.' },
+  'MQ-2':   { name: 'MQ-2',   target: 'LPG / smoke / alcohol / H₂', range: '300 – 10000 ppm', a: 1.035, b: -0.450, r0_typ: 68, rl: 5, notes: 'Combustible gas / smoke, multi-gas.' },
+  'MQ-9':   { name: 'MQ-9',   target: 'CO / combustible gas', range: '10 – 1000 ppm', a: 10.35, b: -0.823, r0_typ: 1000, rl: 10, notes: 'CO + methane; heater cycling like MQ-7.' },
+};
+
+// Per-channel calibration state, persisted to localStorage so it survives reloads.
+type CalibEntry = { model: string; r0: number; a: number; b: number; enabled: boolean };
+const CALIB_KEY = 'osmograph.calibration';
+let calibrationPerChannel: CalibEntry[] = [];
+function loadCalibration() {
+  try {
+    const raw = localStorage.getItem(CALIB_KEY);
+    if (raw) calibrationPerChannel = JSON.parse(raw) as CalibEntry[];
+  } catch { /* fall through to defaults */ }
+  if (!Array.isArray(calibrationPerChannel)) calibrationPerChannel = [];
+}
+function persistCalibration() {
+  try { localStorage.setItem(CALIB_KEY, JSON.stringify(calibrationPerChannel)); } catch { /* ignore */ }
+}
+
+// Ensure the calibration array covers every active channel with library defaults.
+function ensureCalibrationLength() {
+  while (calibrationPerChannel.length < chNames.length) {
+    const model = chNames[calibrationPerChannel.length] || `CH${calibrationPerChannel.length + 1}`;
+    const lib = SENSOR_LIBRARY[model];
+    calibrationPerChannel.push(lib
+      ? { model, r0: lib.r0_typ, a: lib.a, b: lib.b, enabled: true }
+      : { model, r0: 0, a: 1, b: -1, enabled: false });
+  }
+}
+
+// Convert a raw resistance reading to ppm using the active calibration for a channel.
+function calibratedPPM(ch: number, raw: number): number | null {
+  const c = calibrationPerChannel[ch];
+  if (!c || !c.enabled || !c.r0 || c.r0 <= 0 || raw <= 0) return null;
+  // rs/r0 ratio; RS ≈ rl*(Vcc/Vout - 1) handled upstream; here `raw` is a ratio proxy.
+  const rsRatio = raw;
+  const ppm = Math.pow(rsRatio / c.a, 1 / c.b);
+  return isFinite(ppm) && ppm > 0 ? ppm : null;
+}
+
+function renderCalibration() {
+  ensureCalibrationLength();
+  const table = document.getElementById('calibTable');
+  if (!table) return;
+  if (chNames.length === 0) { table.innerHTML = '<span class="hint">No channels configured.</span>'; return; }
+  table.innerHTML = [
+    '<div class="calib-row calib-head">',
+    '<span>CH</span><span>Sensor</span><span>R₀ (Ω)</span><span>a</span><span>b</span><span>Apply</span>',
+    '</div>',
+    ...chNames.map((name, i) => {
+      const c = calibrationPerChannel[i];
+      const lib = SENSOR_LIBRARY[name];
+      const opts = Object.keys(SENSOR_LIBRARY).map(m =>
+        `<option value="${m}" ${c.model === m ? 'selected' : ''}>${m}</option>`).join('');
+      const modelSel = `<select class="calib-model" data-ch="${i}">${lib ? `<option value="${name}">${name}</option>` : ''}${opts}</select>`;
+      return `<div class="calib-row">
+        <span class="calib-ch" style="color:${channelColor(i)}">CH${i + 1}</span>
+        ${modelSel}
+        <input class="calib-r0"  type="number" min="0" step="any" value="${c.r0}"  data-ch="${i}" />
+        <input class="calib-a"   type="number" min="0" step="any" value="${c.a}"   data-ch="${i}" />
+        <input class="calib-b"   type="number" step="any" value="${c.b}" data-ch="${i}" />
+        <span class="calib-toggle"><input class="calib-on" type="checkbox" data-ch="${i}" ${c.enabled ? 'checked' : ''} /></span>
+      </div>`;
+    }).join('')
+  ].join('');
+
+  table.querySelectorAll<HTMLSelectElement>('.calib-model').forEach(sel => {
+    sel.addEventListener('change', () => {
+      const i = Number(sel.dataset.ch);
+      const m = sel.value;
+      const lib = SENSOR_LIBRARY[m];
+      calibrationPerChannel[i] = lib
+        ? { model: m, r0: lib.r0_typ, a: lib.a, b: lib.b, enabled: true }
+        : { model: m, r0: calibrationPerChannel[i].r0, a: calibrationPerChannel[i].a, b: calibrationPerChannel[i].b, enabled: calibrationPerChannel[i].enabled };
+      renderCalibration();
+    });
+  });
+  table.querySelectorAll<HTMLInputElement>('.calib-r0,.calib-a,.calib-b').forEach(inp => {
+    inp.addEventListener('input', () => {
+      const i = Number(inp.dataset.ch);
+      const c = calibrationPerChannel[i];
+      if (!c) return;
+      if (inp.classList.contains('calib-r0')) c.r0 = Number(inp.value);
+      if (inp.classList.contains('calib-a')) c.a = Number(inp.value);
+      if (inp.classList.contains('calib-b')) c.b = Number(inp.value);
+    });
+  });
+  table.querySelectorAll<HTMLInputElement>('.calib-on').forEach(cb => {
+    cb.addEventListener('change', () => {
+      const i = Number(cb.dataset.ch);
+      if (calibrationPerChannel[i]) calibrationPerChannel[i].enabled = cb.checked;
+    });
+  });
+}
+
+function renderSensorLibrary(filter = '') {
+  const el = document.getElementById('sensorLibTable');
+  if (!el) return;
+  const q = filter.trim().toLowerCase();
+  const rows = Object.values(SENSOR_LIBRARY)
+    .filter(s => !q || `${s.name} ${s.target} ${s.range}`.toLowerCase().includes(q));
+  el.innerHTML = rows.length === 0
+    ? '<span class="hint">No sensors match that filter.</span>'
+    : `<table class="sensor-lib-table">
+        <thead><tr><th>Model</th><th>Target</th><th>Range</th><th>a</th><th>b</th><th>R₀ typ</th><th></th></tr></thead>
+        <tbody>${rows.map(s => `<tr>
+          <td><b>${s.name}</b></td>
+          <td title="${s.notes}">${s.target}</td>
+          <td>${s.range}</td>
+          <td>${s.a}</td>
+          <td>${s.b}</td>
+          <td>${s.r0_typ} Ω</td>
+          <td><button class="mini-btn" data-model="${s.name}">Apply → CH1</button></td>
+        </tr>`).join('')}</tbody>
+      </table>`;
+  el.querySelectorAll<HTMLButtonElement>('.mini-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const m = btn.dataset.model!;
+      applySensorToFirstChannel(m);
+    });
+  });
+}
+
+function applySensorToFirstChannel(model: string) {
+  const lib = SENSOR_LIBRARY[model];
+  if (!lib || chNames.length === 0) return;
+  ensureCalibrationLength();
+  // If the library model matches one of the configured sensor names, apply to
+  // that channel; otherwise apply to the first (or first empty) channel.
+  const idx = chNames.findIndex(n => n === model);
+  const target = idx >= 0 ? idx : 0;
+  calibrationPerChannel[target] = { model, r0: lib.r0_typ, a: lib.a, b: lib.b, enabled: true };
+  persistCalibration();
+  renderCalibration();
+  const st = document.getElementById('calibStatus');
+  if (st) { st.textContent = `Applied ${model} to CH${target + 1}.`; st.style.color = 'var(--text-2)'; }
+}
+
+document.getElementById('calibSave')!.addEventListener('click', () => {
+  persistCalibration();
+  const st = document.getElementById('calibStatus');
+  if (st) { st.textContent = 'Saved ✓'; st.style.color = 'var(--cyan)'; }
+  setTimeout(() => { if (st) st.textContent = 'Adjust values then Save.'; }, 2200);
+});
+
+document.getElementById('sensorLibSearch')!.addEventListener('input', (e) => {
+  renderSensorLibrary((e.target as HTMLInputElement).value);
+});
+
+// Export a sensor model as shareable JSON (the contribution payload).
+function exportSensorJSON(i: number) {
+  const c = calibrationPerChannel[i];
+  const pre = document.getElementById('calibExported');
+  if (!pre) return;
+  const payload = {
+    sensor: c.model,
+    target_gas: SENSOR_LIBRARY[c.model]?.target || '',
+    range_ppm: SENSOR_LIBRARY[c.model]?.range || '',
+    sensitivity_a: c.a,
+    exponent_b: c.b,
+    r0_typical_ohm: c.r0,
+    load_resistor_kohm: SENSOR_LIBRARY[c.model]?.rl ?? null,
+    source: 'osmograph-desktop',
+  };
+  pre.style.display = 'block';
+  pre.textContent = JSON.stringify(payload, null, 2);
+}
+document.getElementById('calibExport')!.addEventListener('click', () => {
+  ensureCalibrationLength();
+  exportSensorJSON(0);
+});
+
+// Open the project contribution page and marshal a prefilled sensor payload.
+document.getElementById('calibContribute')!.addEventListener('click', async () => {
+  ensureCalibrationLength();
+  exportSensorJSON(0);
+  const url = encodeURI(
+    'https://github.com/opensmell/opensmell/wiki/Contributing-Sensor-Models');
+  try {
+    // Tauri 2 isolates navigations; fall back gracefully to window.open.
+    window.open(url, '_blank', 'noopener');
+  } catch {
+    // ignore
+  }
+});
+
+// Re-render the calibration panel whenever the channel set changes.
+function refreshCalibrationViews() {
+  renderCalibration();
+  renderSensorLibrary((document.getElementById('sensorLibSearch') as HTMLInputElement)?.value || '');
+}
+
 // === Init ===
 refreshPorts();
 animate();
+loadCalibration();
+loadHardwareProfile();
+wireHardwareProfile();
 onPresetChange('6-sensor-full');
+renderHardwareProfile();
+renderSensorLibrary();
 updateBuzzerPreviews();
 updateOledPreview();
 renderFleet();
@@ -2445,3 +4234,21 @@ refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
+
+// Fit the window to the screen: never let it overstretch past the monitor's
+// work area. Degrades silently when the core doesn't grant window sizing.
+async function fitWindowToScreen() {
+  try {
+    const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window');
+    const { LogicalSize } = await import('@tauri-apps/api/dpi');
+    const win = getCurrentWindow();
+    const mon = await currentMonitor();
+    if (!mon) return;
+    const work = mon.size;
+    const w = Math.min(1320, Math.max(720, work.width - 48));
+    const h = Math.min(880, Math.max(560, work.height - 96));
+    await win.setSize(new LogicalSize(w, h));
+    await win.center();
+  } catch { /* not granted in this build — keep the configured window */ }
+}
+fitWindowToScreen();
