@@ -58,7 +58,7 @@ let lastSampleTime = 0;
 let lastDataAt = 0; // wall-clock of the last successfully-ingested reading (stall watchdog)
 let bootloaderHinted = false; // device answered in bootloader during the current link session
 let bootFlashShown = false;   // the Flash modal was already auto-offered during this bootloader stall
-let streamWidth = 0;          // how many channels the device actually streams (vs. the rig picker)
+let autoChannels = 0;         // channel count auto-detected from the live device stream (0 = none yet)
 let activePreset = '6-sensor-full';
 let chNames: string[] = PRESETS['6-sensor-full'].sensors;
 let traceData: number[][] = chNames.map(() => []);
@@ -647,11 +647,8 @@ tracesCanvas?.addEventListener('click', () => { cursorPX = -1; cursorPY = -1; dr
 // === Data Ingestion ===
 async function ingestReading(values: number[]) {
   if (values.length === 0) return;
-  // The rig picker (not the stream shape) decides how many channels are shown.
-  // A 3-sensor rig plugged into firmware that always reports 6 pins stays at
-  // 3 plotted channels — no silent re-size, no mystery extra traces.
-  streamWidth = values.length;
-  if (connected && streamWidth !== channelCount) updateRigNote();
+  // Channels are auto-detected from the device (Rust `serial-auto`/`serial-info`
+  // events → applyDetectedChannels). Here we just push whatever the stream gave.
   for (let ch = 0; ch < Math.min(values.length, traceData.length); ch++) {
     traceData[ch].push(values[ch]);
     if (traceData[ch].length > MAX_TRACE) traceData[ch].shift();
@@ -729,22 +726,51 @@ function updateSessionTime() {
 // === Port Management ===
 async function refreshPorts() {
   try {
-    const ports = await invoke<{ name: string; description: string; kind: string; hw_type: string }[]>('list_serial_ports');
+    const ports = await invoke<{ name: string; description: string; kind: string; hw_type: string; manufacturer: string }[]>('list_serial_ports');
     const sel = document.getElementById('portSelect') as HTMLSelectElement;
     const cur = sel.value;
     sel.innerHTML = '<option value="">Select port...</option>';
     for (const p of ports) {
       const opt = document.createElement('option');
       opt.value = p.name;
-      const label = p.kind === 'osmograph-e-nose' ? 'E-NOSE' :
-        p.kind && p.kind !== 'unknown-usb' ? p.kind.replace(/_/g, ' ').toUpperCase() : 'UNKNOWN';
-      opt.textContent = p.description ? `${p.name} — ${p.description} · ${label}` : `${p.name} · ${label}`;
+      const kind = p.kind;
+      const boardLabel = kind === 'osmograph-e-nose' ? 'ESP32 e-nose' :
+        kind && kind !== 'unknown-usb' ? kind.replace(/_/g, ' ').toUpperCase() : 'USB-SERIAL';
+      // Every USB/BT serial device is listed and connectable — Arduino, Pico,
+      // or any third-party controller — regardless of whether we recognise its
+      // VID:PID. Unknown boards still get the manufacturer/product name shown.
+      const desc = p.description || p.manufacturer || '';
+      opt.textContent = `${p.name} · ${boardLabel}${desc ? ' — ' + desc : ''}`;
       if (p.name === cur) opt.selected = true;
       sel.appendChild(opt);
     }
   } catch (e) {
     console.error('Port refresh failed:', e);
   }
+}
+
+// === Last connection memory (Python parity: reconnect to the same port on
+// startup so plug-in-and-go works for Arduino / any controller) ===
+const LAST_CONN_KEY = 'osmograph.lastConn';
+type LastConn = { mode: string; baud: string; port: string; addr: string; ble: string };
+
+function saveLastConnection() {
+  try {
+    const conn: LastConn = {
+      mode: (document.getElementById('modeSelect') as HTMLSelectElement).value,
+      baud: (document.getElementById('baudSelect') as HTMLSelectElement).value,
+      port: (document.getElementById('portSelect') as HTMLSelectElement).value,
+      addr: (document.getElementById('wifiAddr') as HTMLInputElement).value.trim(),
+      ble: (document.getElementById('bleSelect') as HTMLSelectElement).value,
+    };
+    localStorage.setItem(LAST_CONN_KEY, JSON.stringify(conn));
+  } catch { /* ignore */ }
+}
+
+function restoreLastConnection(): LastConn | null {
+  try {
+    return JSON.parse(localStorage.getItem(LAST_CONN_KEY) || 'null') as LastConn | null;
+  } catch { return null; }
 }
 
 // === BLE ===
@@ -836,7 +862,7 @@ async function toggleConnection() {
     return;
   }
 
-  streamWidth = 0;
+  autoChannels = 0;
   bootFlashShown = false;
   updateRigNote();
 
@@ -867,6 +893,7 @@ async function toggleConnection() {
       bootloaderHinted = false;
       document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('WiFi connected', true);
+      saveLastConnection();
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('WiFi connect failed:', e);
@@ -892,6 +919,7 @@ async function toggleConnection() {
       bootloaderHinted = false;
       document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('BLE connected', true);
+      saveLastConnection();
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('BLE connect failed:', e);
@@ -913,6 +941,7 @@ async function toggleConnection() {
       bootloaderHinted = false;
       document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('Serial connected', true);
+      saveLastConnection();
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('Connect failed:', e);
@@ -1724,9 +1753,14 @@ function updateBuzzerPreviews() {
   drawBuzzerPattern('buzPrevEmerg', (document.getElementById('buzzerEmerg') as HTMLSelectElement).value);
 }
 
-// === Dynamic channel count (device-agnostic) ===
+// === Dynamic channel count (auto-detected from the connected device) ===
+// The device's stream decides how many channels are plotted — parity with the
+// Python app: firmware announces INFO,id,fw,n_channels and any Arduino (or
+// third-party board) that dumps N numeric CSV columns is detected from its own
+// stream width. There is no manual selector: the app just adapts to the device.
 function setChannelCount(n: number, names?: string[]) {
   const next = Math.max(1, Math.min(64, Math.floor(n) || 1));
+  if (next === channelCount && !names) return;
   channelCount = next;
   if (names && names.length === next) {
     chNames = names;
@@ -1739,42 +1773,72 @@ function setChannelCount(n: number, names?: string[]) {
   if (sc && sc.value !== String(next)) sc.value = String(next);
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(next);
-  syncRigChips();
   updateRigNote();
   updateRailCoord();
   refreshCalibrationViews();
 }
 
-// === Rig picker (how many sensors the rig actually has) ===
-// The picker is the source of truth for how many channels are plotted. The
-// graph stays at the picked size even when the firmware always reports more
-// pins than there are sensors wired up.
-function syncRigChips() {
-  document.querySelectorAll<HTMLElement>('.rg-chip').forEach((chip) => {
-    const preset = chip.getAttribute('data-preset');
-    chip.classList.toggle('active', preset === activePreset);
-  });
+// Apply a channel count learned from the live device (Rust `serial-auto` /
+// `serial-info` events). Ignore resizes back to the default until a device is
+// actually present so the pre-connect state stays tidy.
+function applyDetectedChannels(n: number, source?: string) {
+  const count = Math.floor(n);
+  if (!count || count < 1) return;
+  const wasConnected = connected;
+  autoChannels = count;
+  if (wasConnected) setChannelCount(count);
+  else channelCount = count;
+  // If the user has custom channel names for this count, apply them now.
+  applyCustomNames();
+  updateRigNote();
+  const cm = document.getElementById('connMsg');
+  if (cm && wasConnected) {
+    cm.textContent = `${count}-channel device detected (auto)`;
+    cm.style.color = 'var(--text-3)';
+  }
+  console.log(`[osmograph] auto-detected ${count} channels (${source || 'stream'})`);
 }
 
 function defaultRigNote(): string {
-  return 'Pick how many sensors your rig has — only those are plotted.';
+  return 'Connect a device — its channels are auto-detected from the stream.';
 }
 
 function updateRigNote() {
   const note = document.getElementById('rigNote');
   if (!note) return;
-  if (streamWidth > 0 && streamWidth !== channelCount) {
-    note.textContent = `Device streams ${streamWidth} channels — ${channelCount} are plotted. Match the picker to your rig.`;
-    note.classList.add('warn');
+  if (autoChannels > 0) {
+    note.textContent = `Auto-detected: ${autoChannels} channel${autoChannels === 1 ? '' : 's'} from the device — plot adapted.`;
+    note.classList.add('ok');
   } else {
     note.textContent = defaultRigNote();
-    note.classList.remove('warn');
+    note.classList.remove('ok');
   }
 }
 
 function updateRailCoord() {
   const el = document.getElementById('railCoord');
   if (el) el.textContent = `${channelCount} CH · ${activePreset}`;
+}
+
+/// If the hardware profile has custom channel names for the current count,
+/// apply them to `chNames` + the legend. Called on init, auto-detect, and when
+/// the user edits the channel names input.
+function applyCustomNames() {
+  const names = hardwareProfile.customChannelNames;
+  if (!names || names.length === 0) return;
+  // Use custom names when their count matches the current channel count;
+  // otherwise truncate/pad with CHn defaults to keep the UI consistent.
+  if (names.length !== channelCount) {
+    chNames = Array.from({ length: channelCount }, (_, i) => names[i] || `CH${i + 1}`);
+  } else {
+    chNames = [...names];
+  }
+  traceData = chNames.map(() => []);
+  buildLegend();
+  const pc = document.getElementById('plotChCount');
+  if (pc) pc.textContent = String(channelCount);
+  updateRailCoord();
+  refreshCalibrationViews();
 }
 
 // === Preset Change ===
@@ -1786,10 +1850,9 @@ function onPresetChange(preset: string) {
   channelCount = p.sensors.length;
   traceData = chNames.map(() => []);
   buildLegend();
-  syncRigChips();
-  updateRigNote();
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(channelCount);
+  updateRigNote();
   updateRailCoord();
   refreshCalibrationViews();
   const detail = document.getElementById('presetDetail');
@@ -1825,19 +1888,21 @@ function renderTrain() {
     const checked = fid ? trainSelected.has(fid) : false;
     const q = qualityBadge(s.quality);
     const analyzed = s.quality_report && typeof s.quality_report.total === 'number';
-    const prov = analyzed ? '' : '<em class="quality-prov" title="Provisional estimate — auto-analyzed before training">prov</em>';
     const below = minQ > 0 && s.quality < minQ * 100;
     const rowCls = below ? ' class="train-blocked"' : '';
     const filename = s.path ? String(s.path).split('/').pop() || s.label : s.substance;
-    return `<tr${rowCls}>
+    const qualityCell = analyzed
+        ? (below
+          ? `<span class="quality-badge bad" title="Below the ${(minQ * 100).toFixed(0)}/100 quality gate — will be excluded from training">${q.label} ${s.quality} blocked</span>`
+          : `<span class="quality-badge ${q.cls}">${q.label} ${s.quality}</span>`)
+        : `<button class="lib-analyze train-analyze" data-fid="${fid}" title="Run the full 7-factor quality analysis">Not analyzed — Analyze</button>`;
+      return `<tr${rowCls}>
       <td><input type="checkbox" class="train-tick" data-fid="${fid}" ${checked ? 'checked' : ''} ${fid ? '' : 'disabled'}></td>
       <td>${s.time}</td>
       <td>${s.substance}</td>
       <td><input type="text" class="train-label" data-fid="${fid}" value="${s.substance.replace(/"/g, '&quot;')}" placeholder="label" ${fid ? '' : 'disabled'} /></td>
       <td style="overflow:hidden;text-overflow:ellipsis;color:var(--text-2)" title="${filename}">${filename}</td>
-      <td>${below
-        ? `<span class="quality-badge bad" title="Below the ${(minQ * 100).toFixed(0)}/100 quality gate — will be excluded from training">${q.label} ${s.quality} blocked</span>`
-        : `<span class="quality-badge ${q.cls}">${q.label} ${s.quality}${prov}</span>`}</td>
+      <td>${qualityCell}</td>
     </tr>`;
   }).join('');
   const analyzedCount = sessions.filter(s => s.quality_report && typeof s.quality_report.total === 'number').length;
@@ -1851,6 +1916,19 @@ function renderTrain() {
       if (box.checked) trainSelected.add(fid);
       else trainSelected.delete(fid);
       updateTrainButton();
+    });
+  });
+  body.querySelectorAll('.train-analyze').forEach(btn => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const fid = btn.getAttribute('data-fid') || '';
+      const idx = sessions.findIndex(s => s.file_id === fid);
+      if (idx >= 0) {
+        btn.textContent = 'Analyzing…';
+        btn.setAttribute('disabled', 'true');
+        await analyzeLibrarySession(idx);
+        renderTrain();
+      }
     });
   });
   body.querySelectorAll('.train-label').forEach(inp => {
@@ -2195,9 +2273,6 @@ document.getElementById('modeSelect')!.addEventListener('change', () => {
   if (value === 'ble') scanBleDevices();
 });
 document.getElementById('connectBtn')!.addEventListener('click', toggleConnection);
-document.querySelectorAll<HTMLElement>('.rg-chip').forEach((chip) => {
-  chip.addEventListener('click', () => onPresetChange(chip.getAttribute('data-preset') || activePreset));
-});
 document.getElementById('refreshBtn')!.addEventListener('click', () => {
   const mode = (document.getElementById('modeSelect') as HTMLSelectElement).value;
   if (mode === 'ble') scanBleDevices();
@@ -2492,14 +2567,12 @@ document.getElementById('dataExportCSV')!.addEventListener('click', async () => 
 document.getElementById('dataSubmitCommons')!.addEventListener('click', async () => {
   try {
     const dir = dataDirValue || (await invoke<string>('get_data_dir'));
-    await invoke('export_labeled_data', { outputDir: dir });
-    const csvPath = `${dir}/session_unknown.csv`;
-    const metaPath = `${dir}/session_unknown.json`;
-    const info = await invoke<{
+    const infos = await invoke<Array<{
       id: string; substance: string; quality_score: number; status: string;
       n_samples: number; n_channels: number;
-    }>('commons_submit', { csvPath, metaPath, dataDir: dir });
-    await flashStatus('libStatus', `Submitted to Data Commons — id ${info.id} · ${info.substance} · q ${info.quality_score.toFixed(0)} · ${info.status}`, 'var(--green)');
+    }>>('export_and_submit_commons', { dataDir: dir });
+    const first = infos[0];
+    await flashStatus('libStatus', `Submitted ${infos.length} session(s) — ${first.substance} · q ${first.quality_score.toFixed(0)} · ${first.status}`, 'var(--green)');
     await refreshHub();
   } catch (e) {
     await flashStatus('libStatus', `Submit failed: ${e}`, 'var(--red)');
@@ -2745,7 +2818,10 @@ document.getElementById('sysPreset')!.addEventListener('change', (e) => {
 document.getElementById('sysChannels')!.addEventListener('change', (e) => {
   const el = e.target as HTMLInputElement;
   const n = parseInt(el.value, 10);
-  if (!isNaN(n) && n > 0) setChannelCount(n);
+  if (!isNaN(n) && n > 0) {
+    setChannelCount(n);
+    applyCustomNames();
+  }
 });
 
 // === Phase Recording (.osmell) ===
@@ -2965,6 +3041,7 @@ document.getElementById('recStart')!.addEventListener('click', async () => {
       exposureSec: exposure,
       recoverySec: recovery,
       presetName: activePreset,
+      channelNames: chNames,
     });
     recPhaseActive = true;
     prevPhaseActive = true;
@@ -3245,6 +3322,13 @@ listen<{ channels: number[]; timestamp: number; raw_line: string }>('serial-data
 listen<{ device_id: string; firmware_version: string; n_sensors: number }>('serial-info', (event) => {
   const { device_id, firmware_version, n_sensors } = event.payload;
   console.log(`Device: ${device_id} v${firmware_version} (${n_sensors} sensors)`);
+  applyDetectedChannels(n_sensors, 'info');
+});
+
+// Rust auto-detected the channel width from the live stream (any Arduino /
+// third-party board that dumps N numeric CSV columns).
+listen<{ n_channels: number; source: string }>('serial-auto', (event) => {
+  applyDetectedChannels(event.payload.n_channels, event.payload.source);
 });
 
 listen<{ code: number; message: string }>('serial-error', (event) => {
@@ -3259,7 +3343,7 @@ listen<{ code: number; message: string }>('serial-error', (event) => {
 function dropLink(reason: string) {
   connected = false;
   bootloaderHinted = false;
-  streamWidth = 0;
+  autoChannels = 0;
   bootFlashShown = false;
   updateRigNote();
   document.getElementById('bootBanner')?.classList.remove('show');
@@ -3817,6 +3901,210 @@ setInterval(pollPhaseRecorder, 500);
 setInterval(reloadClassifiers, 4000);
 setInterval(refreshBurnIn, 1000);
 
+// === Measured Phenotype Strip ===
+// Live readout of the Rust `compute_phenotype` report over the readings ring.
+// Mirrors the perception-layer honesty rules: only the validated 2-cluster
+// response-type reference is used; everything else surfaces as a boundary.
+type PhenotypeReport = {
+  has_data: boolean;
+  n_channels: number;
+  reference_geometry: boolean;
+  per_channel: Array<{
+    channel: number;
+    direction: string;
+    delta: number;
+    cv: number;
+  }>;
+  a1: { valence: string; summary: string };
+  a3: {
+    fingerprint: number[];
+    assignable: boolean;
+    reason: string;
+    response_type: string | null;
+    measured_membership: string | null;
+    percept: string | null;
+    plain_language: string | null;
+    confidence: string | null;
+    nearest_distance: number | null;
+  };
+  protocol: {
+    recording: boolean;
+    current_phase: string;
+    phase_label: string;
+    instruction: string;
+    complete: boolean;
+    note: string;
+  };
+  boundaries_cannot: string[];
+  caveat: string;
+};
+
+const PHENO_DIR_GLYPH: Record<string, string> = {
+  reducing: '▼',
+  oxidizing: '▲',
+  flat: '·',
+  masked: '⊘',
+};
+const PHENO_DIR_COLOR: Record<string, string> = {
+  reducing: 'var(--green)',
+  oxidizing: 'var(--yellow)',
+  flat: 'var(--text-3)',
+  masked: 'var(--text-3)',
+};
+
+function setA1Direction(valence: string) {
+  const tri = document.getElementById('phenoA1Tri');
+  const val = document.getElementById('phenoA1Val');
+  const color = PHENO_DIR_COLOR[valence] || 'var(--text-3)';
+  const glyph = PHENO_DIR_GLYPH[valence] || '·';
+  if (tri) {
+    tri.textContent = glyph;
+    tri.style.color = color;
+  }
+  if (val) {
+    val.style.color = color;
+    val.textContent = valence === 'none' ? '—' : valence;
+  }
+}
+
+function cssVarColor(name: string): string {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || '#888';
+}
+
+function drawPhenoBars(fp: number[], validGeometry: boolean) {
+  const canvas = document.getElementById('phenoBars') as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, canvas.clientWidth);
+  const h = Math.max(1, canvas.clientHeight);
+  const pw = Math.round(w * dpr);
+  const ph = Math.round(h * dpr);
+  if (canvas.width !== pw || canvas.height !== ph) {
+    canvas.width = pw;
+    canvas.height = ph;
+  }
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, pw, ph);
+  if (fp.length === 0) {
+    ctx.fillStyle = cssVarColor('--text-3');
+    ctx.globalAlpha = 0.7;
+    ctx.font = `${Math.max(8, Math.round(h * 0.24))}px monospace`;
+    ctx.textBaseline = 'middle';
+    ctx.fillText('no fingerprint', 4, h / 2);
+    ctx.globalAlpha = 1;
+    return;
+  }
+  const cry = cssVarColor(validGeometry ? '--cyan' : '--text-3');
+  const maxV = Math.max(...fp, 0.001);
+  const pad = 2 * dpr;
+  const bw = (pw - pad * 2) / fp.length;
+  for (let i = 0; i < fp.length; i++) {
+    const bh = Math.max(1.5 * dpr, (fp[i] / maxV) * (ph - pad * 2));
+    ctx.fillStyle = cry;
+    ctx.globalAlpha = validGeometry ? 0.85 : 0.45;
+    ctx.fillRect(pad + i * bw, ph - pad - bh, Math.max(1, bw - dpr), bh);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function phenoA3Reason(reason: string): string {
+  if (reason === 'flat_selectivity_profile') return 'flat selectivity — no dominant response direction to classify';
+  if (reason === 'reference_space_mismatch') return 'not a 16-sensor reference array — no validated response-type space for this geometry';
+  if (reason === 'insufficient_data') return 'insufficient data';
+  return reason;
+}
+
+function drawBoundaryList(p: PhenotypeReport) {
+  const el = document.getElementById('phenoBoundList');
+  if (!el) return;
+  const cannot = p.boundaries_cannot.length ? p.boundaries_cannot.map((b) => `✗ ${b}`).join('<br/>') : '';
+  const caveat = p.caveat ? `<span title="${esc(p.caveat)}">⚠ ${esc(p.caveat)}</span>` : '';
+  el.innerHTML = cannot + (cannot && caveat ? '<br/><br/>' : '') + caveat;
+}
+
+function renderPhenotype(p: PhenotypeReport) {
+  const setVal = (id: string, v: string) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = v;
+  };
+
+  const a1Color = p.a1.valence === 'reducing'
+    ? 'var(--green)'
+    : p.a1.valence === 'oxidizing' ? 'var(--yellow)' : 'var(--text-3)';
+  const tag = document.getElementById('phenoA1Tag');
+  if (tag) {
+    tag.style.color = a1Color;
+    tag.textContent = p.has_data ? `A1 · ${p.a1.valence}` : 'A1 —';
+  }
+
+  if (!p.has_data) {
+    setA1Direction(p.a1.valence);
+    setVal('phenoA1Sub', p.a1.summary);
+    setVal('phenoA1Chips', '');
+    setVal('phenoA3Val', 'no reference');
+    setVal('phenoA3Sub', phenoA3Reason(p.a3.reason));
+    const cap0 = document.getElementById('phenoA3Cap');
+    if (cap0) cap0.textContent = p.n_channels > 0 ? `${p.n_channels} channels` : '';
+    setVal('phenoA2Val', 'idle');
+    setVal('phenoA2Sub', p.protocol.note);
+    drawPhenoBars([], false);
+    drawBoundaryList(p);
+    return;
+  }
+
+  // A1 — redox valence of the responding-channel majority.
+  setA1Direction(p.a1.valence);
+  setVal('phenoA1Sub', p.a1.summary);
+  const chips = document.getElementById('phenoA1Chips')!;
+  chips.innerHTML = p.per_channel.map((c) => {
+    const color = PHENO_DIR_COLOR[c.direction] || 'var(--text-3)';
+    const tri = PHENO_DIR_GLYPH[c.direction] || '';
+    return `<span class="pheno-chip" title="${c.direction} · Δ ${c.delta.toFixed(2)} · CV ${c.cv.toFixed(2)}">` +
+      `<span class="pd-dot" style="background:${color}"></span>${esc(chNames[c.channel] || `CH${c.channel + 1}`)} <span style="color:${color}">${tri}</span></span>`;
+  }).join('');
+
+  // A3 — response type vs the validated 2-cluster reference.
+  if (p.a3.assignable && p.a3.response_type) {
+    setVal('phenoA3Val', p.a3.response_type + (p.a3.confidence ? ` · ${p.a3.confidence}` : ''));
+    const dist = p.a3.nearest_distance != null ? `d ${p.a3.nearest_distance.toFixed(2)}` : '';
+    setVal('phenoA3Sub', [p.a3.plain_language, p.a3.measured_membership, dist].filter(Boolean).join(' — '));
+  } else {
+    setVal('phenoA3Val', 'not assigned');
+    setVal('phenoA3Sub', phenoA3Reason(p.a3.reason));
+  }
+  const cap = document.getElementById('phenoA3Cap');
+  if (cap) cap.textContent = `${p.a3.fingerprint.length} channels · ${p.a3.reason}`;
+  drawPhenoBars(p.a3.fingerprint, p.reference_geometry);
+
+  // A2 — protocol gating for the kinetics axes.
+  if (p.protocol.recording) {
+    setVal('phenoA2Val', `recording · ${p.protocol.current_phase}`);
+    setVal('phenoA2Sub', `${p.protocol.phase_label}: ${p.protocol.instruction}`);
+  } else if (p.protocol.complete) {
+    setVal('phenoA2Val', 'complete');
+    setVal('phenoA2Sub', p.protocol.note);
+  } else {
+    setVal('phenoA2Val', 'idle');
+    setVal('phenoA2Sub', p.protocol.note);
+  }
+
+  drawBoundaryList(p);
+}
+
+async function pollPhenotype() {
+  try {
+    const p = await invoke<PhenotypeReport>('compute_phenotype');
+    renderPhenotype(p);
+  } catch (e) {
+    // Keep the last good frame; the Rust side reports honest refusals in-band.
+    console.error('Phenotype poll error:', e);
+  }
+}
+pollPhenotype();
+setInterval(pollPhenotype, 2000);
+
 // === Hardware Profile ===
 // Plain per-rig description matching the perception-layer `sensor_profile.json`
 // (schema v1). It records how the user's board is wired (circuit reference) and
@@ -3830,6 +4118,8 @@ type HardwareProfile = {
   rloadOhm: number;
   vcc: number;
   sensorOnLowSide: boolean;
+  /// User-specified channel names (any count) — overrides preset names when set.
+  customChannelNames?: string[];
 };
 const HW_KEY = 'osmograph.hardware';
 let hardwareProfile: HardwareProfile = {
@@ -3898,6 +4188,18 @@ function wireHardwareProfile() {
     hardwareProfile.sensorOnLowSide = lowEl.value === 'true';
     persistHardwareProfile();
   });
+
+  // Custom channel names — comma-separated, persists to HW profile.
+  const namesEl = document.getElementById('channelNamesInput') as HTMLInputElement | null;
+  if (namesEl) {
+    namesEl.value = (hardwareProfile.customChannelNames || []).join(', ');
+    namesEl.addEventListener('input', () => {
+      const parts = namesEl.value.split(',').map(s => s.trim()).filter(Boolean);
+      hardwareProfile.customChannelNames = parts.length > 0 ? parts : undefined;
+      persistHardwareProfile();
+      applyCustomNames();
+    });
+  }
 
   const exportBtn = document.getElementById('hwExport');
   exportBtn?.addEventListener('click', () => exportHardwareProfile());
@@ -4215,13 +4517,50 @@ function refreshCalibrationViews() {
 }
 
 // === Init ===
-refreshPorts();
+refreshPorts().then(() => maybeAutoReconnect());
+
+// Restore the last connection and, for serial, reconnect automatically once the
+// remembered port shows up (Python parity). Non-critical — silently no-ops
+// when nothing is remembered or plugged in.
+let autoReconnectDone = false;
+function maybeAutoReconnect() {
+  const stored = restoreLastConnection();
+  if (!stored || autoReconnectDone) return;
+  autoReconnectDone = true;
+  const modeSel = document.getElementById('modeSelect') as HTMLSelectElement;
+  const wifi = document.getElementById('wifiAddr') as HTMLInputElement;
+  const ble = document.getElementById('bleSelect') as HTMLSelectElement;
+  if (stored.mode && (stored.mode === 'serial' || stored.mode === 'wifi' || stored.mode === 'ble')) {
+    modeSel.value = stored.mode;
+    wifi.style.display = stored.mode === 'wifi' ? '' : 'none';
+    ble.style.display = stored.mode === 'ble' ? '' : 'none';
+  }
+  if (stored.mode === 'wifi' && stored.addr) {
+    wifi.value = stored.addr;
+  }
+  if (stored.mode === 'ble') {
+    if (stored.ble) {
+      (document.getElementById('bleSelect') as HTMLSelectElement).value = stored.ble;
+    }
+  }
+  if (stored.mode !== 'serial') return;
+  const baudSel = document.getElementById('baudSelect') as HTMLSelectElement;
+  if (stored.baud) {
+    try { baudSel.value = stored.baud; } catch { /* not a valid option */ }
+  }
+  const sel = document.getElementById('portSelect') as HTMLSelectElement;
+  const present = stored.port && Array.from(sel.options).some(o => o.value === stored.port);
+  if (!present) return; // device not plugged in — user picks it manually; no nag
+  sel.value = stored.port;
+  toggleConnection();
+}
 animate();
 loadCalibration();
 loadHardwareProfile();
 wireHardwareProfile();
 onPresetChange('6-sensor-full');
 renderHardwareProfile();
+applyCustomNames();
 renderSensorLibrary();
 updateBuzzerPreviews();
 updateOledPreview();

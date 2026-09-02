@@ -38,7 +38,6 @@ pub const PHASE_INSTRUCTIONS: [(&str, &str); 3] = [
     (PHASE_RECOVERY, "Remove the substance — let sensors recover."),
 ];
 
-pub const DEFAULT_CHANNEL_IDS: [&str; 6] = ["VOC", "Alcohol", "LPG", "CO", "NO2", "C2H5OH"];
 pub const OSMELL_FORMAT_VERSION: &str = "1.0.0";
 
 /// Default phase durations in seconds (Python `osmell_recorder.py:87-89`).
@@ -46,12 +45,11 @@ pub const DEFAULT_BASELINE_SEC: f64 = 30.0;
 pub const DEFAULT_EXPOSURE_SEC: f64 = 60.0;
 pub const DEFAULT_RECOVERY_SEC: f64 = 30.0;
 
-fn channel_id(index: usize) -> String {
-    if index < DEFAULT_CHANNEL_IDS.len() {
-        DEFAULT_CHANNEL_IDS[index].to_string()
-    } else {
-        format!("ch{}", index)
-    }
+fn channel_id(index: usize, names: &[String]) -> String {
+    names
+        .get(index)
+        .cloned()
+        .unwrap_or_else(|| format!("CH{}", index + 1))
 }
 
 /// Phase name -> human-facing label lookup (before/during/after).
@@ -132,6 +130,9 @@ pub struct OsmellRecorder {
     recovery_sec: f64,
     n_sensors: usize,
     preset_name: String,
+    /// Per-channel display names (e.g. `["MQ-135","MQ-3","CH3"]`), used for
+    /// manifest and CSV headers instead of the old hardcoded VOC/Alcohol table.
+    channel_names: Vec<String>,
 
     label: String,
     rec_start: Option<f64>,
@@ -150,6 +151,7 @@ impl OsmellRecorder {
             recovery_sec: DEFAULT_RECOVERY_SEC,
             n_sensors: 6,
             preset_name: String::new(),
+            channel_names: Vec::new(),
             label: String::new(),
             rec_start: None,
             phases: Vec::new(),
@@ -172,6 +174,19 @@ impl OsmellRecorder {
         self.recovery_sec = recovery_sec;
         self.n_sensors = n_sensors.max(1);
         self.preset_name = preset_name.to_string();
+    }
+
+    /// Set the live per-channel display names (any count — the recorded
+    /// manifest/CSV reflects the device the user actually connected).
+    pub fn set_channel_names(&mut self, names: &[String]) {
+        self.channel_names = names
+            .iter()
+            .map(|n| if n.trim().is_empty() { "".into() } else { n.trim().into() })
+            .collect();
+    }
+
+    fn channel_id(&self, index: usize) -> String {
+        channel_id(index, &self.channel_names)
     }
 
     pub fn set_save_dir(&mut self, path: PathBuf) {
@@ -412,9 +427,9 @@ impl OsmellRecorder {
 
         let dead_ids: Vec<String> = (0..n_cols)
             .filter(|i| !active_idx.contains(i))
-            .map(channel_id)
+            .map(|i| self.channel_id(i))
             .collect();
-        let channel_ids: Vec<String> = active_idx.iter().map(|&i| channel_id(i)).collect();
+        let channel_ids: Vec<String> = active_idx.iter().map(|&i| self.channel_id(i)).collect();
 
         // Sampling-rate estimate from the median inter-sample gap (Hz).
         let mut sr_hz = 2.0;
@@ -439,7 +454,7 @@ impl OsmellRecorder {
 
         let data: Vec<(String, Vec<f64>)> = active_idx
             .iter()
-            .map(|&i| (channel_id(i), all_vals.iter().map(|row| row[i]).collect()))
+            .map(|&i| (self.channel_id(i), all_vals.iter().map(|row| row[i]).collect()))
             .collect();
 
         let recorded_at = chrono::Utc::now().to_rfc3339();
@@ -747,7 +762,7 @@ mod tests {
 
         let csv = String::from_utf8(read_entry(&mut archive, "data.csv")).unwrap();
         let mut lines = csv.lines();
-        assert_eq!(lines.next().unwrap(), "timestamp_ms,VOC,Alcohol,LPG,CO,NO2,C2H5OH");
+        assert_eq!(lines.next().unwrap(), "timestamp_ms,CH1,CH2,CH3,CH4,CH5,CH6");
         let n_rows = lines.filter(|l| !l.is_empty()).count();
         assert_eq!(n_rows, 16);
 
@@ -769,7 +784,7 @@ mod tests {
         rec.configure(0.5, 0.5, 0.5, 6, "");
         rec.start_at("dead", 0.0);
         for (i, t) in (0..20).map(|i| (i as f64) * 0.1).enumerate() {
-            // Channel 2 (LPG) is flat -> dead; the rest vary.
+            // Channel 2 (index 2, "CH3") is flat -> dead; the rest vary.
             rec.write_sample_at(
                 &[
                     1000.0 + i as f64,
@@ -793,14 +808,14 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
-        assert_eq!(dead, vec!["LPG"]);
+        assert_eq!(dead, vec!["CH3"]);
         assert_eq!(manifest["recording"]["totalChannels"], 6);
         assert_eq!(manifest["recording"]["activeChannels"], 5);
 
         let csv = String::from_utf8(read_entry(&mut archive, "data.csv")).unwrap();
         let header = csv.lines().next().unwrap();
-        assert!(!header.contains("LPG"));
-        assert!(header.contains("VOC"));
+        assert!(!header.contains("CH3"));
+        assert!(header.contains("CH1"));
         let _ = fs::remove_dir_all(&dir);
     }
 

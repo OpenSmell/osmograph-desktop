@@ -89,7 +89,7 @@
     /* === Layout === */
     .app {
       display: grid;
-      grid-template-rows: 40px 32px 1fr 24px;
+      grid-template-rows: 40px 32px 1fr 28px;
       height: 100vh;
     }
 
@@ -653,11 +653,11 @@
     .dock-toggle:hover { color: var(--cyan); border-color: var(--cyan); }
     .dock-body {
       flex: 1;
-      overflow: auto;
+      overflow: hidden;
       padding: 8px 12px;
       display: flex;
-      align-items: center;
-      justify-content: center;
+      align-items: stretch;
+      justify-content: stretch;
       font-family: var(--font-mono);
       font-size: 10px;
       color: var(--text-3);
@@ -665,6 +665,115 @@
     }
     .dock.collapsed { height: 26px; }
     .dock.collapsed .dock-body { display: none; }
+    /* Measured phenotype strip — A1 redox / A3 response-type / A2 protocol /
+       boundaries, computed in Rust over the live readings ring. */
+    .pheno-strip {
+      display: flex;
+      align-items: stretch;
+      gap: 12px;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      flex: 1;
+    }
+    .pheno-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 0;
+      min-height: 0;
+      flex: 1 1 0;
+      background: color-mix(in srgb, var(--bg-1) 55%, transparent);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-sm);
+      padding: 7px 9px;
+    }
+    .pheno-cell.grow { flex: 2 1 0; }
+    .pheno-cell-head {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.12em;
+      color: var(--text-3);
+      text-transform: uppercase;
+      border-bottom: 1px dashed var(--border);
+      padding-bottom: 3px;
+    }
+    .pheno-val {
+      font-family: var(--font-mono);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-0);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pheno-direction {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+    .pheno-tri {
+      flex: none;
+      font-size: 17px;
+      line-height: 1;
+      color: var(--text-3);
+      transition: color 0.2s ease;
+    }
+    .pheno-sub {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-3);
+      line-height: 1.35;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pheno-chips { display: flex; flex-wrap: wrap; gap: 4px 6px; }
+    .pheno-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.04em;
+      color: var(--text-2);
+      text-transform: uppercase;
+    }
+    .pheno-chip .pd-dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+    .pheno-sep { width: 1px; background: var(--border); flex-shrink: 0; }
+    .pheno-bars { flex: 1; min-height: 36px; min-width: 0; }
+    .pheno-bars canvas { width: 100%; height: 100%; display: block; }
+    .pheno-caption {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.05em;
+      color: var(--text-3);
+      text-align: right;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pheno-limits {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      line-height: 1.4;
+      color: var(--text-3);
+      overflow: hidden;
+    }
+    .pheno-limits-link {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--cyan);
+      text-decoration: none;
+    }
+    .pheno-limits-link:hover { text-decoration: underline; }
+    .dy-label {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      color: var(--text-2);
+      text-transform: uppercase;
+    }
     /* Compact per-sensor health readout — 2-col grid, one slim cell per sensor. */
     .health-grid {
       display: grid;
@@ -1375,19 +1484,19 @@
     }
 
     /* OLED Preview */
-    .oled-preview {
-      background: #000;
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 12px;
-      font-family: var(--font-mono);
-      font-size: 11px;
-      color: var(--green);
-      min-height: 80px;
-      margin-top: 8px;
-      white-space: pre;
-      line-height: 1.4;
-    }
+.oled-preview {
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: #8cff7f;
+    min-height: 80px;
+    margin-top: 8px;
+    white-space: pre;
+    line-height: 1.4;
+  }
 
     /* Buzzer Pattern Visualizer */
     .buzzer-pattern {
@@ -1617,14 +1726,14 @@
 
     /* === Footer === */
     .footer {
-      background: var(--bg-1);
-      border-top: 1px solid var(--border);
+      background: var(--bg-2);
+      border-top: 1px solid var(--border-strong);
       display: flex;
       align-items: center;
       padding: 0 10px;
       font-size: 10px;
-      color: var(--text-3);
-      gap: 14px;
+      color: var(--text-2);
+      gap: 12px;
     }
     .footer .sep { width: 1px; height: 12px; background: var(--border); }
     .footer-stat { display: flex; align-items: center; gap: 3px; }
@@ -1685,18 +1794,10 @@
     .modal-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
     .modal-actions button { padding: 5px 12px; }
 
-    /* === Rig picker / flash modal / drop hint / train shortfall === */
+    /* === Flash modal / drop hint / train shortfall === */
     .rig-bar { display: flex; align-items: center; gap: 6px; padding: 3px 0 5px; flex-wrap: wrap; }
-    .rg-chip {
-      font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
-      padding: 2px 10px; border-radius: 999px; cursor: pointer;
-      border: 1px solid var(--border); background: var(--bg-1); color: var(--text-2);
-      transition: all .12s ease;
-    }
-    .rg-chip:hover { border-color: var(--green); color: var(--green); }
-    .rg-chip.active { background: var(--green-dim); border-color: var(--green); color: var(--green); }
     .rg-note { font-size: 10px; color: var(--text-3); }
-    .rg-note.warn { color: var(--yellow); }
+    .rg-note.ok { color: var(--green); }
     .drop-hint {
       position: absolute; inset: 0; z-index: 20;
       display: flex; align-items: center; justify-content: center;
@@ -1738,6 +1839,8 @@
           <option value="115200" selected>115200</option>
           <option value="921600">921600</option>
           <option value="230400">230400</option>
+          <option value="57600">57600</option>
+          <option value="9600">9600</option>
         </select>
         <input type="text" id="wifiAddr" placeholder="192.168.4.1:8080" autocomplete="off"
           style="width:130px;display:none;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;color:var(--text-1);font-size:11px;padding:3px 6px" />
@@ -1803,12 +1906,8 @@
             </div>
             <div id="hoverReadout" class="hover-readout" style="display:none"></div>
             <div class="rig-bar">
-              <span class="sys-tag" title="How many ADC channels your rig actually has — the graph only plots these.">RIG</span>
-              <span class="rg-chip" data-preset="3-sensor-food">3 sensors</span>
-              <span class="rg-chip" data-preset="4-sensor-safety">4 sensors</span>
-              <span class="rg-chip active" data-preset="6-sensor-full">6 sensors</span>
-              <span class="rg-chip" data-preset="8-sensor-max">8 sensors</span>
-              <span class="rg-note" id="rigNote">Pick how many sensors your rig has — only those are plotted.</span>
+              <span class="sys-tag" title="Channel count is auto-detected from the connected device's stream — no manual selection.">RIG</span>
+              <span id="rigNote" class="rg-note">Connect a device — its channels are auto-detected from the stream.</span>
             </div>
             <div class="phase-hud" id="phaseHud" style="display:none">
               <div class="phase-hud-head">
@@ -1826,12 +1925,45 @@
             </div>
             <div class="dock" id="underDock">
               <div class="dock-head">
-                <span>SYS.DOCK</span>
-                <span>analysis timeline strip</span>
+                <span>SYS.PHENO</span>
+                <span>measured response-type strip</span>
+                <span class="dy-label" id="phenoA1Tag">A1 —</span>
                 <span class="dock-fill"></span>
-                <button id="dockToggle" class="dock-toggle" title="Collapse / expand the analysis timeline strip">—</button>
+                <button id="dockToggle" class="dock-toggle" title="Collapse / expand the measured phenotype strip">—</button>
               </div>
-              <div class="dock-body">Analysis timeline strip — markers · live-classification ticks · event ticker. Nothing here yet.</div>
+              <div class="dock-body" id="phenoDockBody">
+                <div class="pheno-strip" id="phenoStrip">
+                  <div class="pheno-cell" id="phenoA1">
+                    <div class="pheno-cell-head">A1 · Redox</div>
+                    <div class="pheno-direction" id="phenoA1Dir">
+                      <span class="pheno-tri" id="phenoA1Tri">·</span>
+                      <span class="pheno-val" id="phenoA1Val">—</span>
+                    </div>
+                    <div class="pheno-sub" id="phenoA1Sub">Waiting for data…</div>
+                    <div class="pheno-chips" id="phenoA1Chips"></div>
+                  </div>
+                  <div class="pheno-sep"></div>
+                  <div class="pheno-cell grow" id="phenoA3">
+                    <div class="pheno-cell-head">A3 · Response type</div>
+                    <div class="pheno-val" id="phenoA3Val">no reference</div>
+                    <div class="pheno-sub" id="phenoA3Sub">—</div>
+                    <div class="pheno-bars"><canvas id="phenoBars"></canvas></div>
+                    <div class="pheno-caption" id="phenoA3Cap"></div>
+                  </div>
+                  <div class="pheno-sep"></div>
+                  <div class="pheno-cell" id="phenoA2">
+                    <div class="pheno-cell-head">A2 · Protocol</div>
+                    <div class="pheno-val" id="phenoA2Val">idle</div>
+                    <div class="pheno-sub" id="phenoA2Sub">—</div>
+                  </div>
+                  <div class="pheno-sep"></div>
+                  <div class="pheno-cell grow" id="phenoBound">
+                    <div class="pheno-cell-head">Boundaries</div>
+                    <div class="pheno-limits" id="phenoBoundList"></div>
+                    <a class="pheno-limits-link" href="https://github.com/opensmell/opensmell-web/blob/main/README.md" target="_blank" rel="noreferrer">docs ↗</a>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
           <aside class="sidebar">
@@ -2059,7 +2191,7 @@
               <div class="train-step"><b>1.</b> Tick ≥2 recordings <em>per smell</em></div>
               <div class="train-step"><b>2.</b> Set a label for each (default: substance name)</div>
               <div class="train-step"><b>3.</b> Set window &amp; quality filters</div>
-              <div class="train-step"><b>4.</b> Click <b>Train</b> → load the model in the Dashboard</div>
+              <div class="train-step"><b>4.</b> Click <strong>Train</strong> → load the model in the Dashboard</div>
             </div>
           </div>
           <div class="train-layout">
@@ -2183,6 +2315,11 @@
                 </select>
               </div>
               <div id="presetDetail" style="margin-top:8px"></div>
+              <div class="form-row" style="margin-top:10px">
+                <label>Channel Names</label>
+                <input type="text" id="channelNamesInput" placeholder="e.g. MQ-135, MQ-3, CH3, CH4" style="flex:1;min-width:0" />
+              </div>
+              <div class="hint">Comma-separated names for your rig (auto-detected when empty).</div>
             </div>
             <div class="card">
               <h3>Channel Mapping</h3>

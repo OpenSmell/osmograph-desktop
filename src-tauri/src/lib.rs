@@ -3,10 +3,11 @@ mod classifier;
 mod live;
 mod burnin;
 mod plugins;
+mod phenotype;
 
 use data::{
-    parse_osm_line, recordings_dir, now_secs, CsvRecorder, SessionIndex, SessionRecord,
-    SampleValidator, MAX_CHANNELS,
+    count_numeric_fields, parse_osm_line, recordings_dir, now_secs, CsvRecorder, SessionIndex,
+    SessionRecord, SampleValidator, MAX_CHANNELS,
 };
 use data::osmell::{
     phase_color, phase_instruction, phase_label,
@@ -119,6 +120,12 @@ fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
                 description: desc,
                 kind,
                 hw_type: format!("{:?}", p.port_type),
+                manufacturer: match &p.port_type {
+                    serialport::SerialPortType::UsbPort(info) => {
+                        info.manufacturer.clone().unwrap_or_default()
+                    }
+                    _ => String::new(),
+                },
             });
         }
     }
@@ -133,13 +140,62 @@ pub struct SerialPortInfo {
     /// or "arduino_uno"/"raspberry_pi_pico"/"unknown-usb".
     pub kind: String,
     pub hw_type: String,
+    /// USB manufacturer string (e.g. "Arduino", "wch.cn") — helps label boards
+    /// whose VID:PID isn't in the known map, so any controller is identifiable.
+    pub manufacturer: String,
 }
 
-/// Process a single line from a data connection (serial or WiFi).
+/// Number of consecutive data lines with the same field count needed before we
+/// trust it as the device's real channel layout (10 Hz stream → ~1.2 s).
+const DETECT_STABLE: usize = 12;
+
+/// Auto-detects the connected device's channel count from its stream.
+///
+/// Python parity for *every* controller: our firmware announces `INFO`,... and
+/// per-preset firmwares stream exactly their channel count, but a plain Arduino
+/// or third-party board that just dumps comma-separated numbers is equally
+/// detected from the width of its own stream — the user never has to pick.
+#[derive(Default)]
+struct ChannelDetector {
+    seen: usize,
+    last: Option<usize>,
+    stable: Option<usize>,
+}
+
+impl ChannelDetector {
+    fn feed(&mut self, n: usize) -> Option<usize> {
+        if self.stable.is_some() {
+            return None;
+        }
+        if self.last == Some(n) {
+            self.seen += 1;
+            if self.seen >= DETECT_STABLE {
+                self.stable = Some(n);
+                return Some(n);
+            }
+        } else {
+            self.last = Some(n);
+            self.seen = 1;
+        }
+        None
+    }
+
+    /// Best width known so far: the confirmed one, else the latest candidate.
+    fn current(&self) -> Option<usize> {
+        self.stable.or(self.last)
+    }
+}
+
+/// Process a single line from a data connection (serial, WiFi, or BLE).
 ///
 /// Matches the Python reader semantics: lenient OSM parsing (drop non-numeric
 /// tokens, require >= 3 values), per-sample DataValidator gating, bootloader
 /// line detection, and rich INFO/CAL/ERR/PING handling as a desktop extra.
+///
+/// Channel count is auto-derived from the stream itself (not a user setting):
+/// an explicit `INFO` line wins immediately; otherwise the stable width of the
+/// data is sniffed and applied. The parsed width then follows the detected
+/// count so `serial-data` events carry exactly the channels the device sends.
 fn handle_reader_line(
     line: &str,
     protocol: &OsmProtocol,
@@ -147,6 +203,8 @@ fn handle_reader_line(
     validator: &mut SampleValidator,
     app: &tauri::AppHandle,
     last_channels: &Arc<Mutex<Vec<f64>>>,
+    channel_count: &Arc<Mutex<usize>>,
+    detector: &mut ChannelDetector,
 ) {
     let line = line.trim();
     if line.is_empty() {
@@ -158,6 +216,29 @@ fn handle_reader_line(
     }
 
     let now = now_secs();
+    let mut detect_and_publish = |n: usize, source: &str| {
+        if (1..=MAX_CHANNELS).contains(&n) {
+            if let Ok(mut cc) = channel_count.lock() {
+                if *cc != n {
+                    *cc = n;
+                    let _ = app.emit("serial-auto", SerialAutoEvent {
+                        n_channels: n,
+                        source: source.to_string(),
+                    });
+                }
+            }
+        }
+    };
+
+    // Sniff the raw field count so the parsed width matches what the device
+    // actually streams (an Arduino sending 3 CSV columns → 3 channels, not 6).
+    if let Some(raw_n) = count_numeric_fields(line) {
+        if let Some(stable) = detector.feed(raw_n) {
+            detect_and_publish(stable, "stream");
+        }
+    }
+
+    let expected = detector.current().unwrap_or(expected_channels);
 
     let mut emit_data = |channels: Vec<f64>| {
         if let Some(valid) = validator.validate(&channels) {
@@ -177,6 +258,7 @@ fn handle_reader_line(
             emit_data(channels);
         }
         Ok(OsmMessage::Info { device_id, firmware_version, n_sensors }) => {
+            detect_and_publish(n_sensors, "info");
             let _ = app.emit("serial-info", SerialInfoEvent {
                 device_id,
                 firmware_version,
@@ -191,13 +273,13 @@ fn handle_reader_line(
         }
         Ok(OsmMessage::Ping) => {}
         Ok(OsmMessage::Unknown(_)) => {
-            if let Some(channels) = parse_osm_line(line, expected_channels) {
+            if let Some(channels) = parse_osm_line(line, expected) {
                 emit_data(channels);
             }
         }
         Err(_) => {
             // Strict parse failed; fall back to the Python-style lenient parse.
-            if let Some(channels) = parse_osm_line(line, expected_channels) {
+            if let Some(channels) = parse_osm_line(line, expected) {
                 emit_data(channels);
             }
         }
@@ -242,12 +324,14 @@ fn connect_serial(
 
     let connected_flag = state.serial_connected.clone();
     let last_channels = state.last_channels.clone();
+    let channel_count = state.channel_count.clone();
     let app_handle = app.clone();
 
     thread::spawn(move || {
         let mut reader = port_handle;
         let protocol = OsmProtocol::new(MAX_CHANNELS);
         let mut validator = SampleValidator::new();
+        let mut detector = ChannelDetector::default();
         let mut bootloader_newlines = 0usize;
         let mut buffer: Vec<u8> = Vec::with_capacity(1024);
         let mut chunk = [0u8; 512];
@@ -292,6 +376,8 @@ fn connect_serial(
                     &mut validator,
                     &app_handle,
                     &last_channels,
+                    &channel_count,
+                    &mut detector,
                 );
                 handled = end;
             }
@@ -323,6 +409,12 @@ struct SerialInfoEvent {
     device_id: String,
     firmware_version: String,
     n_sensors: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct SerialAutoEvent {
+    n_channels: usize,
+    source: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -935,7 +1027,7 @@ pub struct PhaseRecordingSummary {
     pub phases: Vec<PhaseSnapshot>,
 }
 
-fn phase_recorder_state(rec: &OsmellRecorder) -> PhaseRecorderState {
+pub(crate) fn phase_recorder_state(rec: &OsmellRecorder) -> PhaseRecorderState {
     let phase = rec.current_phase().unwrap_or("");
     PhaseRecorderState {
         active: rec.is_recording(),
@@ -964,6 +1056,7 @@ fn start_phase_recording(
     exposure_sec: Option<f64>,
     recovery_sec: Option<f64>,
     preset_name: Option<String>,
+    channel_names: Option<Vec<String>>,
 ) -> Result<PhaseRecorderState, String> {
     let label = substance.unwrap_or_default();
     if label.trim().is_empty() {
@@ -994,6 +1087,12 @@ fn start_phase_recording(
         n,
         &preset,
     );
+    if let Some(names) = channel_names {
+        rec.set_channel_names(&names);
+    } else {
+        let defaults: Vec<String> = (0..n).map(|i| format!("CH{}", i + 1)).collect();
+        rec.set_channel_names(&defaults);
+    }
     rec.start(&label);
     let snapshot = phase_recorder_state(&rec);
     let mut slot = state.phase_recorder.lock().map_err(|e| e.to_string())?;
@@ -1139,12 +1238,14 @@ fn connect_wifi(
     let peer = stream.try_clone().map_err(|e| e.to_string())?;
     let connected_flag = state.wifi_connected.clone();
     let last_channels = state.last_channels.clone();
+    let channel_count = state.channel_count.clone();
     let app_handle = app.clone();
 
     thread::spawn(move || {
         let mut reader = peer;
         let protocol = OsmProtocol::new(MAX_CHANNELS);
         let mut validator = SampleValidator::new();
+        let mut detector = ChannelDetector::default();
         let mut buffer: Vec<u8> = Vec::with_capacity(1024);
         let mut chunk = [0u8; 512];
         loop {
@@ -1174,6 +1275,8 @@ fn connect_wifi(
                     &mut validator,
                     &app_handle,
                     &last_channels,
+                    &channel_count,
+                    &mut detector,
                 );
                 handled = end;
             }
@@ -1308,6 +1411,7 @@ fn connect_ble(
     let bind_addr = address.clone();
     let connected_flag = state.ble_connected.clone();
     let last_channels = state.last_channels.clone();
+    let channel_count = state.channel_count.clone();
     let app_handle = app.clone();
     let ok_msg = format!("Connecting to BLE device {}", address);
 
@@ -1325,7 +1429,7 @@ fn connect_ble(
                 return;
             }
         };
-        if let Err(e) = rt.block_on(stream_ble(&bind_addr, &connected_flag, &app_handle, &last_channels))
+        if let Err(e) = rt.block_on(stream_ble(&bind_addr, &connected_flag, &app_handle, &last_channels, &channel_count))
         {
             log::warn!("BLE stream error: {}", e);
         }
@@ -1341,6 +1445,7 @@ async fn stream_ble(
     connected_flag: &Arc<Mutex<bool>>,
     app: &tauri::AppHandle,
     last_channels: &Arc<Mutex<Vec<f64>>>,
+    channel_count: &Arc<Mutex<usize>>,
 ) -> Result<(), String> {
     use btleplug::api::{Central as _, Manager as _, Peripheral as _};
     use futures::StreamExt;
@@ -1401,6 +1506,7 @@ async fn stream_ble(
     log::info!("BLE connected: {}", address);
     let protocol = OsmProtocol::new(MAX_CHANNELS);
     let mut validator = SampleValidator::new();
+    let mut detector = ChannelDetector::default();
     let mut buffer: Vec<u8> = Vec::new();
 
     loop {
@@ -1416,7 +1522,7 @@ async fn stream_ble(
                 while let Some(pos) = buffer.iter().position(|&b| b == b'\n') {
                     let raw: Vec<u8> = buffer.drain(..=pos).collect();
                     let line = String::from_utf8_lossy(&raw);
-                    handle_reader_line(&line, &protocol, MAX_CHANNELS, &mut validator, app, last_channels);
+                    handle_reader_line(&line, &protocol, MAX_CHANNELS, &mut validator, app, last_channels, channel_count, &mut detector);
                 }
                 if buffer.len() > 65536 {
                     buffer.clear();
@@ -2049,7 +2155,11 @@ fn get_readings_buffer(state: State<AppState>) -> Result<Vec<Vec<f64>>, String> 
 }
 
 #[tauri::command]
-fn save_session_csv(state: State<AppState>, output_path: String) -> Result<String, String> {
+fn save_session_csv(
+    state: State<AppState>,
+    output_path: String,
+    channel_names: Option<Vec<String>>,
+) -> Result<String, String> {
     let readings = state.current_readings.lock().map_err(|e| e.to_string())?;
     if readings.is_empty() {
         return Err("No readings to save".to_string());
@@ -2057,7 +2167,9 @@ fn save_session_csv(state: State<AppState>, output_path: String) -> Result<Strin
 
     let mut wtr = csv::Writer::from_path(&output_path).map_err(|e| e.to_string())?;
     let n_channels = readings[0].len();
-    let header: Vec<String> = (0..n_channels).map(|i| format!("ch_{}", i)).collect();
+    let header: Vec<String> = channel_names
+        .filter(|v| v.len() == n_channels)
+        .unwrap_or_else(|| (0..n_channels).map(|i| format!("CH{}", i + 1)).collect());
     wtr.write_record(&header).map_err(|e| e.to_string())?;
 
     for row in readings.iter() {
@@ -2353,6 +2465,54 @@ fn commons_submit(csv_path: String, metadata_path: String, data_dir: String) -> 
     })
 }
 
+#[tauri::command]
+fn export_and_submit_commons(
+    state: State<AppState>,
+    data_dir: String,
+) -> Result<Vec<ContributionInfo>, String> {
+    let dir = std::path::Path::new(&data_dir);
+    // Export labeled data — writes session_*.csv / session_*.json into dir.
+    {
+        let mut labeling = state.labeling.lock().map_err(|e| e.to_string())?;
+        labeling.export_for_commons(dir).map_err(|e| e.to_string())?;
+    }
+    // Submit every exported session pair.
+    let pipeline = data_commons::VerificationPipeline::new(dir);
+    let mut results = Vec::new();
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    for entry in &entries {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("csv") {
+            continue;
+        }
+        let mut json_p = p.clone();
+        json_p.set_extension("json");
+        if !json_p.exists() {
+            continue;
+        }
+        let contribution = pipeline
+            .submit(&p, &json_p)
+            .map_err(|e| e.to_string())?;
+        results.push(ContributionInfo {
+            id: contribution.id,
+            substance: contribution.substance,
+            quality_score: contribution.quality_score,
+            status: format!("{:?}", contribution.status),
+            n_samples: contribution.n_samples,
+            n_channels: contribution.n_channels,
+            verification_log: contribution.verification_log,
+        });
+    }
+    if results.is_empty() {
+        return Err("No labeled sessions exported for submission".into());
+    }
+    Ok(results)
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ContributionInfo {
     pub id: String,
@@ -2578,9 +2738,30 @@ fn get_data_dir() -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// Smellability (MOX feasibility) check for a substance id.
+///
+/// Runs the thermodynamic feasibility chain (identity -> volatility ->
+/// headspace concentration -> MOX redox) against the `opensmell` Rust SDK's
+/// bundled reference compound dataset. Returns `None` when the substance is not
+/// in the bundled set (the full catalogue lives in the Python/TypeScript
+/// reference).
+#[tauri::command]
+fn run_smellability_check(
+    entity_id: String,
+    kind: String,
+    sensor_count: Option<usize>,
+    library_substances: Option<Vec<String>>,
+) -> Result<Option<opensmell::smellability::FeasibilityVerdict>, String> {
+    let opts = opensmell::smellability::ChainOptions {
+        sensor_count,
+        library_substances,
+        temp_c: None,
+    };
+    Ok(opensmell::smellability::resolve_and_run(&entity_id, &kind, &opts))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    env_logger::init();
+pub fn run() {    env_logger::init();
     let state = AppState::default();
 
     tauri::Builder::default()
@@ -2617,6 +2798,7 @@ pub fn run() {
             cancel_phase_recording,
             get_phase_recorder_state,
             get_readings_buffer,
+            run_smellability_check,
             get_sensor_health,
             export_labeled_data,
             save_session_csv,
@@ -2640,6 +2822,7 @@ pub fn run() {
             buzzer_get_config,
             buzzer_set_config,
             commons_submit,
+            export_and_submit_commons,
             get_data_dir,
             hub_list,
             hub_approve,
@@ -2664,6 +2847,7 @@ pub fn run() {
             live::load_live_classifier,
             live::unload_live_classifier,
             live::get_live_classification,
+            phenotype::compute_phenotype,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2693,6 +2877,35 @@ mod tests {
     fn classify_unknown_vid_pid() {
         assert_eq!(classify_vid_pid(0xDEAD, 0xBEEF), "unknown");
         assert_eq!(classify_vid_pid(0x2341, 0x9999), "unknown");
+    }
+
+    #[test]
+    fn smellability_check_reference_compound() {
+        let v = super::run_smellability_check(
+            "ethanol".into(),
+            "chemical".into(),
+            None,
+            None,
+        )
+        .unwrap()
+        .expect("ethanol is in the reference set");
+        assert_eq!(v.entity_name, "Ethanol");
+        assert_eq!(v.verdict, opensmell::smellability::Verdict::Green);
+        assert_eq!(v.confidence, opensmell::smellability::VerdictConfidence::High);
+        assert_eq!(v.signal_strength, opensmell::smellability::SignalStrength::Strong);
+        assert_eq!(v.steps.len(), 4);
+    }
+
+    #[test]
+    fn smellability_check_unknown_returns_none() {
+        let v = super::run_smellability_check(
+            "not-a-real-chemical".into(),
+            "chemical".into(),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(v.is_none());
     }
 
     #[test]

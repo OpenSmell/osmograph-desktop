@@ -1,0 +1,68 @@
+name: Windows Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout osmograph-desktop
+        uses: actions/checkout@v4
+        with:
+          path: osmograph-desktop
+
+      - name: Checkout opensmell-rs (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: praisejamesx/opensmell-rs
+          ref: master
+          path: opensmell-rs
+
+      - name: Checkout data-commons (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: praisejamesx/data-commons
+          ref: main
+          path: data-commons
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: osmograph-desktop/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: osmograph-desktop
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: osmograph-desktop
+        run: npx tauri build
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Osmograph-windows
+          path: |
+            osmograph-desktop/src-tauri/target/release/osmograph-desktop.exe
+            osmograph-desktop/src-tauri/target/release/bundle/**/*.exe
+            osmograph-desktop/src-tauri/target/release/bundle/**/*.msi
+          if-no-files-found: warn
+
+      - name: Draft GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            osmograph-desktop/src-tauri/target/release/bundle/**/*.exe
+            osmograph-desktop/src-tauri/target/release/bundle/**/*.msi

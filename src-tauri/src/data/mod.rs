@@ -53,6 +53,30 @@ pub fn recordings_dir() -> PathBuf {
 ///
 /// Strips every "OSM" token, drops non-numeric tokens, requires >= 3 numeric
 /// values, then pads/truncates to `expected_channels` (Python hard-codes 6).
+/// Count the numeric CSV fields on a raw device line, without padding or
+/// truncation. Returns `None` when the line isn't a plausible data line
+/// (fewer than `MIN_DATA_VALUES` numeric tokens, or more than
+/// `MAX_CHANNELS`). Mirrors the lenient `parse_osm_line` tokenizer so a plain
+/// Arduino/CSV stream (no `OSM` header) is detected exactly like a data line.
+pub fn count_numeric_fields(line: &str) -> Option<usize> {
+    let decoded = line.trim().replace(EXPECTED_HEADER, "");
+    let mut count = 0usize;
+    for part in decoded.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if part.parse::<f64>().is_ok() {
+            count += 1;
+        }
+    }
+    if count >= MIN_DATA_VALUES && count <= MAX_CHANNELS {
+        Some(count)
+    } else {
+        None
+    }
+}
+
 pub fn parse_osm_line(line: &str, expected_channels: usize) -> Option<Vec<f64>> {
     let decoded = line.trim();
     if decoded.is_empty() {

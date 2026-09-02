@@ -2,9 +2,9 @@
 //!
 //! Mirrors the semantics:
 //! - state (total_hours, elapsed_seconds, last_active) persists across restarts;
-//! - a 1 s wall-clock tick advances `elapsed_seconds`;
-//! - power loss is detected when the gap since `last_active` exceeds 60 s
-//!   (we apply the real elapsed time, unlike the Python log-only version);
+//! - the counter advances by the real wall-clock gap on every status poll, so
+//!   the countdown runs in real time while the app is open and catches up after
+//!   power loss / a closed app (a large gap simply adds the real elapsed time);
 //! - it completes once `elapsed_seconds >= total_hours * 3600`.
 
 use std::fs;
@@ -14,9 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_BURNIN_HOURS: f64 = 24.0;
-/// Gap (seconds) after which the tracker treats the app/device as having been
-/// offline and applies real elapsed time rather than a running 1 s tick.
-const POWER_LOSS_GAP_S: f64 = 60.0;
 
 /// On-disk persistent state, stored as JSON next to the recordings dir.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +60,14 @@ fn save(dir: &std::path::Path, s: &BurnInState) -> Result<(), String> {
     fs::write(state_path(dir), json).map_err(|e| e.to_string())
 }
 
-/// Apply real elapsed time since `last_active` (power-loss / time-skip handling)
-/// before returning the current state.
+/// Advance the elapsed counter by real wall-clock time since `last_active`.
+/// Called on every 1 s poll tick so the countdown runs in real time while the
+/// app is open; large gaps (>60 s, i.e. power loss / app restart) are handled
+/// by the same path — the elapsed counter simply catches up.
 fn reconcile(mut s: BurnInState) -> BurnInState {
     let now = now_secs();
     let gap = now - s.last_active;
-    if gap > POWER_LOSS_GAP_S {
+    if gap > 0.0 {
         s.elapsed_seconds += gap;
     }
     s.last_active = now;
