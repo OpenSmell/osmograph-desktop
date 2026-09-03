@@ -74,7 +74,18 @@ jobs:
 
       - name: Build Tauri app
         working-directory: osmograph-desktop
-        run: npx tauri build
+        run: |
+          set -o pipefail
+          npx tauri build 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
+        shell: bash
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ matrix.os }}
+          path: build-${{ matrix.os }}.log
+          if-no-files-found: warn
 
       - name: Collect bundle assets
         id: assets
