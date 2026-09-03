@@ -73,8 +73,6 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         working-directory: osmograph-desktop
         run: npx tauri build
 
