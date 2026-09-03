@@ -1,0 +1,130 @@
+name: Build & Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu-22.04
+            os: linux
+          - platform: windows-latest
+            os: windows
+          - platform: macos-latest
+            os: macos
+    runs-on: ${{ matrix.platform }}
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osmograph-desktop
+        uses: actions/checkout@v4
+        with:
+          path: osmograph-desktop
+
+      - name: Checkout opensmell-rs (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: praisejamesx/opensmell-rs
+          ref: master
+          path: opensmell-rs
+
+      - name: Checkout data-commons (sibling dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: praisejamesx/data-commons
+          ref: main
+          path: data-commons
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: osmograph-desktop/package-lock.json
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        working-directory: osmograph-desktop
+        run: npm ci
+
+      - name: Build Tauri app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        working-directory: osmograph-desktop
+        run: npx tauri build
+
+      - name: Collect bundle assets
+        id: assets
+        shell: bash
+        working-directory: osmograph-desktop
+        run: |
+          BUNDLE_DIR="src-tauri/target/release/bundle"
+          mkdir -p ../../dist-artifacts
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            cp -r "$BUNDLE_DIR/nsis"/*.exe ../../dist-artifacts/ 2>/dev/null || true
+            cp -r "$BUNDLE_DIR/msi"/*.msi ../../dist-artifacts/ 2>/dev/null || true
+          elif [ "${{ matrix.os }}" = "linux" ]; then
+            cp -r "$BUNDLE_DIR/deb"/*.deb ../../dist-artifacts/ 2>/dev/null || true
+            cp -r "$BUNDLE_DIR/appimage"/*.AppImage ../../dist-artifacts/ 2>/dev/null || true
+            cp -r "$BUNDLE_DIR/rpm"/*.rpm ../../dist-artifacts/ 2>/dev/null || true
+          elif [ "${{ matrix.os }}" = "macos" ]; then
+            cp -r "$BUNDLE_DIR/macos"/*.app ../../dist-artifacts/ 2>/dev/null || true
+            cp -r "$BUNDLE_DIR/dmg"/*.dmg ../../dist-artifacts/ 2>/dev/null || true
+          fi
+          ls -la ../../dist-artifacts/
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Osmograph-${{ matrix.os }}
+          path: dist-artifacts/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Inspect assets
+        run: ls -laR release-assets
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: release-assets/**
