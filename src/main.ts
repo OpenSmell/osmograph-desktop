@@ -2113,8 +2113,15 @@ function rigChannelCount(): number {
 function setFlight(id: string, label: string, cls: 'ok' | 'warn' | 'bad') {
   const el = document.getElementById(id);
   if (!el) return;
+  const wasBad = el.classList.contains('bad');
   el.textContent = '◆ ' + label;
   el.className = 'flight ' + cls;
+  // First time a flight turns red, tick the LED once so a *new* safety issue
+  // draws the eye; it then settles into the steady red state.
+  if (cls === 'bad' && !wasBad) {
+    el.classList.add('flash-bad');
+    el.addEventListener('animationend', () => el.classList.remove('flash-bad'), { once: true });
+  }
 }
 
 function updatePreflight() {
@@ -2144,6 +2151,11 @@ function updatePreflight() {
     i2cEl.className = 'flight';
     i2cEl.title = 'Declare fitted I²C breakouts (MEMS/env) in Rig Setup → Advanced JSON to get the bus-clash check.';
   }
+
+  // Wiring nodes breathe only while the whole pre-flight is clean; on any clash
+  // the schematic goes still — an un-energized board. Motion is a state signal.
+  const svg = document.getElementById('rigSchematic');
+  if (svg) svg.classList.toggle('energized', !clash && boot.length === 0 && duplicated.length === 0);
 }
 
 function renderRigSchematic() {
@@ -3792,7 +3804,9 @@ document.getElementById('flashBtn')!.addEventListener('click', async () => {
   if (!port) return;
   const wifiSsid = (document.getElementById('fwSsid') as HTMLInputElement).value.trim();
   const wifiPassword = (document.getElementById('fwPass') as HTMLInputElement).value;
-  document.getElementById('flashProgress')!.style.display = '';
+  const fp = document.getElementById('flashProgress')!;
+  fp.style.display = '';
+  fp.classList.add('flashing');
   document.getElementById('flashStatus')!.textContent = 'Flashing...';
   document.getElementById('flashBar')!.style.width = '30%';
   try {
@@ -3802,6 +3816,8 @@ document.getElementById('flashBtn')!.addEventListener('click', async () => {
   } catch (e) {
     document.getElementById('flashBar')!.style.width = '0%';
     document.getElementById('flashStatus')!.textContent = `Failed: ${e}`;
+  } finally {
+    fp.classList.remove('flashing');
   }
 });
 
@@ -3914,7 +3930,10 @@ function setFmBusy(busy: boolean) {
   const progress = document.getElementById('fmProgress') as HTMLDivElement;
   const bar = document.getElementById('fmBar') as HTMLDivElement;
   const btn = document.getElementById('fmFlash') as HTMLButtonElement;
-  if (progress) progress.style.display = busy ? '' : 'none';
+  if (progress) {
+    progress.style.display = busy ? '' : 'none';
+    progress.classList.toggle('flashing', busy);
+  }
   if (bar) bar.classList.toggle('busy', busy);
   if (btn) { btn.disabled = busy; btn.textContent = busy ? 'Flashing…' : 'Flash Firmware'; }
 }

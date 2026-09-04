@@ -1600,6 +1600,23 @@
     .flight.ok { color: var(--green); }
     .flight.warn { color: var(--yellow); }
     .flight.bad { color: var(--red); }
+    /* A flight label flipping to `bad` ticks once — motion only when a new
+       safety issue appears; a steady state is calm by design. */
+    .flight.flash-bad { animation: flightTick .75s ease-out 1; }
+    @keyframes flightTick {
+      0% { transform: scale(1); }
+      35% { transform: scale(1.14); text-shadow: 0 0 10px rgba(220,38,38,.55); }
+      100% { transform: scale(1); }
+    }
+    /* Wiring nodes breathe only while the pre-flight says everything is safe;
+       on any clash the schematic goes still — an un-energized board. */
+    #rigSchematic.energized circle {
+      animation: nodePulse 2.4s ease-in-out infinite;
+    }
+    @keyframes nodePulse {
+      0%, 100% { opacity: 0.82; }
+      50% { opacity: 1; }
+    }
     .board-note {
       font-size: 10px;
       color: var(--text-3);
@@ -1841,6 +1858,7 @@
       border-radius: 3px;
       overflow: hidden;
       margin: 8px 0;
+      position: relative;
     }
     .progress-fill {
       height: 100%;
@@ -1856,6 +1874,20 @@
     @keyframes fmBusy {
       0% { transform: translateX(-100%); }
       100% { transform: translateX(250%); }
+    }
+    /* Scan sweep across the track only while a flash/erase is actually running —
+       motion signals "the chip is being written", never otherwise. */
+    .progress-track.flashing::after {
+      content: "";
+      position: absolute;
+      top: 0; bottom: 0; left: -45%; width: 45%;
+      background: linear-gradient(90deg, transparent, rgba(14,116,144,.22), transparent);
+      animation: fmScan 1.2s ease-in-out infinite;
+      pointer-events: none;
+    }
+    @keyframes fmScan {
+      0% { left: -45%; }
+      100% { left: 100%; }
     }
 
     /* === Footer === */
