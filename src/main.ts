@@ -3360,6 +3360,16 @@ function applyBuzzerToDom() {
   (document.getElementById('buzzerFreq') as HTMLInputElement).value = String(peripheralState.buzzer.frequency_hz);
 }
 
+// === Hardware profile (declared here, before the peripheral wiring below that
+// (via syncPeripheralUI → refreshRigBlueprint) reads `hardwareProfile` during
+// module evaluation. Ordering matters — a top-level call must never hit the
+// const/let temporal-dead-zone of a value declared later in the module: that
+// aborts init and strands the boot loader. ===
+const HW_KEY = 'osmograph.hardware';
+let hardwareProfile: HardwareProfile = {
+  preset: 'custom', name: '', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true, i2cDevices: [],
+};
+
 // OLED
 document.getElementById('oledLayout')!.addEventListener('change', () => { captureOledFromDom(); persistPeripheralState(); updateOledPreview(); });
 document.getElementById('oledRotation')!.addEventListener('change', () => { captureOledFromDom(); persistPeripheralState(); updateOledPreview(); });
@@ -4933,10 +4943,8 @@ type HardwareProfile = {
   /// before flashing — two devices on one address produce a dead bus.
   i2cDevices?: I2cDevice[];
 };
-const HW_KEY = 'osmograph.hardware';
-let hardwareProfile: HardwareProfile = {
-  preset: 'custom', name: '', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true, i2cDevices: [],
-};
+// Hardware live state — see the HW_KEY / hardwareProfile declarations above the
+// peripheral wiring block (they must precede the top-level syncPeripheralUI()).
 
 // Built-in profile templates (channel sensor lists mirror the desktop presets).
 const HW_PRESET_TEMPLATES: Record<string, Partial<HardwareProfile>> = {
@@ -5459,6 +5467,7 @@ function bootLog(msg: string): void {
   while (log.children.length > 8) log.removeChild(log.firstChild!);
 }
 function bootDone(): void {
+  (window as any).__osmographBootReady = true;
   bootLog('ready');
   setTimeout(() => {
     const ov = document.getElementById('bootOverlay');

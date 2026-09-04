@@ -3084,6 +3084,47 @@ Confidence: 97.3%</div>
 
   <div id="toast" class="toast" role="status"><span id="toastMsg"></span></div>
 
+  <script>
+    // Boot safety net — runs BEFORE the app module. The loader exists to cover
+    // the first paint, never to block the app: if the module aborts before
+    // signaling ready (window.__osmographBootReady), surface the error in the
+    // boot log and step aside after a fixed bound so the window stays usable.
+    window.addEventListener('error', function (ev) {
+      const log = document.getElementById('bootLog');
+      if (!log) return;
+      const msg = (ev && (ev.message || (ev.error && ev.error.message))) || 'runtime error';
+      const line = document.createElement('div');
+      line.className = 'boot-line err';
+      line.textContent = 'ERR ' + msg;
+      log.appendChild(line);
+    }, true);
+    window.addEventListener('unhandledrejection', function (ev) {
+      const log = document.getElementById('bootLog');
+      if (!log) return;
+      const r = ev && ev.reason;
+      const msg = (r && (r.message || String(r))) || 'unhandled rejection';
+      const line = document.createElement('div');
+      line.className = 'boot-line err';
+      line.textContent = 'ERR ' + msg;
+      log.appendChild(line);
+    });
+    setTimeout(function () {
+      if (window.__osmographBootReady) return;
+      const ov = document.getElementById('bootOverlay');
+      if (ov) {
+        const log = document.getElementById('bootLog');
+        if (log) {
+          const line = document.createElement('div');
+          line.className = 'boot-line err';
+          line.textContent = 'boot watchdog: continuing';
+          log.appendChild(line);
+        }
+        ov.classList.add('done');
+        setTimeout(function () { ov.remove(); }, 220);
+      }
+    }, 8000);
+  </script>
+
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
