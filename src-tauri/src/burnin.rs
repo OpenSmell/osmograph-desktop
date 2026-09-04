@@ -16,11 +16,17 @@ use serde::{Deserialize, Serialize};
 pub const DEFAULT_BURNIN_HOURS: f64 = 24.0;
 
 /// On-disk persistent state, stored as JSON next to the recordings dir.
+///
+/// `running` is persisted and defaults to `false` so that a fresh install (or an
+/// upgrade from a state file written before the field existed) does not start
+/// counting until the user explicitly presses Start.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BurnInState {
     pub total_hours: f64,
     pub elapsed_seconds: f64,
     pub last_active: f64,
+    #[serde(default)]
+    pub running: bool,
 }
 
 impl Default for BurnInState {
@@ -29,6 +35,7 @@ impl Default for BurnInState {
             total_hours: DEFAULT_BURNIN_HOURS,
             elapsed_seconds: 0.0,
             last_active: now_secs(),
+            running: false,
         }
     }
 }
@@ -60,14 +67,15 @@ fn save(dir: &std::path::Path, s: &BurnInState) -> Result<(), String> {
     fs::write(state_path(dir), json).map_err(|e| e.to_string())
 }
 
-/// Advance the elapsed counter by real wall-clock time since `last_active`.
-/// Called on every 1 s poll tick so the countdown runs in real time while the
-/// app is open; large gaps (>60 s, i.e. power loss / app restart) are handled
-/// by the same path — the elapsed counter simply catches up.
+/// Advance the elapsed counter by real wall-clock time since `last_active` —
+/// but only while the timer is `running`. Called on every status poll so the
+/// countdown runs in real time while the app is open. When the timer is not
+/// running (never started, or explicitly stopped), the elapsed counter is
+/// frozen and `last_active` is refreshed so no time is lost when it resumes.
 fn reconcile(mut s: BurnInState) -> BurnInState {
     let now = now_secs();
     let gap = now - s.last_active;
-    if gap > 0.0 {
+    if s.running && gap > 0.0 {
         s.elapsed_seconds += gap;
     }
     s.last_active = now;
@@ -82,6 +90,8 @@ pub struct BurnInStatus {
     pub remaining_seconds: f64,
     pub remaining_hours: f64,
     pub is_complete: bool,
+    /// Whether the countdown is currently advancing.
+    pub running: bool,
 }
 
 impl BurnInStatus {
@@ -94,26 +104,33 @@ impl BurnInStatus {
             remaining_seconds: remaining,
             remaining_hours: remaining / 3600.0,
             is_complete: s.elapsed_seconds >= total,
+            running: s.running,
         }
     }
 }
 
-/// Read the current burn-in status (applying power-loss reconciliation).
+/// Read the current burn-in status (applying wall-clock reconciliation).
 pub fn get_status(dir: &std::path::Path) -> Result<BurnInStatus, String> {
     let s = reconcile(load(dir));
     save(dir, &s)?;
     Ok(BurnInStatus::from_state(&s))
 }
 
-/// Start/resume the burn-in timer at the configured duration.
+/// Start/stop the burn-in timer. Acts as a toggle: pressing Start while stopped
+/// begins the countdown; pressing it again pauses it. The countdown only ever
+/// advances while running (see [`reconcile`]).
 pub fn start(dir: &std::path::Path) -> Result<BurnInStatus, String> {
     let mut s = reconcile(load(dir));
-    s.last_active = now_secs();
+    s.running = !s.running;
+    if s.running {
+        s.last_active = now_secs();
+    }
     save(dir, &s)?;
     Ok(BurnInStatus::from_state(&s))
 }
 
-/// Reset the timer to a new duration (0 clears elapsed, keeps hours default).
+/// Reset the timer to a new duration (0 clears elapsed, keeps hours default)
+/// and stops it — a reset must not silently resume counting.
 pub fn reset(dir: &std::path::Path, hours: Option<f64>) -> Result<BurnInStatus, String> {
     let mut s = load(dir);
     if let Some(h) = hours {
@@ -122,6 +139,7 @@ pub fn reset(dir: &std::path::Path, hours: Option<f64>) -> Result<BurnInStatus, 
         }
     }
     s.elapsed_seconds = 0.0;
+    s.running = false;
     s.last_active = now_secs();
     save(dir, &s)?;
     Ok(BurnInStatus::from_state(&s))
@@ -154,6 +172,50 @@ mod tests {
         save(&dir, &s).unwrap();
         let loaded = load(&dir);
         assert_eq!(loaded.elapsed_seconds, 500.0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn does_not_run_until_started_and_toggles() {
+        let dir = std::env::temp_dir().join("osm_burnin_toggle");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Fresh state: not running.
+        let status = get_status(&dir).unwrap();
+        assert!(!status.running, "must not auto-run on a fresh install");
+
+        // Start begins counting.
+        let status = get_status(&dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let started = start(&dir).unwrap();
+        assert!(started.running, "start should begin the countdown");
+
+        // Start again toggles it off (a second press pauses).
+        let stopped = start(&dir).unwrap();
+        assert!(!stopped.running, "second press should pause");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn elapsed_only_advances_while_running() {
+        let dir = std::env::temp_dir().join("osm_burnin_gate");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        reset(&dir, Some(24.0)).unwrap();
+
+        // Not running: a status poll must not advance elapsed.
+        let before = get_status(&dir).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let after = get_status(&dir).unwrap();
+        assert!(
+            (after.elapsed_seconds - before.elapsed_seconds) < 0.001,
+            "elapsed advanced while not running: {} -> {}",
+            before.elapsed_seconds,
+            after.elapsed_seconds
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }

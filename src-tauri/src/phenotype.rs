@@ -60,6 +60,7 @@ pub struct PhenotypeReport {
     pub reference_geometry: bool,
     pub per_channel: Vec<ChannelVerdict>,
     pub a1: A1Verdict,
+    pub a2: A2Verdict,
     pub a3: A3Verdict,
     pub protocol: ProtocolVerdict,
     pub boundaries_cannot: Vec<String>,
@@ -91,6 +92,24 @@ pub struct A3Verdict {
     pub plain_language: Option<String>,
     pub confidence: Option<String>,
     pub nearest_distance: Option<f64>,
+}
+
+#[derive(Serialize)]
+pub struct A2Verdict {
+    /// Rise kinetics class: fast / medium / slow / unknown. Computed from the
+    /// *shape* of the live window (device-agnostic), mirroring phenotype.py.
+    pub rise: String,
+    /// Recovery kinetics class. Only set when a recovery (decay) phase is
+    /// actually present in the window; otherwise "unknown" — never forced.
+    pub recovery: String,
+    /// Rise time as a fraction of the window (0→1); small = fast. Absolute
+    /// seconds aren't reliable from the rolling ring, so we report the
+    /// relative class instead of fabricating a seconds figure.
+    pub rise_fraction: Option<f64>,
+    /// True when a recovery (decay) phase was visible in this window.
+    pub recovery_observed: bool,
+    /// Plain-language summary for the A2 slot.
+    pub summary: String,
 }
 
 #[derive(Serialize)]
@@ -145,6 +164,100 @@ fn cv(values: &[f64]) -> f64 {
     var.sqrt() / mean.abs()
 }
 
+/// A2 — kinetic binding (rise / recovery shape), mirroring `phenotype.py`.
+///
+/// Computed from the *shape* of each channel's trace in the live window so it's
+/// resistance-normalized and device-agnostic. Rise is always derivable when a
+/// response is present; recovery ("unknown") is only reported once an actual
+/// decay phase is visible — never forced, per the ontology (§3 A2) and the
+/// reference `phenotype.py` recovery-unknown rule.
+fn a2_kinetics(per_channel: &[ChannelVerdict], vals_by_channel: &[Vec<f64>]) -> A2Verdict {
+    // Rise fraction = how far through the window the response reaches its peak.
+    // A small fraction = fast surface reaction; large = slow. We classify on the
+    // fastest responding (non-flat, non-masked) channel like phenotype.py does.
+    let mut best_rise: Option<f64> = None; // fraction 0..1
+    let mut rise_sum = 0.0;
+    let mut rise_n = 0usize;
+    let mut any_recovery = false;
+
+    for (p, vals) in per_channel.iter().zip(vals_by_channel.iter()) {
+        if p.direction == "flat" || p.direction == "masked" || vals.len() < 10 {
+            continue;
+        }
+        // Locate the peak relative to the window start.
+        let n = vals.len();
+        let (mut peak_i, mut peak_v) = (0usize, f64::MIN);
+        for (i, &v) in vals.iter().enumerate() {
+            if v > peak_v {
+                peak_v = v;
+                peak_i = i;
+            }
+        }
+        let peak_abs = peak_v.abs();
+        if peak_abs < 1e-9 {
+            continue;
+        }
+        // Rise completed once the signal passes 90% of its (from-start) swing.
+        let start = vals[0];
+        let swing = peak_v - start;
+        let high = start + swing * 0.9;
+        let mut rise_frac = 1.0_f64;
+        for (i, &v) in vals.iter().enumerate() {
+            if swing > 0.0 && (v - start) >= swing * 0.5 {
+                rise_frac = i as f64 / n as f64;
+                break;
+            }
+        }
+        rise_sum += rise_frac;
+        rise_n += 1;
+        if best_rise.map_or(true, |b| rise_frac < b) {
+            best_rise = Some(rise_frac);
+        }
+        // Recovery observed if the trail decays back toward the start (half-peak).
+        if let Some(&tail) = vals.last() {
+            if tail < peak_v - (peak_v - start).abs() * 0.15 {
+                any_recovery = true;
+            }
+        }
+    }
+
+    if rise_n == 0 {
+        return A2Verdict {
+            rise: "unknown".into(),
+            recovery: "unknown".into(),
+            rise_fraction: None,
+            recovery_observed: false,
+            summary: "No responding channel — no rising response shape to classify.".into(),
+        };
+    }
+
+    // Fastest responding channel drives the rise class (phenotype.py: min rise).
+    let rise_frac = best_rise.unwrap_or(rise_sum / rise_n as f64);
+    let rise_class = if rise_frac < 0.30 {
+        "fast"
+    } else if rise_frac < 0.65 {
+        "medium"
+    } else {
+        "slow"
+    };
+
+    let recovery_class = if any_recovery { "observed" } else { "unknown" };
+    let summary = format!(
+        "live rise kinetics: {} ({}% of window to peak) · recovery: {}",
+        rise_class,
+        (rise_frac * 100.0).round() as i64,
+        if any_recovery { "observed" } else { "unknown — no recovery phase yet" }
+    );
+
+    A2Verdict {
+        rise: rise_class.into(),
+        recovery: recovery_class.into(),
+        rise_fraction: Some(rise_frac),
+        recovery_observed: any_recovery,
+        summary,
+    }
+}
+
 /// Assemble the live measured-phenotype report from the current readings ring.
 pub fn compute_phenotype_report(
     readings: &Arc<Mutex<Vec<Vec<f64>>>>,
@@ -165,6 +278,13 @@ pub fn compute_phenotype_report(
             a1: A1Verdict {
                 valence: "none",
                 summary: "Waiting for enough samples to form a phenotype baseline…".into(),
+            },
+            a2: A2Verdict {
+                rise: "unknown".into(),
+                recovery: "unknown".into(),
+                rise_fraction: None,
+                recovery_observed: false,
+                summary: "Waiting for enough samples to estimate the response shape…".into(),
             },
             a3: A3Verdict {
                 fingerprint: Vec::new(),
@@ -187,12 +307,14 @@ pub fn compute_phenotype_report(
     let sig_n = (total / 5).clamp(5, 60);
 
     let mut per_channel = Vec::new();
+    let mut vals_by_channel: Vec<Vec<f64>> = Vec::new();
     let mut fingerprint = vec![0.0_f64; n_channels];
     let mut active_vals: Vec<f64> = Vec::new();
 
     for ch in 0..n_channels {
         let vals: Vec<f64> = buf.iter().filter_map(|r| r.get(ch)).copied().collect();
         if vals.len() < 10 {
+            vals_by_channel.push(vals);
             per_channel.push(ChannelVerdict {
                 channel: ch,
                 direction: "flat",
@@ -203,6 +325,7 @@ pub fn compute_phenotype_report(
         }
         let c = cv(&vals);
         if c < DEAD_CV_MASK {
+            vals_by_channel.push(vals);
             per_channel.push(ChannelVerdict {
                 channel: ch,
                 direction: "masked",
@@ -234,7 +357,11 @@ pub fn compute_phenotype_report(
             delta,
             cv: c,
         });
+        vals_by_channel.push(vals);
     }
+
+    // A2 — live kinetic binding from the window shape (phenotype.py parity).
+    let a2 = a2_kinetics(&per_channel, &vals_by_channel);
 
     // A1 aggregate (direction of the majority of unmasked, responding channels).
     let mut reducing = 0;
@@ -339,6 +466,7 @@ pub fn compute_phenotype_report(
         reference_geometry: n_channels == REFERENCE_CHANNELS,
         per_channel,
         a1,
+        a2,
         a3: A3Verdict {
             fingerprint: fp,
             assignable,

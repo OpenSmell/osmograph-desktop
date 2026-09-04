@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use std::thread;
 
 use opensmell::{
@@ -318,7 +318,10 @@ fn connect_serial(
 
     *state.serial_port_name.lock().map_err(|e| e.to_string())? = Some(port.clone());
     *state.baud_rate.lock().map_err(|e| e.to_string())? = baud_rate;
-    *state.channel_count.lock().map_err(|e| e.to_string())? = n_channels.max(1);
+    // `n_channels` of 0 means "auto-detect": don't force a fixed count here —
+    // the reader's ChannelDetector refines it from the device's own stream.
+    *state.channel_count.lock().map_err(|e| e.to_string())? =
+        if n_channels >= 1 { n_channels } else { MAX_CHANNELS };
     *state.serial_connected.lock().map_err(|e| e.to_string())? = true;
     state.current_readings.lock().map_err(|e| e.to_string())?.clear();
 
@@ -630,20 +633,26 @@ fn check_flash_toolchain() -> Result<FlashToolchain, String> {
     Ok(FlashToolchain { platformio, arduino_cli, esptool, message })
 }
 
+/// Ordered, analog-capable (ADC) GPIO list available on the ESP32 for MOX/MQ
+/// sensors. ADC1 (32,33,34,35,36,39) is preferred because it cannot be
+/// contended by the WiFi radio; ADC2 (25,26,27,14,12,13) is used once ADC1 is
+/// exhausted. The ordering keeps the original 3/4/6-sensor pinouts stable for
+/// existing rigs.
 fn sensor_pins_for(n_channels: usize) -> Vec<u8> {
-    match n_channels {
-        3 => vec![32, 33, 34],
-        4 => vec![32, 33, 34, 35],
-        _ => vec![32, 33, 34, 35, 25, 26],
-    }
+    // Ordering is chosen to keep the original 3/4/6-sensor pinouts stable for
+    // existing rigs ([32,33,34,35,25,26]), then extends with the remaining
+    // ADC1 pins (36,39) before ADC2 (27,14,12,13) so WiFi-heavy configs avoid
+    // ADC2 contention where possible.
+    const PINS: [u8; 12] = [32, 33, 34, 35, 25, 26, 36, 39, 27, 14, 12, 13];
+    PINS[..n_channels.min(PINS.len())].to_vec()
 }
 
 fn channels_for(preset: &str) -> usize {
     match preset {
-        "3-sensor-food" => 3,
-        "4-sensor-food" => 4,
-        "3-sensor-safety" => 3,
-        "4-sensor-safety" => 4,
+        "3-sensor-food" | "3-sensor-safety" => 3,
+        "4-sensor-food" | "4-sensor-safety" => 4,
+        "6-sensor-full" => 6,
+        "8-sensor-max" => 8,
         _ => 6,
     }
 }
@@ -672,11 +681,20 @@ fn run_upload(last: Result<std::process::Output, std::io::Error>, tool: &str, po
 fn flash_firmware(
     port: String,
     preset: String,
+    n_channels: usize,
+    sensor_pins: Vec<u8>,
     wifi_ssid: String,
     wifi_password: String,
 ) -> Result<String, String> {
-    let n_channels = channels_for(&preset);
-    let sensor_pins = sensor_pins_for(n_channels);
+    // An explicit pin list wins (custom presets). Otherwise derive a
+    // board-agnostic pinout from the requested channel count; the preset name
+    // is only used to nudge a sensible default channel count.
+    let (n_channels, sensor_pins) = if !sensor_pins.is_empty() {
+        (n_channels.max(1), sensor_pins)
+    } else {
+        let n = if n_channels > 0 { n_channels } else { channels_for(&preset) };
+        (n, sensor_pins_for(n))
+    };
     let sketch = opensmell::protocol::generate_arduino_sketch(&sensor_pins, &wifi_ssid, &wifi_password);
 
     let temp_dir = std::env::temp_dir().join("osmograph_firmware");
@@ -1231,7 +1249,9 @@ fn connect_wifi(
     *state.wifi_connected.lock().map_err(|e| e.to_string())? = true;
     *state.wifi_host.lock().map_err(|e| e.to_string())? =
         Some(format!("{}:{}", host, port));
-    *state.channel_count.lock().map_err(|e| e.to_string())? = n_channels.max(1);
+    // `n_channels` of 0 means "auto-detect" — same handling as the serial path.
+    *state.channel_count.lock().map_err(|e| e.to_string())? =
+        if n_channels >= 1 { n_channels } else { MAX_CHANNELS };
     *state.serial_connected.lock().map_err(|e| e.to_string())? = false;
     state.current_readings.lock().map_err(|e| e.to_string())?.clear();
 
@@ -1365,16 +1385,34 @@ async fn scan_ble_devices(timeout: u64) -> Result<Vec<BleDeviceInfo>, String> {
     tokio::time::sleep(std::time::Duration::from_secs(timeout)).await;
     let _ = adapter.stop_scan().await;
 
+    // Identify OpenSmell e-noses by the advertised GATT service UUID first —
+    // that's a reliable identity. Local-name match is a fallback for boards
+    // that broadcast a human-readable name but no service in the scan
+    // response, and for firmware whose name prefix differs slightly.
+    let service_uuid: Option<uuid::Uuid> = BLE_SERVICE_UUID.parse().ok();
+
     let mut found = Vec::new();
     for p in adapter.peripherals().await.map_err(|e| e.to_string())? {
         if let Ok(Some(props)) = p.properties().await {
-            if let Some(name) = props.local_name {
-                if name.contains(BLE_DEVICE_NAME) {
-                    found.push(BleDeviceInfo {
-                        name,
-                        address: p.address().to_string(),
-                    });
+            let mut is_osmograph = false;
+            if let Some(svc) = &service_uuid {
+                if props.services.iter().any(|u| *u == *svc) {
+                    is_osmograph = true;
                 }
+            }
+            if !is_osmograph {
+                if let Some(name) = props.local_name.as_deref() {
+                    if name.contains(BLE_DEVICE_NAME) || name.to_lowercase().contains("osmograph") {
+                        is_osmograph = true;
+                    }
+                }
+            }
+            if is_osmograph {
+                let name = props.local_name.unwrap_or_else(|| "Osmograph-BLE".to_string());
+                found.push(BleDeviceInfo {
+                    name,
+                    address: p.address().to_string(),
+                });
             }
         }
     }
@@ -2765,6 +2803,17 @@ pub fn run() {    env_logger::init();
     let state = AppState::default();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // A second launch (regular shortcut reopen, or right-clicking the
+            // icon) must focus the existing window instead of spawning a
+            // second, oversized one that covers the screen and blocks the
+            // current flash popup/modal.
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -2855,7 +2904,34 @@ pub fn run() {    env_logger::init();
 
 #[cfg(test)]
 mod tests {
-    use super::{board_label, classify_vid_pid};
+    use super::{board_label, channels_for, classify_vid_pid, sensor_pins_for};
+
+    #[test]
+    fn preset_channel_counts_match_frontend_presets() {
+        // The UI advertises these sensor counts; the backend must agree —
+        // 8-sensor-max used to silently fall through to 6 channels.
+        assert_eq!(channels_for("3-sensor-food"), 3);
+        assert_eq!(channels_for("4-sensor-safety"), 4);
+        assert_eq!(channels_for("6-sensor-full"), 6);
+        assert_eq!(channels_for("8-sensor-max"), 8);
+    }
+
+    #[test]
+    fn sensor_pinout_is_ordered_and_unbounded() {
+        assert_eq!(sensor_pins_for(3), vec![32, 33, 34]);
+        assert_eq!(sensor_pins_for(4), vec![32, 33, 34, 35]);
+        // 6-sensor keeps the historical pinout: [32,33,34,35,25,26].
+        assert_eq!(sensor_pins_for(6), vec![32, 33, 34, 35, 25, 26]);
+        assert_eq!(sensor_pins_for(8).len(), 8);
+        assert_eq!(sensor_pins_for(5).len(), 5);
+        // Aliased / duplicated pins would break the firmware; every pin unique.
+        let eight = sensor_pins_for(8);
+        let mut dedup = eight.clone();
+        dedup.sort_unstable();
+        dedup.dedup();
+        assert_eq!(dedup.len(), eight.len());
+    }
+
 
     #[test]
     fn classify_known_usb_bridges() {

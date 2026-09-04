@@ -32,6 +32,30 @@ const PRESETS: Record<string, { name: string; sensors: string[] }> = {
   '8-sensor-max': { name: '8-Sensor Max', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8', 'MQ-2', 'MQ-9'] },
 };
 
+// User-saved rig presets (persisted to localStorage). Unlike the built-in
+// presets these can describe any channel count — the backend auto-assigns ADC
+// pins from the count, so any board works out of the box.
+interface CustomPreset { id: string; name: string; n_channels: number; sensors: string[]; }
+const CP_KEY = 'osmograph.customPresets.v1';
+let customPresets: CustomPreset[] = [];
+function loadCustomPresets() { try { customPresets = JSON.parse(localStorage.getItem(CP_KEY) || '[]'); } catch { customPresets = []; } }
+function persistCustomPresets() { try { localStorage.setItem(CP_KEY, JSON.stringify(customPresets)); } catch { /* ignore */ } }
+function isCustomPreset(id: string): boolean { return id.startsWith('custom:'); }
+// Channel count for any preset id (built-in or custom). 0 => auto-detect.
+function presetChannelCount(id: string): number {
+  if (isCustomPreset(id)) { const c = customPresets.find(p => p.id === id); return c ? c.n_channels : 0; }
+  const b = PRESETS[id]; return b ? b.sensors.length : 0;
+}
+// Auto-assigned analog (ADC) GPIO pinout — mirrors the Rust
+// `sensor_pins_for` so the on-screen mapping table shows the *real* firmware
+// pins rather than a decorative 32+i*2 guess. Order matters: historical 3/4/6
+// pinouts kept stable, then ADC1 (36,39) before ADC2 (27,14,12,13).
+const PIN_ORDER: number[] = [32, 33, 34, 35, 25, 26, 36, 39, 27, 14, 12, 13];
+function presetPins(count: number): number[] {
+  const n = Math.max(1, Math.min(count, PIN_ORDER.length));
+  return PIN_ORDER.slice(0, n);
+}
+
 // Human-readable descriptors for the sensor-to-channel mapping table.
 const SENSOR_INFO: Record<string, { name: string; target: string; range: string }> = {
   'MQ-135': { name: 'MQ-135', target: 'Air quality / NH₃, benzene, CO₂', range: '10 – 1000 ppm' },
@@ -43,15 +67,18 @@ const SENSOR_INFO: Record<string, { name: string; target: string; range: string 
 };
 
 function toDataChannels(values: number[]): number[] {
-  const out = values.slice(0, channelCount);
-  while (out.length < channelCount) out.push(0);
+  // In auto-detect mode (channelCount === 0) the count is learned from the
+  // device's first stream; use the incoming width until detection fills it in.
+  const n = channelCount > 0 ? channelCount : values.length;
+  const out = values.slice(0, n);
+  while (out.length < n) out.push(0);
   return out;
 }
 
 // === State ===
 let connected = false;
 let activeMode: 'serial' | 'wifi' | 'ble' = 'serial';
-let channelCount = 6;
+let channelCount = 0;
 let sessionStart: number | null = null;
 let sampleCount = 0;
 let lastSampleTime = 0;
@@ -668,27 +695,42 @@ async function ingestReading(values: number[]) {
     const result = await invoke<{
       is_anomaly: boolean; raw_score: number; calibrated_confidence: number;
       triggered_channels: number[]; alert_level: number; alert_name: string;
-      consecutive_anomalies: number;
+      consecutive_anomalies: number; warming_up: boolean; baseline_progress: number;
     }>('ingest_reading_with_failsafe', { reading: values });
 
     // Anomaly card
     const card = document.getElementById('anomalyCard')!;
-    card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
-    document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
-    document.getElementById('anomalySub')!.textContent =
-      result.is_anomaly ? `${result.alert_name.toUpperCase()} — ${result.consecutive_anomalies} consecutive` : 'All channels nominal';
-    document.getElementById('mMahal')!.textContent = result.raw_score.toFixed(2);
-    document.getElementById('mConf')!.textContent = result.is_anomaly
-      ? `${(result.calibrated_confidence * 100).toFixed(0)}%`
-      : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
-    document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
-    document.getElementById('mAlert')!.textContent = result.alert_name;
-
-    const statusDot = document.getElementById('statusDot')!;
-    if (result.is_anomaly) {
-      statusDot.className = result.alert_level >= 2 ? 'status-dot crit' : 'status-dot warn';
+    if (result.warming_up) {
+      // Baseline not established yet — show honest warm-up progress instead of
+      // either a false "ANOMALY" or a premature "NORMAL".
+      card.className = 'anomaly-card';
+      document.getElementById('anomalyLabel')!.textContent = 'CALIBRATING';
+      const pct = Math.round((result.baseline_progress ?? 0) * 100);
+      document.getElementById('anomalySub')!.textContent = `Establishing baseline for detection… ${pct}%`;
+      document.getElementById('mMahal')!.textContent = '—';
+      document.getElementById('mConf')!.textContent = '—';
+      document.getElementById('mCh')!.textContent = `—/${chNames.length}`;
+      document.getElementById('mAlert')!.textContent = 'warming_up';
+      const wDot = document.getElementById('statusDot')!;
+      wDot.className = connected ? 'status-dot' : 'status-dot';
     } else {
-      statusDot.className = connected ? 'status-dot ok' : 'status-dot';
+      card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
+      document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
+      document.getElementById('anomalySub')!.textContent =
+        result.is_anomaly ? `${result.alert_name.toUpperCase()} — ${result.consecutive_anomalies} consecutive` : 'All channels nominal';
+      document.getElementById('mMahal')!.textContent = result.raw_score.toFixed(2);
+      document.getElementById('mConf')!.textContent = result.is_anomaly
+        ? `${(result.calibrated_confidence * 100).toFixed(0)}%`
+        : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
+      document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
+      document.getElementById('mAlert')!.textContent = result.alert_name;
+
+      const statusDot = document.getElementById('statusDot')!;
+      if (result.is_anomaly) {
+        statusDot.className = result.alert_level >= 2 ? 'status-dot crit' : 'status-dot warn';
+      } else {
+        statusDot.className = connected ? 'status-dot ok' : 'status-dot';
+      }
     }
   } catch (err) {
     console.error('Detection error:', err);
@@ -783,7 +825,7 @@ async function scanBleDevices() {
     bleDevices = devices;
     sel.innerHTML = '<option value="">Select device…</option>';
     if (devices.length === 0) {
-      sel.innerHTML = '<option value="">No Osmograph-BLE found</option>';
+      sel.innerHTML = '<option value="">No e-nose found — is it on & advertising?</option>';
       return;
     }
     for (const d of devices) {
@@ -903,6 +945,7 @@ async function toggleConnection() {
   if (mode === 'ble') {
     const addr = (document.getElementById('bleSelect') as HTMLSelectElement).value;
     if (!addr) {
+      setMsg('Scan for devices (↻) first, then select the e-nose to connect.', false);
       console.warn('Scan for devices (↻), then select one to connect.');
       return;
     }
@@ -1759,6 +1802,25 @@ function updateBuzzerPreviews() {
 // third-party board) that dumps N numeric CSV columns is detected from its own
 // stream width. There is no manual selector: the app just adapts to the device.
 function setChannelCount(n: number, names?: string[]) {
+  // n === 0 means "auto-detect": wait for the connected device to announce its
+  // channel count (see applyDetectedChannels) instead of forcing one.
+  if (n <= 0) {
+    if (channelCount === 0 && chNames.length === 0 && !names) return;
+    channelCount = 0;
+    chNames = names && names.length ? names : [];
+    autoChannels = 0;
+    traceData = [];
+    historyData = [];
+    buildLegend();
+    const sc = document.getElementById('sysChannels') as HTMLInputElement | null;
+    if (sc && sc.value !== '0') sc.value = '0';
+    const pc = document.getElementById('plotChCount');
+    if (pc) pc.textContent = 'auto';
+    updateRigNote();
+    updateRailCoord();
+    refreshCalibrationViews();
+    return;
+  }
   const next = Math.max(1, Math.min(64, Math.floor(n) || 1));
   if (next === channelCount && !names) return;
   channelCount = next;
@@ -1768,6 +1830,7 @@ function setChannelCount(n: number, names?: string[]) {
     chNames = Array.from({ length: next }, (_, i) => PRESETS[activePreset]?.sensors[i] || `CH${i + 1}`);
   }
   traceData = chNames.map(() => []);
+  historyData = chNames.map(() => []);
   buildLegend();
   const sc = document.getElementById('sysChannels') as HTMLInputElement | null;
   if (sc && sc.value !== String(next)) sc.value = String(next);
@@ -1844,6 +1907,14 @@ function applyCustomNames() {
 // === Preset Change ===
 function onPresetChange(preset: string) {
   activePreset = preset;
+  if (preset === 'auto') {
+    setChannelCount(0);
+    const mapping = document.getElementById('channelMapping');
+    if (mapping) mapping.textContent = '';
+    const detail = document.getElementById('presetDetail');
+    if (detail) detail.innerHTML = '<span class="hint">Channels are detected automatically from the connected device.</span>';
+    return;
+  }
   const p = PRESETS[preset];
   if (!p) return;
   chNames = p.sensors;
@@ -1862,9 +1933,11 @@ function onPresetChange(preset: string) {
       ${p.sensors.map((s, i) => `<span class="preset-chip" style="border-color:${channelColor(i)};color:${channelColor(i)}">${s}</span>`).join(' ')}
     </div>`;
   }
-  // Channel mapping — a coherent CH → sensor → target-gas table.
+  // Channel mapping — a coherent CH → sensor → target-gas table, with the
+  // *actual* auto-assigned ADC GPIO pins (not a placeholder 32+i*2 guess).
   const mapping = document.getElementById('channelMapping');
   if (mapping) {
+    const pins = presetPins(p.sensors.length);
     mapping.innerHTML = p.sensors.map((s, i) => {
       const info = SENSOR_INFO[s] || { name: s, target: 'Unspecified target', range: '—' };
       return `<div class="map-row">
@@ -1873,7 +1946,7 @@ function onPresetChange(preset: string) {
           <div class="map-name">${info.name}</div>
           <div class="map-target">${info.target} · ${info.range}</div>
         </div>
-        <div class="map-gpio">GPIO ${32 + i * 2}</div>
+        <div class="map-gpio">GPIO ${pins[i] ?? '—'}</div>
       </div>`;
     }).join('');
   }
@@ -2814,14 +2887,14 @@ document.getElementById('sysPreset')!.addEventListener('change', (e) => {
   onPresetChange((e.target as HTMLSelectElement).value);
 });
 
-// Dynamic channel count (device-agnostic): user pins N channels before connecting
+// Dynamic channel count (device-agnostic): user pins N channels before connecting,
+// or sets 0 to auto-detect the count from the device's own stream.
 document.getElementById('sysChannels')!.addEventListener('change', (e) => {
   const el = e.target as HTMLInputElement;
   const n = parseInt(el.value, 10);
-  if (!isNaN(n) && n > 0) {
-    setChannelCount(n);
-    applyCustomNames();
-  }
+  if (isNaN(n)) return;
+  setChannelCount(n);
+  applyCustomNames();
 });
 
 // === Phase Recording (.osmell) ===
@@ -2987,11 +3060,41 @@ let recPhaseActive = false;
 let prevPhaseActive = false;
 let autoFinalized = false;
 
+// A recording is only meaningful if a device is actually streaming data. This
+// returns true when we're connected AND fresh readings are arriving (same
+// 3 s threshold as the LIVE LINK / NO DATA indicator). Refuses to record into
+// an empty session when nothing is connected.
+function isStreamingActive(): boolean {
+  return connected && Date.now() - lastDataAt <= 3000;
+}
+
+// Show an inline toast (auto-hides). Falls back to window.alert if the toast
+// container is missing so messages are never silently swallowed.
+function showToast(msg: string, ms = 3500): void {
+  const toast = document.getElementById('toast') ?? document.getElementById('toastHost');
+  if (toast) {
+    const el = document.getElementById('toastMsg');
+    if (el) el.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), ms);
+  } else {
+    window.alert(msg);
+  }
+}
+
+function alertNotStreaming(): void {
+  showToast('Nothing is streaming — connect your e-nose first (header Connect).');
+}
+
 // Record button
 document.getElementById('recordBtn')!.addEventListener('click', async () => {
   if (recPhaseActive || prevPhaseActive) {
     stopPhaseRecordingFromUI();
   } else {
+    if (!isStreamingActive()) {
+      alertNotStreaming();
+      return;
+    }
     openRecordModal();
   }
 });
@@ -3000,6 +3103,10 @@ document.getElementById('recordBtn')!.addEventListener('click', async () => {
   if (recPhaseActive || prevPhaseActive) {
     stopPhaseRecordingFromUI();
   } else {
+    if (!isStreamingActive()) {
+      alertNotStreaming();
+      return;
+    }
     openRecordModal();
   }
 });
@@ -3021,13 +3128,17 @@ function updateProtocolSeq() {
   document.getElementById(id)?.addEventListener('input', updateProtocolSeq);
 });
 
-document.getElementById('recStart')!.addEventListener('click', async () => {
-  const substance = (document.getElementById('recSubstance') as HTMLInputElement).value.trim();
-  if (!substance) {
-    (document.getElementById('recSubstance') as HTMLInputElement).focus();
-    return;
-  }
-  const num = (id: string, fallback: number) => {
+ document.getElementById('recStart')!.addEventListener('click', async () => {
+   const substance = (document.getElementById('recSubstance') as HTMLInputElement).value.trim();
+   if (!substance) {
+     (document.getElementById('recSubstance') as HTMLInputElement).focus();
+     return;
+   }
+   if (!isStreamingActive()) {
+     alertNotStreaming();
+     return;
+   }
+   const num = (id: string, fallback: number) => {
     const v = parseFloat((document.getElementById(id) as HTMLInputElement).value);
     return Number.isFinite(v) && v >= 0 ? v : fallback;
   };
@@ -3082,6 +3193,7 @@ interface BurnInStatus {
   remaining_seconds: number;
   remaining_hours: number;
   is_complete: boolean;
+  running: boolean;
 }
 
 function fmtClock(totalSeconds: number): string {
@@ -3097,6 +3209,19 @@ function renderBurnIn(s: BurnInStatus) {
   const total = s.total_hours * 3600;
   const pct = total > 0 ? Math.min(100, (s.elapsed_seconds / total) * 100) : 0;
   document.getElementById('burninBar')!.style.width = `${pct.toFixed(1)}%`;
+  const startBtn = document.getElementById('burninStart') as HTMLButtonElement | null;
+  const statusEl = document.getElementById('burninStatus');
+  if (startBtn) startBtn.textContent = s.running && !s.is_complete ? 'Stop' : 'Start';
+  if (statusEl) {
+    const label = s.is_complete
+      ? 'Complete'
+      : s.running
+        ? 'Running — countdown active'
+        : s.elapsed_seconds > 0
+          ? 'Paused'
+          : 'Not started';
+    statusEl.textContent = label;
+  }
 }
 
 async function refreshBurnIn() {
@@ -3176,7 +3301,7 @@ document.getElementById('flashBtn')!.addEventListener('click', async () => {
   document.getElementById('flashStatus')!.textContent = 'Flashing...';
   document.getElementById('flashBar')!.style.width = '30%';
   try {
-    await invoke('flash_firmware', { port, preset: activePreset, wifiSsid, wifiPassword });
+    await invoke('flash_firmware', { port, preset: activePreset, nChannels: presetChannelCount(activePreset), sensorPins: [], wifiSsid, wifiPassword });
     document.getElementById('flashBar')!.style.width = '100%';
     document.getElementById('flashStatus')!.textContent = 'Complete — mDNS: osmograph.local (service _osmograph._tcp)';
   } catch (e) {
@@ -3226,23 +3351,73 @@ document.getElementById('eraseBtn')!.addEventListener('click', async () => {
 // === Flash modal — one-click firmware programming (Python-app parity) ===
 // The header ⚡ Flash button and the bootloader-stall diagnosis both open this;
 // it drives the same `flash_firmware` backend as the System tab.
+let fmTimer: number | null = null;
+
+// Fill the modal's rig-preset dropdown with the built-in presets plus any
+// user-saved custom rigs. Keeps the current selection when it still exists.
+function populateFmPresets() {
+  loadCustomPresets();
+  const sel = document.getElementById('fmPreset') as HTMLSelectElement;
+  if (!sel) return;
+  const prev = sel.value;
+  const builtIns = Object.keys(PRESETS).map(id => `<option value="${id}">${PRESETS[id].name}</option>`);
+  const customs = customPresets.map(p => `<option value="${p.id}">${p.name} (custom, ${p.n_channels} ch)</option>`);
+  sel.innerHTML = builtIns.join('') + customs.join('');
+  if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+}
+
 function openFlashModal() {
   const modal = document.getElementById('flashModal');
   if (!modal) return;
-  populateFmPort();
+  resetFmState();
+  populateFmPresets();
+  populateFmPort().then(() => {
+    // Port-not-required nicety: if we already know which board we're talking to
+    // (connected or remembered), prefill it so the user doesn't have to re-pick.
+    const sel = document.getElementById('fmPort') as HTMLSelectElement;
+    const cur = document.getElementById('portSelect') as HTMLSelectElement | null;
+    if (cur?.value && sel) { if (Array.from(sel.options).some(o => o.value === cur.value)) sel.value = cur.value; }
+  });
   const presetSelect = document.getElementById('fmPreset') as HTMLSelectElement;
-  if (presetSelect && activePreset && PRESETS[activePreset]) presetSelect.value = activePreset;
+  if (presetSelect && activePreset && (PRESETS[activePreset] || isCustomPreset(activePreset))) presetSelect.value = activePreset;
   const ssid = document.getElementById('fwSsid') as HTMLInputElement | null;
   if (ssid && ssid.value) {
     (document.getElementById('fmSsid') as HTMLInputElement).value = ssid.value;
   }
   void checkFmToolchain();
   modal.style.display = 'flex';
+  setTimeout(() => (document.getElementById('fmPort') as HTMLSelectElement)?.focus(), 50);
 }
 
 function closeFlashModal() {
+  if (fmTimer !== null) { clearInterval(fmTimer); fmTimer = null; }
   const modal = document.getElementById('flashModal');
   if (modal) modal.style.display = 'none';
+}
+
+// Reset progress/status/button to a clean, ready state (used on open and after
+// any flash attempt so a stale/closed run never leaks into the next one).
+function resetFmState() {
+  if (fmTimer !== null) { clearInterval(fmTimer); fmTimer = null; }
+  const progress = document.getElementById('fmProgress') as HTMLDivElement;
+  const bar = document.getElementById('fmBar') as HTMLDivElement;
+  const status = document.getElementById('fmStatus') as HTMLDivElement;
+  const btn = document.getElementById('fmFlash') as HTMLButtonElement;
+  if (progress) progress.style.display = 'none';
+  if (bar) { bar.style.width = '0%'; bar.classList.remove('busy'); }
+  if (status) { status.textContent = ''; status.style.color = ''; }
+  if (btn) { btn.disabled = false; btn.textContent = 'Flash Firmware'; }
+}
+
+// Visible busy state while flashing. Uses an indeterminate pulse rather than a
+// fake percentage we can't actually measure — honest and non-toy.
+function setFmBusy(busy: boolean) {
+  const progress = document.getElementById('fmProgress') as HTMLDivElement;
+  const bar = document.getElementById('fmBar') as HTMLDivElement;
+  const btn = document.getElementById('fmFlash') as HTMLButtonElement;
+  if (progress) progress.style.display = busy ? '' : 'none';
+  if (bar) bar.classList.toggle('busy', busy);
+  if (btn) { btn.disabled = busy; btn.textContent = busy ? 'Flashing…' : 'Flash Firmware'; }
 }
 
 async function populateFmPort() {
@@ -3276,42 +3451,110 @@ async function checkFmToolchain() {
 
 document.getElementById('flashQuick')?.addEventListener('click', () => openFlashModal());
 document.getElementById('fmClose')?.addEventListener('click', closeFlashModal);
+// Close on backdrop click and Escape (same pattern as other modals); never let
+// a stray key while typing in a field close it.
+document.getElementById('flashModal')?.addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeFlashModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    const fm = document.getElementById('flashModal');
+    if (fm && fm.style.display !== 'none') { closeFlashModal(); e.preventDefault(); }
+  }
+});
 
 document.getElementById('fmFlash')?.addEventListener('click', async () => {
   const port = (document.getElementById('fmPort') as HTMLSelectElement).value;
   const preset = (document.getElementById('fmPreset') as HTMLSelectElement).value;
   const wifiSsid = (document.getElementById('fmSsid') as HTMLInputElement).value.trim();
   const wifiPassword = (document.getElementById('fmPass') as HTMLInputElement).value;
-  const progress = document.getElementById('fmProgress') as HTMLDivElement;
-  const bar = document.getElementById('fmBar') as HTMLDivElement;
   const status = document.getElementById('fmStatus') as HTMLDivElement;
-  const btn = document.getElementById('fmFlash') as HTMLButtonElement;
   if (!port) { status.textContent = 'Pick a port first.'; status.style.color = 'var(--yellow)'; return; }
-  btn.disabled = true;
-  bar.style.width = '0%';
-  progress.style.display = '';
-  status.textContent = 'Flashing…';
+  resetFmState();
+  setFmBusy(true);
+  status.textContent = 'Building & flashing… this can take ~30 s.';
   status.style.color = '';
-  const timer = setInterval(() => {
-    const w = parseFloat(bar.style.width || '0');
-    bar.style.width = Math.min(90, w + (w < 30 ? 12 : 6)) + '%';
-  }, 700);
   try {
-    const done = await invoke<string>('flash_firmware', { port, preset, wifiSsid, wifiPassword });
-    clearInterval(timer);
-    bar.style.width = '100%';
+    const done = await invoke<string>('flash_firmware', { port, preset, nChannels: presetChannelCount(preset), sensorPins: [], wifiSsid, wifiPassword });
+    setFmBusy(false);
     status.textContent = done || 'Complete — mDNS: osmograph.local (_osmograph._tcp)';
     status.style.color = 'var(--green)';
-    btn.disabled = false;
     setTimeout(closeFlashModal, 900);
   } catch (e) {
-    clearInterval(timer);
-    bar.style.width = '0%';
+    setFmBusy(false);
     status.textContent = `Failed: ${e}`;
     status.style.color = 'var(--red)';
-    btn.disabled = false;
   }
 });
+
+// === Custom Rig Presets (System → Firmware) ===
+function renderCustomPresetList() {
+  loadCustomPresets();
+  const el = document.getElementById('cpList');
+  if (!el) return;
+  if (!customPresets.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-3)">No custom presets saved yet.</span>'; return; }
+  el.innerHTML = customPresets.map(p =>
+    `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">
+       <span style="flex:1;font-size:12px" title="${(p.sensors || []).join(', ')}">
+         <strong>${p.name}</strong> <span style="color:var(--text-3)">· ${p.n_channels} ch · ${(p.sensors || []).join(', ')}</span>
+       </span>
+       <button data-cp-use="${p.id}" style="font-size:11px;padding:2px 8px">Use</button>
+       <button data-cp-del="${p.id}" style="font-size:11px;padding:2px 8px;color:var(--red)">✕</button>
+     </div>`
+  ).join('');
+}
+
+function applyCustomPreset(p: CustomPreset) {
+  activePreset = p.id;
+  chNames = (p.sensors && p.sensors.length ? p.sensors : Array.from({ length: p.n_channels }, (_, i) => `CH${i + 1}`));
+  setChannelCount(chNames.length, chNames);
+}
+
+// Live GPIO-pin hint for the channel-count input, so the auto-assigned analog
+// pins are visible before the user saves a custom rig preset.
+function updateCpPinsHint() {
+  const countEl = document.getElementById('cpCount') as HTMLInputElement;
+  const hint = document.getElementById('cpPinsHint');
+  if (!countEl || !hint) return;
+  const n = Math.max(1, Math.min(12, Number(countEl.value) || 6));
+  hint.textContent = 'auto-assigns GPIO ' + presetPins(n).join(', ');
+}
+document.getElementById('cpCount')?.addEventListener('input', updateCpPinsHint);
+void Promise.resolve().then(updateCpPinsHint);
+
+document.getElementById('cpSave')?.addEventListener('click', () => {
+  const name = (document.getElementById('cpName') as HTMLInputElement).value.trim();
+  const countEl = document.getElementById('cpCount') as HTMLInputElement;
+  const count = Math.max(1, Math.min(12, Number(countEl.value) || 6));
+  const sensorsRaw = (document.getElementById('cpSensors') as HTMLInputElement).value.trim();
+  const sensors = sensorsRaw ? sensorsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
+  if (!name) { flashStatus('libStatus', 'Give the preset a name first.', 'var(--yellow)'); return; }
+  const id = 'custom:' + Date.now().toString(36);
+  customPresets.push({ id, name, n_channels: count, sensors });
+  persistCustomPresets();
+  renderCustomPresetList();
+  activePreset = id;
+  chNames = (sensors.length ? sensors : Array.from({ length: count }, (_, i) => `CH${i + 1}`));
+  setChannelCount(chNames.length, chNames);
+  flashStatus('libStatus', `Saved custom preset "${name}" (${count} ch).`, 'var(--green)');
+});
+
+document.getElementById('cpList')?.addEventListener('click', (e) => {
+  const t = e.target as HTMLElement;
+  const use = t.getAttribute('data-cp-use');
+  const del = t.getAttribute('data-cp-del');
+  if (use) {
+    const p = customPresets.find(x => x.id === use);
+    if (p) { applyCustomPreset(p); flashStatus('libStatus', `Applied preset "${p.name}" (${p.n_channels} ch).`, 'var(--green)'); }
+  } else if (del) {
+    customPresets = customPresets.filter(x => x.id !== del);
+    persistCustomPresets();
+    renderCustomPresetList();
+    flashStatus('libStatus', 'Custom preset removed.', 'var(--green)');
+  }
+});
+
+void Promise.resolve().then(() => renderCustomPresetList());
 
 // === Tauri Serial Data Event ===
 listen<{ channels: number[]; timestamp: number; raw_line: string }>('serial-data', (event) => {
@@ -3916,6 +4159,13 @@ type PhenotypeReport = {
     cv: number;
   }>;
   a1: { valence: string; summary: string };
+  a2: {
+    rise: string;
+    recovery: string;
+    rise_fraction: number | null;
+    recovery_observed: boolean;
+    summary: string;
+  };
   a3: {
     fingerprint: number[];
     assignable: boolean;
@@ -4047,8 +4297,8 @@ function renderPhenotype(p: PhenotypeReport) {
     setVal('phenoA3Sub', phenoA3Reason(p.a3.reason));
     const cap0 = document.getElementById('phenoA3Cap');
     if (cap0) cap0.textContent = p.n_channels > 0 ? `${p.n_channels} channels` : '';
-    setVal('phenoA2Val', 'idle');
-    setVal('phenoA2Sub', p.protocol.note);
+    setVal('phenoA2Val', p.a2.rise === 'unknown' ? '—' : p.a2.rise);
+    setVal('phenoA2Sub', p.a2.summary);
     drawPhenoBars([], false);
     drawBoundaryList(p);
     return;
@@ -4078,16 +4328,19 @@ function renderPhenotype(p: PhenotypeReport) {
   if (cap) cap.textContent = `${p.a3.fingerprint.length} channels · ${p.a3.reason}`;
   drawPhenoBars(p.a3.fingerprint, p.reference_geometry);
 
-  // A2 — protocol gating for the kinetics axes.
-  if (p.protocol.recording) {
-    setVal('phenoA2Val', `recording · ${p.protocol.current_phase}`);
-    setVal('phenoA2Sub', `${p.protocol.phase_label}: ${p.protocol.instruction}`);
-  } else if (p.protocol.complete) {
-    setVal('phenoA2Val', 'complete');
-    setVal('phenoA2Sub', p.protocol.note);
-  } else {
-    setVal('phenoA2Val', 'idle');
-    setVal('phenoA2Sub', p.protocol.note);
+  // A2 — live kinetic binding (rise / recovery shape), mirroring phenotype.py.
+  // Rise is computed live from the window shape; recovery is honest "unknown"
+  // until a real decay phase is present.
+  {
+    let v = p.a2.rise === 'unknown' ? '—' : p.a2.rise.toUpperCase();
+    const sfx = p.a2.recovery_observed ? ` · rec ${p.a2.recovery}` : '';
+    if (p.protocol.recording) {
+      v += ` (${p.protocol.current_phase})`;
+    } else if (p.protocol.complete) {
+      v += ' · session complete';
+    }
+    setVal('phenoA2Val', v ? v : '—');
+    setVal('phenoA2Sub', `${p.a2.summary}${sfx}`);
   }
 
   drawBoundaryList(p);
@@ -4496,18 +4749,35 @@ document.getElementById('calibExport')!.addEventListener('click', () => {
   exportSensorJSON(0);
 });
 
-// Open the project contribution page and marshal a prefilled sensor payload.
+// Copy the current JSON payload to the clipboard so the user can paste it into
+// a GitHub PR, and walk them through the exact flow. Kept simple: copy, then
+// point to the sensor library file + Discord.
 document.getElementById('calibContribute')!.addEventListener('click', async () => {
   ensureCalibrationLength();
   exportSensorJSON(0);
-  const url = encodeURI(
-    'https://github.com/opensmell/opensmell/wiki/Contributing-Sensor-Models');
-  try {
-    // Tauri 2 isolates navigations; fall back gracefully to window.open.
-    window.open(url, '_blank', 'noopener');
-  } catch {
-    // ignore
+  const pre = document.getElementById('calibExported');
+  const json = pre?.textContent || '';
+  let copied = false;
+  if (json) {
+    try {
+      await navigator.clipboard.writeText(json);
+      copied = true;
+    } catch { copied = false; }
   }
+  showToast(
+    copied
+      ? 'Sensor JSON copied. Open a PR against opensmell/opensmell adding it to the sensor library, or share it on Discord.'
+      : 'Select the JSON below, copy it, then open a PR against opensmell/opensmell (or share it on Discord).',
+    6000);
+});
+
+// Explain where the calibration constants come from and how to make them honest.
+document.getElementById('calibInfo')!.addEventListener('click', () => {
+  showToast(
+    'Constants: R₀, a, b come from the datasheet power-law curve for each sensor (see the Sensor Library for typical values). '
+    + 'That curve is a datasheet approximation, not a lab-grade reference, so a ppm figure here is an estimate — treat it as '
+    + 'an order-of-magnitude guide. For trustworthy numbers, recalibrate R₀ against a known gas concentration on your own rig.',
+    9000);
 });
 
 // Re-render the calibration panel whenever the channel set changes.
@@ -4516,7 +4786,51 @@ function refreshCalibrationViews() {
   renderSensorLibrary((document.getElementById('sensorLibSearch') as HTMLInputElement)?.value || '');
 }
 
+// Open external http(s) links in the user's default browser. Tauri 2 routes
+// `window.open` for remote http(s) URLs to the system browser by default.
+// Falls back to testless handling and absorbs failures so a missing browser
+// never breaks the rest of the UI.
+function openExternal(url: string): void {
+  try {
+    const opener = window.open(url, '_blank', 'noopener, noreferrer');
+    if (opener) opener.opener = null;
+  } catch { /* ignore */ }
+}
+document.addEventListener('click', (e) => {
+  const a = (e.target as HTMLElement).closest?.('a');
+  if (!a) return;
+  const href = a.getAttribute('href') || '';
+  if (/^https?:\/\//i.test(href)) {
+    e.preventDefault();
+    openExternal(href);
+  }
+});
+
 // === Init ===
+// --- Boot loader ---
+// The #bootOverlay is rendered by static HTML before this script runs, so the
+// window is never blank. These helpers log progress as the UI initializes and
+// then fade the overlay away once the core is wired up.
+function bootLog(msg: string): void {
+  const log = document.getElementById('bootLog');
+  if (!log) return;
+  const line = document.createElement('div');
+  line.className = 'boot-line';
+  line.textContent = msg;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+  // Keep only the last ~8 lines so the log stays compact.
+  while (log.children.length > 8) log.removeChild(log.firstChild!);
+}
+function bootDone(): void {
+  bootLog('ready');
+  setTimeout(() => {
+    const ov = document.getElementById('bootOverlay');
+    if (ov) { ov.classList.add('done'); setTimeout(() => ov.remove(), 400); }
+  }, 250);
+}
+bootLog('initializing UI…');
+
 refreshPorts().then(() => maybeAutoReconnect());
 
 // Restore the last connection and, for serial, reconnect automatically once the
@@ -4558,7 +4872,7 @@ animate();
 loadCalibration();
 loadHardwareProfile();
 wireHardwareProfile();
-onPresetChange('6-sensor-full');
+onPresetChange('auto');
 renderHardwareProfile();
 applyCustomNames();
 renderSensorLibrary();
@@ -4573,6 +4887,7 @@ refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
+bootDone();
 
 // Fit the window to the screen: never let it overstretch past the monitor's
 // work area. Degrades silently when the core doesn't grant window sizing.
