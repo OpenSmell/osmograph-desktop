@@ -1534,6 +1534,9 @@
     }
 
     /* OLED Preview */
+/* Peripheral (OLED/buzzer) body dimmed when not installed */
+.periph-body { transition: opacity .2s ease; }
+.periph-body.off { opacity: .45; pointer-events: none; }
 .oled-preview {
     background: #000;
     border: 1px solid var(--border);
@@ -1928,6 +1931,9 @@
         </select>
         <input type="text" id="wifiAddr" placeholder="192.168.4.1:8080" autocomplete="off"
           style="width:130px;display:none;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;color:var(--text-1);font-size:11px;padding:3px 6px" />
+        <select id="wifiScan" title="Auto-detect e-nose on the network (mDNS _osmograph._tcp)" style="width:150px;display:none;background:var(--bg-2);border:1px solid var(--border);border-radius:4px;color:var(--text-1);font-size:11px;padding:3px 6px">
+          <option value="">Auto-detect e-nose ↻</option>
+        </select>
         <select id="bleSelect" style="width:190px;display:none">
           <option value="">Scan for devices ↻</option>
         </select>
@@ -2504,6 +2510,17 @@
           <div class="sys-panel" id="sys-oled">
             <h2>OLED Display Configuration</h2>
             <div class="card">
+              <div class="form-row">
+                <label style="flex:2"><strong>I have an OLED wired to this board</strong></label>
+                <select id="oledEnabled" style="max-width:140px">
+                  <option value="no">No (not installed)</option>
+                  <option value="yes">Yes</option>
+                </select>
+              </div>
+              <div id="oledStatus" class="hint" style="margin-top:6px"></div>
+            </div>
+            <div id="oledBody" class="periph-body off">
+              <div class="card">
               <h3>Layout</h3>
               <div class="form-row">
                 <label>Screen</label>
@@ -2553,11 +2570,23 @@ CH6: MQ-8    1634 Ω
 Status: NORMAL
 Confidence: 97.3%</div>
             </div>
+            </div>
           </div>
 
           <!-- Buzzer Panel -->
           <div class="sys-panel" id="sys-buzzer">
             <h2>Buzzer Alert Configuration</h2>
+            <div class="card">
+              <div class="form-row">
+                <label style="flex:2"><strong>I have a buzzer wired to this board</strong></label>
+                <select id="buzzerEnabled" style="max-width:140px">
+                  <option value="no">No (not installed)</option>
+                  <option value="yes">Yes</option>
+                </select>
+              </div>
+              <div id="buzzerStatus" class="hint" style="margin-top:6px"></div>
+            </div>
+            <div id="buzzerBody" class="periph-body off">
             <div class="card">
               <h3>Alert Patterns</h3>
               <div class="form-row">
@@ -2617,6 +2646,7 @@ Confidence: 97.3%</div>
                   <div class="buzzer-pattern" id="buzPrevEmerg"></div>
                 </div>
               </div>
+            </div>
             </div>
           </div>
 

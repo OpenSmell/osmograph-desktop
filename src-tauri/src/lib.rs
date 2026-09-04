@@ -2344,6 +2344,11 @@ fn mdns_discover(timeout: Duration) -> Vec<DiscoveredDevice> {
 }
 
 #[tauri::command]
+fn find_osmograph_devices() -> Result<Vec<DiscoveredDevice>, String> {
+    Ok(mdns_discover(Duration::from_secs(2)))
+}
+
+#[tauri::command]
 fn fleet_scan(state: State<AppState>) -> Result<Vec<FleetDeviceState>, String> {
     let mut devices: Vec<FleetDeviceState> = Vec::new();
 
@@ -2866,6 +2871,7 @@ pub fn run() {    env_logger::init();
             fleet_add_device,
             fleet_remove_device,
             fleet_get_all,
+            find_osmograph_devices,
             oled_get_config,
             oled_set_config,
             buzzer_get_config,

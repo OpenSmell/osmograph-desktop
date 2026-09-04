@@ -301,10 +301,14 @@ function drawTraces() {
     const src = chArr.length ? chArr : [];
     if (src.length === 0) return [];
     if (isLiveScrubbing) {
-      // Seek offset is samples back from the newest sample (clamped to history).
-      const end = Math.max(0, src.length - liveScrollSeek);
-      const start = Math.max(0, end - wlen);
-      return src.slice(start, end);
+      // Seek offset is samples back from the newest sample. Anchor the window's
+      // RIGHT edge at `rightIndex` and always draw a full `wlen` slice so the
+      // plot never stretches a short/partial window (that caused the slide/
+      // glitch while rewinding). When fewer than `wlen` samples exist, draw all
+      // of them (normal "not enough history yet" case, not a rewind artefact).
+      const rightIndex = Math.max(0, src.length - liveScrollSeek);
+      const start = Math.max(0, rightIndex - wlen);
+      return src.slice(start, rightIndex);
     }
     return src.length <= wlen ? src.slice() : src.slice(src.length - wlen);
   });
@@ -379,8 +383,9 @@ function drawTraces() {
     tracesCtx.lineTo(x, ph);
     tracesCtx.stroke();
     if (major) {
-      // secs ago relative to the right edge of the visible window.
-      const secs = Math.round((wlen - s) / liveRateHz);
+      // Seconds ago relative to NOW: the window's right edge sits
+      // `liveScrollSeek` samples back from the newest when rewound.
+      const secs = Math.round((liveScrollSeek + (wlen - s)) / liveRateHz);
       tracesCtx.fillStyle = '#9a9484';
       tracesCtx.fillText(`${secs}s`, x, ph + 4);
     }
@@ -1326,21 +1331,44 @@ function pearson(x: number[], y: number[]): number | null {
 }
 
 // Chemoprint similarity: Pearson over the shared overlap of the active channels,
-// each channel normalized to its own R0, channels concatenated.
-function cmpCorrelation(a: SessionSeries, b: SessionSeries): number | null {
-  const X: number[] = [], Y: number[] = [];
+// each channel normalized to its own R0, channels concatenated. When two rigs
+// label channels differently (custom names), named overlap can be empty — fall
+// back to positional overlap across the shared channel count so the fingerprint
+// still adapts to any rig. Returns the correlation plus an honest overlap basis.
+function cmpCorrelation(a: SessionSeries, b: SessionSeries): { corr: number | null; basis: 'name' | 'position'; nChannels: number } | null {
+  let X: number[] = [], Y: number[] = [], nChannels = 0;
+  // 1) Named overlap first.
   for (const name of activeCompareChannels) {
     const ia = a.channels.indexOf(name), ib = b.channels.indexOf(name);
     if (ia < 0 || ib < 0) continue;
     const na = cmpNorm(a, ia), nb = cmpNorm(b, ib);
     if (!na || !nb) continue;
+    nChannels++;
     const n = Math.min(na.length, nb.length);
     for (let i = 0; i < n; i++) {
       const x = na[i], y = nb[i];
       if (Number.isFinite(x) && Number.isFinite(y)) { X.push(x); Y.push(y); }
     }
   }
-  return pearson(X, Y);
+  let basis: 'name' | 'position' = 'name';
+  // 2) If named pairing produced no usable samples, fall back to positional.
+  if (X.length < 8) {
+    X = []; Y = []; nChannels = 0;
+    const nCh = Math.min(a.channels.length, b.channels.length);
+    for (let c = 0; c < nCh; c++) {
+      const na = cmpNorm(a, c), nb = cmpNorm(b, c);
+      if (!na || !nb) continue;
+      nChannels++;
+      const n = Math.min(na.length, nb.length);
+      for (let i = 0; i < n; i++) {
+        const x = na[i], y = nb[i];
+        if (Number.isFinite(x) && Number.isFinite(y)) { X.push(x); Y.push(y); }
+      }
+    }
+    if (X.length >= 8) basis = 'position';
+  }
+  const corr = X.length >= 8 ? pearson(X, Y) : null;
+  return { corr, basis, nChannels };
 }
 
 function truncateLabel(s: string, max = 16): string {
@@ -1623,6 +1651,7 @@ function drawCompareHeatmap() {
   const padL = 74, padT = 6, padR = 10;
   const cell = Math.min((w - padL - padR) / n, (h - padT - 20) / n);
   const cw = cell * n;
+  let anyPositionBasis = false;
 
   const heat = (v: number) => {
     const t = Math.max(-1, Math.min(1, v));
@@ -1651,7 +1680,8 @@ function drawCompareHeatmap() {
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
       const x = padL + j * cell, y = padT + i * cell;
-      const corr = i === j ? 1 : cmpCorrelation(items[i], items[j]);
+      const r = i === j ? { corr: 1 as number | null, basis: 'name' as const, nChannels: 0 } : cmpCorrelation(items[i], items[j]);
+      const corr = r ? r.corr : null;
       ctx.fillStyle = corr === null ? 'rgba(30,30,30,0.4)' : heat(corr);
       ctx.fillRect(x + 0.5, y + 0.5, cell - 1, cell - 1);
       if (cell >= 26) {
@@ -1661,7 +1691,15 @@ function drawCompareHeatmap() {
         ctx.textBaseline = 'middle';
         ctx.fillText(corr === null ? '·' : corr.toFixed(2), x + cell / 2, y + cell / 2 + 1);
       }
+      if (r && r.basis === 'position') anyPositionBasis = true;
     }
+  }
+  if (anyPositionBasis) {
+    ctx.fillStyle = 'var(--text-3)';
+    ctx.font = '9px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('— matched by channel position (rigs label channels differently)', 2, h - 2);
   }
 }
 
@@ -2337,18 +2375,49 @@ async function refreshTrainLibrary() {
 }
 
 // === Event Listeners ===
+// Auto-detect e-noses on the LAN via mDNS `_osmograph._tcp` and offer them in
+// the WiFi-mode dropdown. Selecting one fills the address field.
+async function scanWifiDevices() {
+  const sel = document.getElementById('wifiScan') as HTMLSelectElement;
+  if (!sel) return;
+  sel.innerHTML = '<option value="">Scanning…</option>';
+  try {
+    const devs = await invoke<Array<{ host: string; ip: string; port: number; firmware_version: string; n_channels: number }>>('find_osmograph_devices');
+    if (!devs.length) {
+      sel.innerHTML = '<option value="">No e-nose found (mDNS)</option>';
+      return;
+    }
+    sel.innerHTML = '<option value="">Pick auto-detected e-nose</option>' + devs.map(d => {
+      const addr = `${d.ip}:${d.port}`;
+      const label = `${d.ip}:${d.port} · ${d.firmware_version !== 'unknown' ? 'fw ' + d.firmware_version : 'no INFO'}${d.n_channels > 0 ? ` · ${d.n_channels}ch` : ''}`;
+      return `<option value="${addr}">${label}</option>`;
+    }).join('');
+  } catch {
+    sel.innerHTML = '<option value="">Scan failed</option>';
+  }
+}
+
 document.getElementById('modeSelect')!.addEventListener('change', () => {
   const value = (document.getElementById('modeSelect') as HTMLSelectElement).value;
   const wifi = document.getElementById('wifiAddr') as HTMLInputElement;
+  const wifiScan = document.getElementById('wifiScan') as HTMLSelectElement;
   const ble = document.getElementById('bleSelect') as HTMLSelectElement;
   wifi.style.display = value === 'wifi' ? '' : 'none';
+  wifiScan.style.display = value === 'wifi' ? '' : 'none';
   ble.style.display = value === 'ble' ? '' : 'none';
   if (value === 'ble') scanBleDevices();
+  if (value === 'wifi') void scanWifiDevices();
+});
+document.getElementById('wifiScan')!.addEventListener('change', () => {
+  const sel = document.getElementById('wifiScan') as HTMLSelectElement;
+  const addr = (document.getElementById('wifiAddr') as HTMLInputElement);
+  if (sel.value) addr.value = sel.value;
 });
 document.getElementById('connectBtn')!.addEventListener('click', toggleConnection);
 document.getElementById('refreshBtn')!.addEventListener('click', () => {
   const mode = (document.getElementById('modeSelect') as HTMLSelectElement).value;
   if (mode === 'ble') scanBleDevices();
+  else if (mode === 'wifi') void scanWifiDevices();
   else refreshPorts();
 });
 document.getElementById('detectBtn')!.addEventListener('click', async () => {
@@ -2868,19 +2937,121 @@ document.getElementById('fleetAdd')!.addEventListener('click', () => {
   renderFleet();
 });
 
+// OLED + Buzzer: conditional (only if the user actually has the peripheral
+// wired up), persisted, and pushed into Rust state so the plumbing is real.
+const PERIPH_KEY = 'osmograph.peripherals.v1';
+interface PeripheralState {
+  oledEnabled: boolean;
+  oled: { screen_size: string; layout: string; rotation: number; cycle_interval_secs: number };
+  buzzerEnabled: boolean;
+  buzzer: { warning_pattern: string; critical_pattern: string; emergency_pattern: string; volume: number; frequency_hz: number };
+}
+let peripheralState: PeripheralState = {
+  oledEnabled: false,
+  oled: { screen_size: '128x64', layout: 'overview', rotation: 0, cycle_interval_secs: 5 },
+  buzzerEnabled: false,
+  buzzer: { warning_pattern: 'double', critical_pattern: 'continuous', emergency_pattern: 'continuous', volume: 70, frequency_hz: 2000 },
+};
+function loadPeripheralState() {
+  try {
+    const raw = localStorage.getItem(PERIPH_KEY);
+    if (raw) peripheralState = { ...peripheralState, ...(JSON.parse(raw) as Partial<PeripheralState>) };
+  } catch { /* defaults */ }
+}
+function persistPeripheralState() { try { localStorage.setItem(PERIPH_KEY, JSON.stringify(peripheralState)); } catch { /* ignore */ } }
+function saveOledToRust() {
+  const cfg = { screen_size: peripheralState.oled.screen_size, layout: peripheralState.oled.layout, rotation: peripheralState.oled.rotation, cycle_interval_secs: peripheralState.oled.cycle_interval_secs };
+  invoke('oled_set_config', { config: cfg }).catch(e => console.error('oled_set_config failed:', e));
+}
+function saveBuzzerToRust() {
+  const cfg = { warning_pattern: peripheralState.buzzer.warning_pattern, critical_pattern: peripheralState.buzzer.critical_pattern, emergency_pattern: peripheralState.buzzer.emergency_pattern, volume: peripheralState.buzzer.volume, frequency_hz: peripheralState.buzzer.frequency_hz };
+  invoke('buzzer_set_config', { config: cfg }).catch(e => console.error('buzzer_set_config failed:', e));
+}
+function syncPeripheralUI() {
+  const oledEnabled = document.getElementById('oledEnabled') as HTMLSelectElement;
+  const oledStatus = document.getElementById('oledStatus');
+  const oledBody = document.getElementById('oledBody');
+  if (oledEnabled) oledEnabled.value = peripheralState.oledEnabled ? 'yes' : 'no';
+  if (oledBody) oledBody.classList.toggle('off', !peripheralState.oledEnabled);
+  if (oledStatus) {
+    oledStatus.textContent = peripheralState.oledEnabled
+      ? 'OLED selected — this config is saved and will be used when firmware with display support is flashed.'
+      : 'No OLED. If your board has one, set "I have an OLED" to configure it.';
+    oledStatus.style.color = peripheralState.oledEnabled ? 'var(--green)' : 'var(--text-3)';
+  }
+  const buzzerEnabled = document.getElementById('buzzerEnabled') as HTMLSelectElement;
+  const buzzerStatus = document.getElementById('buzzerStatus');
+  const buzzerBody = document.getElementById('buzzerBody');
+  if (buzzerEnabled) buzzerEnabled.value = peripheralState.buzzerEnabled ? 'yes' : 'no';
+  if (buzzerBody) buzzerBody.classList.toggle('off', !peripheralState.buzzerEnabled);
+  if (buzzerStatus) {
+    buzzerStatus.textContent = peripheralState.buzzerEnabled
+      ? 'Buzzer selected — patterns are saved and will be used when firmware with buzzer support is flashed.'
+      : 'No buzzer. If your board has one, set "I have a buzzer" to configure alerts.';
+    buzzerStatus.style.color = peripheralState.buzzerEnabled ? 'var(--green)' : 'var(--text-3)';
+  }
+}
+// Apply the persisted/peripheral form values into the config state (read from DOM).
+function captureOledFromDom() {
+  peripheralState.oled.screen_size = (document.getElementById('oledScreen') as HTMLSelectElement).value;
+  peripheralState.oled.layout = (document.getElementById('oledLayout') as HTMLSelectElement).value;
+  peripheralState.oled.rotation = Number((document.getElementById('oledRotation') as HTMLSelectElement).value) || 0;
+  const cyc = (document.getElementById('oledCycle') as HTMLSelectElement).value;
+  peripheralState.oled.cycle_interval_secs = cyc === 'off' ? 0 : (Number(cyc) || 5);
+  saveOledToRust();
+}
+function applyOledToDom() {
+  (document.getElementById('oledScreen') as HTMLSelectElement).value = peripheralState.oled.screen_size;
+  (document.getElementById('oledLayout') as HTMLSelectElement).value = peripheralState.oled.layout;
+  (document.getElementById('oledRotation') as HTMLSelectElement).value = String(peripheralState.oled.rotation);
+  const cycEl = document.getElementById('oledCycle') as HTMLSelectElement;
+  cycEl.value = peripheralState.oled.cycle_interval_secs > 0 ? String(peripheralState.oled.cycle_interval_secs) : 'off';
+}
+function captureBuzzerFromDom() {
+  peripheralState.buzzer.warning_pattern = (document.getElementById('buzzerWarn') as HTMLSelectElement).value;
+  peripheralState.buzzer.critical_pattern = (document.getElementById('buzzerCrit') as HTMLSelectElement).value;
+  peripheralState.buzzer.emergency_pattern = (document.getElementById('buzzerEmerg') as HTMLSelectElement).value;
+  peripheralState.buzzer.volume = Number((document.getElementById('buzzerVolume') as HTMLInputElement).value) || 0;
+  peripheralState.buzzer.frequency_hz = Number((document.getElementById('buzzerFreq') as HTMLInputElement).value) || 2000;
+  saveBuzzerToRust();
+}
+function applyBuzzerToDom() {
+  (document.getElementById('buzzerWarn') as HTMLSelectElement).value = peripheralState.buzzer.warning_pattern;
+  (document.getElementById('buzzerCrit') as HTMLSelectElement).value = peripheralState.buzzer.critical_pattern;
+  (document.getElementById('buzzerEmerg') as HTMLSelectElement).value = peripheralState.buzzer.emergency_pattern;
+  (document.getElementById('buzzerVolume') as HTMLInputElement).value = String(peripheralState.buzzer.volume);
+  (document.getElementById('buzzerVolVal') as HTMLSpanElement).textContent = `${peripheralState.buzzer.volume}%`;
+  (document.getElementById('buzzerFreq') as HTMLInputElement).value = String(peripheralState.buzzer.frequency_hz);
+}
+
 // OLED
-document.getElementById('oledLayout')!.addEventListener('change', updateOledPreview);
-document.getElementById('oledRotation')!.addEventListener('change', updateOledPreview);
-document.getElementById('oledCycle')!.addEventListener('change', updateOledPreview);
-document.getElementById('oledScreen')!.addEventListener('change', updateOledPreview);
+document.getElementById('oledLayout')!.addEventListener('change', () => { captureOledFromDom(); persistPeripheralState(); updateOledPreview(); });
+document.getElementById('oledRotation')!.addEventListener('change', () => { captureOledFromDom(); persistPeripheralState(); updateOledPreview(); });
+document.getElementById('oledCycle')!.addEventListener('change', () => { captureOledFromDom(); persistPeripheralState(); updateOledPreview(); });
+document.getElementById('oledScreen')!.addEventListener('change', () => { captureOledFromDom(); persistPeripheralState(); updateOledPreview(); });
+document.getElementById('oledEnabled')!.addEventListener('change', () => {
+  peripheralState.oledEnabled = (document.getElementById('oledEnabled') as HTMLSelectElement).value === 'yes';
+  persistPeripheralState(); syncPeripheralUI();
+});
 
 // Buzzer
 ['buzzerWarn', 'buzzerCrit', 'buzzerEmerg'].forEach(id => {
-  document.getElementById(id)!.addEventListener('change', updateBuzzerPreviews);
+  document.getElementById(id)!.addEventListener('change', () => { captureBuzzerFromDom(); persistPeripheralState(); updateBuzzerPreviews(); });
 });
 document.getElementById('buzzerVolume')!.addEventListener('input', (e) => {
   document.getElementById('buzVolVal')!.textContent = `${(e.target as HTMLInputElement).value}%`;
 });
+document.getElementById('buzzerVolume')!.addEventListener('change', () => { captureBuzzerFromDom(); persistPeripheralState(); });
+document.getElementById('buzzerFreq')!.addEventListener('change', () => { captureBuzzerFromDom(); persistPeripheralState(); });
+document.getElementById('buzzerEnabled')!.addEventListener('change', () => {
+  peripheralState.buzzerEnabled = (document.getElementById('buzzerEnabled') as HTMLSelectElement).value === 'yes';
+  persistPeripheralState(); syncPeripheralUI();
+});
+
+// Load once at startup: prefer Rust-side defaults (fresh), fall back to saved local.
+loadPeripheralState();
+applyOledToDom(); applyBuzzerToDom(); syncPeripheralUI();
+updateBuzzerPreviews(); updateOledPreview();
 
 // Preset
 document.getElementById('sysPreset')!.addEventListener('change', (e) => {
@@ -3934,7 +4105,9 @@ requestAnimationFrame(replayLoop);
 function toggleLivePause() {
   livePaused = !livePaused;
   if (livePaused) {
-    frozenTrace = traceData.map(ch => ch.slice());
+    // Freeze the FULL rolling history so rewind can replay everything captured
+    // so far, not just the on-screen 800-sample trace window.
+    frozenTrace = historyData[0] && historyData[0].length ? historyData.map(ch => ch.slice()) : traceData.map(ch => ch.slice());
   } else {
     frozenTrace = [];
     // Resuming from pause: snap back to live so the reader isn't stuck on a stale
@@ -3973,7 +4146,18 @@ function setLiveSeek(offsetSamples: number) {
   updateScrubber();
 }
 // Jump control helpers.
-function liveTotalHistory(): number { return historyData[0] ? historyData[0].length : 0; }
+// Number of samples the replay/rewind transport can seek over: while paused we
+// replay the frozen snapshot (a true, static rewind archive); live we seek over
+// the rolling history buffer.
+function liveTotalHistory(): number {
+  if (livePaused && frozenTrace.length && frozenTrace[0] && frozenTrace[0].length > 0) {
+    return frozenTrace[0].length;
+  }
+  return historyData[0] ? historyData[0].length : 0;
+}
+function liveHistorySource(): number[][] {
+  return (livePaused && frozenTrace.length && frozenTrace[0] && frozenTrace[0].length > 0) ? frozenTrace : historyData;
+}
 function liveMaxSeek(): number { return Math.max(0, liveTotalHistory() - liveWindowSamples); }
 function goLive() { liveScrollSeek = 0; isLiveScrubbing = false; livePaused = false; frozenTrace = []; updateTransportUI(); updateScrubber(); }
 function stepLiveBack() { setLiveSeek(liveScrollSeek + liveWindowSamples); }
@@ -4843,11 +5027,14 @@ function maybeAutoReconnect() {
   autoReconnectDone = true;
   const modeSel = document.getElementById('modeSelect') as HTMLSelectElement;
   const wifi = document.getElementById('wifiAddr') as HTMLInputElement;
+  const wifiScan = document.getElementById('wifiScan') as HTMLSelectElement;
   const ble = document.getElementById('bleSelect') as HTMLSelectElement;
   if (stored.mode && (stored.mode === 'serial' || stored.mode === 'wifi' || stored.mode === 'ble')) {
     modeSel.value = stored.mode;
     wifi.style.display = stored.mode === 'wifi' ? '' : 'none';
+    wifiScan.style.display = stored.mode === 'wifi' ? '' : 'none';
     ble.style.display = stored.mode === 'ble' ? '' : 'none';
+    if (stored.mode === 'wifi') void scanWifiDevices();
   }
   if (stored.mode === 'wifi' && stored.addr) {
     wifi.value = stored.addr;
