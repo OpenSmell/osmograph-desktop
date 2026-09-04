@@ -2051,8 +2051,29 @@ function updateRailCoord() {
 // state from its own panels. Cyan is never used here — the schematic is
 // hardware/ink; live monitoring data is the only cyan in the app.
 const BOOT_CRITICAL_GPIO: number[] = [0, 2, 12];
-const I2C_PINS = [21, 22];
+const I2C_SDA = 21, I2C_SCL = 22;
+const I2C_PINS = [I2C_SDA, I2C_SCL];
+const OLED_I2C_ADDR = 0x3C;          // SSD1306 default (0x3C; some boards are 0x3D)
 const BUZZER_GPIO = 16;
+
+// A fitted I²C device: everything that will live on the SDA/SCL bus. The OLED
+// is implicit once enabled; MEMS/env breakouts (BME, SGP, CCS, …) are declared
+// in the rig profile. The pre-flight uses this list to catch two devices on one
+// address — a real wiring failure that mutes the whole bus.
+type I2cDevice = { device: string; address: number };
+
+// Parse a 7-bit I²C address from JSON (accepts 0x3C / 60 / "0x3C"). Impossible
+// values are rejected honestly rather than silently rounded into the bus range.
+function parseI2cAddress(v: unknown): number | null {
+  let n: number | null = null;
+  if (typeof v === 'number') n = v;
+  else if (typeof v === 'string' && v.trim() !== '') n = parseInt(v.trim(), /^0x/i.test(v) ? 16 : 10);
+  if (n === null || !Number.isInteger(n) || n < 0 || n > 0x7F) return null;
+  return n;
+}
+function fmtI2c(addr: number): string {
+  return `0x${addr.toString(16).toUpperCase().padStart(2, '0')}`;
+}
 
 function themeCssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -2063,6 +2084,25 @@ function rigPeriphPins(): number[] {
   if (peripheralState.oledEnabled) pins.push(...I2C_PINS);
   if (peripheralState.buzzerEnabled) pins.push(BUZZER_GPIO);
   return pins;
+}
+
+// The fitted I²C bus inventory (OLED + profile-declared breakouts), de-duplicated
+// on (device, address) so double-listing a device can't false-positive the clash.
+function rigI2cFit(): I2cDevice[] {
+  const fit: I2cDevice[] = [];
+  if (peripheralState.oledEnabled) fit.push({ device: 'OLED SSD1306', address: OLED_I2C_ADDR });
+  for (const d of hardwareProfile.i2cDevices ?? []) {
+    if (d && parseI2cAddress(d.address) !== null) fit.push(d);
+  }
+  const seen = new Set<string>();
+  const out: I2cDevice[] = [];
+  for (const d of fit) {
+    const key = `${d.address}|${d.device}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+  return out;
 }
 
 function rigChannelCount(): number {
@@ -2084,6 +2124,26 @@ function updatePreflight() {
   const boot = [...sensorP, ...periphP].filter(p => BOOT_CRITICAL_GPIO.includes(p));
   setFlight('pfPins', clash ? 'PIN CLASH' : 'PINS SAFE', clash ? 'bad' : 'ok');
   setFlight('pfBoot', boot.length ? `BOOT PIN ${boot.join('/')}` : 'NO BOOT PINS', boot.length ? 'bad' : 'ok');
+
+  // I²C bus: every fitted device shares SDA/SCL — two devices on one address
+  // means a dead bus, so that's flagged as hard as a pin clash (not a warning).
+  const i2c = rigI2cFit();
+  const addrCounts = new Map<number, number>();
+  for (const d of i2c) addrCounts.set(d.address, (addrCounts.get(d.address) || 0) + 1);
+  const duplicated: string[] = [];
+  addrCounts.forEach((count, addr) => { if (count > 1) duplicated.push(`${fmtI2c(addr)}×${count}`); });
+  const i2cEl = document.getElementById('pfI2C');
+  if (duplicated.length) {
+    setFlight('pfI2C', `I²C CLASH ${duplicated.join(' ')}`, 'bad');
+    if (i2cEl) i2cEl.title = 'Two fitted devices share one I²C address — the bus will hang. Fix the strap/address pins before flashing.';
+  } else if (i2c.length) {
+    setFlight('pfI2C', `I²C SAFE · ${i2c.map(d => fmtI2c(d.address)).sort().join('/')}`, 'ok');
+    if (i2cEl) i2cEl.title = `Fitted on SDA ${I2C_SDA} / SCL ${I2C_SCL}: ${i2c.map(d => `${d.device}@${fmtI2c(d.address)}`).sort().join(' · ')}`;
+  } else if (i2cEl) {
+    i2cEl.textContent = '◆ I²C — NONE FITTED';
+    i2cEl.className = 'flight';
+    i2cEl.title = 'Declare fitted I²C breakouts (MEMS/env) in Rig Setup → Advanced JSON to get the bus-clash check.';
+  }
 }
 
 function renderRigSchematic() {
@@ -2158,9 +2218,15 @@ function renderRigSchematic() {
     </g>`;
 
   if (stamp) {
+    // I²C bus summary: fitted device@address list, else the wiring fallback
+    // ("21/22" pins when only the OLED is fitted) or a dash when nothing is.
+    const i2cFit = rigI2cFit();
+    const i2cStamp = i2cFit.length
+      ? i2cFit.map(d => `${short(d.device)}@${fmtI2c(d.address)}`).join('/')
+      : (oledOn ? `${I2C_SDA}/${I2C_SCL}` : '—');
     stamp.textContent = auto
-      ? `SENSORS · AUTO DETECT   ·   I²C ${oledOn ? '· SDA 21 / SCL 22' : '—'}   ·   ALERT ${bzOn ? '· GPIO 16' : '—'}`
-      : `SENSORS · ${n}ch · ${pins.join('/')}   ·   I²C ${oledOn ? '· 21/22' : '—'}   ·   ALERT ${bzOn ? '· GPIO 16' : '—'}`;
+      ? `SENSORS · AUTO DETECT   ·   I²C ${i2cStamp}   ·   ALERT ${bzOn ? '· GPIO 16' : '—'}`
+      : `SENSORS · ${n}ch · ${pins.join('/')}   ·   I²C ${i2cStamp}   ·   ALERT ${bzOn ? '· GPIO 16' : '—'}`;
   }
   const fp = document.getElementById('fwPreset');
   if (fp) {
@@ -4843,17 +4909,21 @@ type HardwareProfile = {
   sensorOnLowSide: boolean;
   /// User-specified channel names (any count) — overrides preset names when set.
   customChannelNames?: string[];
+  /// Fitted I²C devices besides the OLED (MEMS/env breakouts on the SDA/SCL
+  /// bus). The blueprint pre-flight uses this to flag a duplicate-address clash
+  /// before flashing — two devices on one address produce a dead bus.
+  i2cDevices?: I2cDevice[];
 };
 const HW_KEY = 'osmograph.hardware';
 let hardwareProfile: HardwareProfile = {
-  preset: 'custom', name: '', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true,
+  preset: 'custom', name: '', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true, i2cDevices: [],
 };
 
 // Built-in profile templates (channel sensor lists mirror the desktop presets).
 const HW_PRESET_TEMPLATES: Record<string, Partial<HardwareProfile>> = {
-  custom: { name: 'My Rig', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true },
-  smellmonitor: { name: 'Example: SmellMonitor', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true },
-  reference: { name: 'Example: 6-sensor lab rig', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true },
+  custom: { name: 'My Rig', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true, i2cDevices: [] },
+  smellmonitor: { name: 'Example: SmellMonitor', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true, i2cDevices: [] },
+  reference: { name: 'Example: 6-sensor lab rig', adcBits: 12, rloadOhm: 1000, vcc: 5.0, sensorOnLowSide: true, i2cDevices: [] },
 };
 
 function loadHardwareProfile() {
@@ -4928,11 +4998,66 @@ function wireHardwareProfile() {
   exportBtn?.addEventListener('click', () => exportHardwareProfile());
   const importBtn = document.getElementById('hwImport');
   importBtn?.addEventListener('click', () => importHardwareProfile());
+
+  // Advanced JSON drawer — full-profile edit surface. Opening/reload re-syncs
+  // from live state; Save validates (never silently clamps into the bus range)
+  // then persists and re-renders the form + blueprint pre-flight.
+  const jsonWrap = document.getElementById('hwJsonWrap');
+  const jsonEl = document.getElementById('hwJson') as HTMLTextAreaElement | null;
+  const jsonToggle = document.getElementById('hwJsonToggle');
+  const jsonStatus = document.getElementById('hwJsonStatus');
+  const fillJson = () => { if (jsonEl) jsonEl.value = JSON.stringify(hardwareProfile, null, 2); };
+  jsonToggle?.addEventListener('click', () => {
+    const open = !jsonWrap || jsonWrap.style.display !== 'none';
+    if (jsonWrap) jsonWrap.style.display = open ? 'none' : 'block';
+    if (jsonToggle) jsonToggle.textContent = open ? 'show' : 'hide';
+    if (!open) fillJson();
+  });
+  document.getElementById('hwJsonReload')?.addEventListener('click', () => {
+    fillJson();
+    if (jsonStatus) { jsonStatus.textContent = ''; jsonStatus.style.color = ''; }
+  });
+  jsonEl?.addEventListener('input', () => {
+    if (jsonStatus) { jsonStatus.textContent = ''; jsonStatus.style.color = ''; }
+  });
+  document.getElementById('hwJsonSave')?.addEventListener('click', () => {
+    if (!jsonEl || !jsonStatus) return;
+    try {
+      const p = JSON.parse(jsonEl.value) as Partial<HardwareProfile>;
+      const i2cDevices: I2cDevice[] = (Array.isArray(p.i2cDevices) ? p.i2cDevices : [])
+        .filter((d): d is I2cDevice => !!d && typeof (d as I2cDevice).device === 'string' && parseI2cAddress((d as I2cDevice).address) !== null)
+        .map(d => ({ device: d.device || 'I²C device', address: d.address }));
+      const custom = Array.isArray(p.customChannelNames)
+        ? p.customChannelNames.filter((c): c is string => typeof c === 'string')
+        : [];
+      hardwareProfile = {
+        preset: typeof p.preset === 'string' ? p.preset : 'custom',
+        name: typeof p.name === 'string' ? p.name : '',
+        adcBits: Math.max(8, Math.min(24, Number(p.adcBits) || 12)),
+        rloadOhm: Number(p.rloadOhm) > 0 ? Number(p.rloadOhm) : 1000,
+        vcc: Number(p.vcc) > 0 ? Number(p.vcc) : 5.0,
+        sensorOnLowSide: typeof p.sensorOnLowSide === 'boolean' ? p.sensorOnLowSide : true,
+        customChannelNames: custom.length ? custom : undefined,
+        i2cDevices: i2cDevices.length ? i2cDevices : [],
+      };
+      persistHardwareProfile();
+      renderHardwareProfile();
+      if (hardwareProfile.customChannelNames) { channelKinds = []; applyCustomNames(); }
+      refreshRigBlueprint();
+      fillJson();
+      jsonStatus.textContent = 'Saved and validated.';
+      jsonStatus.style.color = 'var(--green)';
+    } catch (e) {
+      jsonStatus.textContent = `Invalid JSON: ${e}`;
+      jsonStatus.style.color = 'var(--red)';
+    }
+  });
 }
 
 // Serialize the current app rig config into the perception-layer sensor_profile.json (schema v1).
 function exportHardwareProfile() {
   const model = (i: number) => chNames[i] || `CH${i + 1}`;
+  const chCount = Math.max(channelCount, chNames.length);
   const profile = {
     $schema: 'https://opensmell.org/schemas/sensor_profile_v1.json',
     schema_version: '1.0.0',
@@ -4941,11 +5066,16 @@ function exportHardwareProfile() {
       manufacturer: 'OpenSmell Desktop',
       model: hardwareProfile.name || 'Custom rig',
       firmware_version: 'desktop-0.1.0',
+      board: {
+        family: 'esp32',
+        name: 'ESP32 (DevKit-V1 / WROOM-32)',
+        toolchain: 'arduino-core/esp32',
+      },
       recording_protocol: {
         name: 'osmell_baseline_exposure_recovery',
         baseline_seconds: 30, exposure_seconds: 45, recovery_seconds: 120, sample_rate_hz: 10,
       },
-      channels: Array.from({ length: Math.max(channelCount, chNames.length) }, (_, i) => {
+      channels: Array.from({ length: chCount }, (_, i) => {
         const c = calibrationPerChannel[i];
         const s = SENSOR_LIBRARY[model(i)];
         return {
@@ -4967,6 +5097,14 @@ function exportHardwareProfile() {
         adc_bits: hardwareProfile.adcBits,
         adc_reference_voltage: 3.3,
         adc_max_count: Math.pow(2, hardwareProfile.adcBits) - 1,
+        // ADC pin row is the firmware's fixed assignment (mirrors
+        // `sensor_pins_for` in the desktop) so the profile travels truthfully.
+        adc_pins: chCount > 0 ? presetPins(chCount) : [],
+        i2c_bus: {
+          sda: I2C_SDA,
+          scl: I2C_SCL,
+          devices: rigI2cFit().map(d => ({ device: d.device, address: fmtI2c(d.address) })),
+        },
       },
       environment: { has_temp_humidity_sensor: false, humidity_compensation: {} },
       gas_delivery: { intake_flow_lpm: null, has_ptfe_filter: false, filter_pore_um: null, chamber_volume_ml: null, flush_time_seconds: null },
@@ -5009,6 +5147,13 @@ async function importHardwareProfile() {
     const sp = data?.sensor_profile ?? data ?? {};
     const ckt = sp.circuit ?? {};
     const chs = sp.channels ?? [];
+    const i2cRaw = Array.isArray(ckt.i2c_bus?.devices) ? ckt.i2c_bus.devices
+      : (Array.isArray(ckt.i2c_devices) ? ckt.i2c_devices : []);
+    const i2cDevices: I2cDevice[] = [];
+    for (const d of i2cRaw) {
+      const addr = parseI2cAddress(d?.address);
+      if (addr !== null) i2cDevices.push({ device: String(d?.device || 'I²C device'), address: addr });
+    }
     hardwareProfile = {
       preset: 'custom',
       name: sp.model || sp.device_id || 'Imported rig',
@@ -5016,6 +5161,7 @@ async function importHardwareProfile() {
       rloadOhm: Number(ckt.load_resistor_rl_ohm) || 1000,
       vcc: Number(ckt.supply_voltage_vcc) || 5.0,
       sensorOnLowSide: ckt.is_voltage_divider !== false,
+      i2cDevices,
     };
     // If the imported profile declares channel sensors, adopt them as the preset.
     if (chs.length > 0) {
@@ -5024,6 +5170,7 @@ async function importHardwareProfile() {
     }
     persistHardwareProfile();
     renderHardwareProfile();
+    refreshRigBlueprint();
     if (status) status.textContent = `Imported ${hardwareProfile.name}`;
   } catch (e) {
     if (status) { status.textContent = `Import failed: ${e}`; status.style.color = 'var(--red)'; }

@@ -2539,6 +2539,21 @@
               </div>
               <pre id="hwExported" style="display:none;background:var(--bg-2);padding:8px;border-radius:4px;font-size:10px;overflow:auto;max-height:200px"></pre>
             </div>
+            <div class="card">
+              <div class="form-row" style="justify-content:space-between">
+                <h3 style="margin:0">Advanced JSON</h3>
+                <button id="hwJsonToggle" type="button" style="font-size:10px;padding:2px 8px">show</button>
+              </div>
+              <p class="hint">The whole rig profile as JSON — channel names, fitted I²C breakouts (for the bus-clash pre-flight), circuit reference. The ADC pin row is not editable: it mirrors the firmware&rsquo;s fixed assignment so the schematic never lies.</p>
+              <div id="hwJsonWrap" style="display:none">
+                <textarea id="hwJson" rows="10" spellcheck="false" style="width:100%;font-family:var(--font-mono);font-size:10px;background:var(--bg-1);color:var(--text-1);border:var(--hairline) solid var(--border);padding:8px" aria-label="Hardware profile JSON"></textarea>
+                <div class="form-row" style="margin-top:8px">
+                  <button id="hwJsonSave">Save JSON</button>
+                  <button id="hwJsonReload" type="button">Cancel / reload</button>
+                  <span class="hint" id="hwJsonStatus" style="align-self:center"></span>
+                </div>
+              </div>
+            </div>
           </div>
 
           <!-- Calibration & Sensor Library Panel -->
@@ -2737,6 +2752,7 @@ Confidence: 97.3%</div>
               <div class="preflight" id="preflight">
                 <span class="flight" id="pfPins">◆ PINS SAFE</span>
                 <span class="flight" id="pfBoot">◆ NO BOOT PINS</span>
+                <span class="flight" id="pfI2C">◆ I²C — NONE FITTED</span>
                 <span class="flight" id="pfTc">◆ TOOLCHAIN</span>
               </div>
               <div class="form-row" style="margin-top:10px">
