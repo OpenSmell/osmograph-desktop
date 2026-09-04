@@ -93,7 +93,7 @@
       background: var(--bg-0);
       display: flex; align-items: center; justify-content: center;
     }
-    #bootOverlay.done { opacity: 0; transition: opacity .35s ease; pointer-events: none; }
+    #bootOverlay.done { opacity: 0; transition: opacity .22s ease; pointer-events: none; }
     .boot-wrap {
       display: flex; flex-direction: column; align-items: center; gap: 14px;
       max-width: 420px; width: calc(100% - 48px);
@@ -101,10 +101,20 @@
     .boot-mark {
       font-family: var(--font-mono); font-size: 26px; font-weight: 800;
       letter-spacing: 6px; color: var(--text-0);
+      animation: bootIn .45s ease-out both;
+    }
+    @keyframes bootIn {
+      0% { opacity: 0; letter-spacing: 20px; }
+      100% { opacity: 1; letter-spacing: 6px; }
     }
     .boot-sub {
       font-family: var(--font-mono); font-size: 10px; letter-spacing: 4px;
       color: var(--text-3); margin-bottom: 4px;
+      animation: bootUp .4s ease-out .1s both;
+    }
+    @keyframes bootUp {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: none; }
     }
     .boot-log {
       width: 100%; min-height: 96px;
@@ -113,7 +123,22 @@
       font-family: var(--font-mono); font-size: 11px; line-height: 1.7;
       color: var(--text-2);
       overflow: hidden;
+      position: relative;
     }
+    /* Blinking terminal caret on the newest boot line — alive, honest work marker. */
+    .boot-line:last-child::after {
+      content: "▊"; margin-left: 4px; color: var(--cyan);
+      animation: bootCaret .7s steps(1, end) infinite;
+    }
+    @keyframes bootCaret { 50% { opacity: 0; } }
+    /* Slow diagnosis sweep inside the log, matching the plot's "watching" scan. */
+    .boot-log::after {
+      content: ""; position: absolute; left: 0; right: 0; top: -35%; height: 26px;
+      background: linear-gradient(to bottom, transparent, rgba(14, 116, 144, 0.12), transparent);
+      animation: bootSweep 1.8s linear infinite;
+      pointer-events: none;
+    }
+    @keyframes bootSweep { 0% { top: -35%; } 100% { top: 135%; } }
     .boot-line::before { content: "> "; color: var(--cyan); }
     .boot-line { white-space: pre; }
     .boot-line.ok { color: var(--text-1); }
@@ -2005,7 +2030,7 @@
   <div id="bootOverlay">
     <div class="boot-wrap">
       <div class="boot-mark">OSMOGRAPH</div>
-      <div class="boot-sub">FLEET · MOX MONITORING</div>
+      <div class="boot-sub">THE SOFTWARE FOR SMELL</div>
       <div class="boot-log" id="bootLog">
         <div class="boot-line">initializing…</div>
       </div>
@@ -2915,8 +2940,7 @@ Confidence: 97.3%</div>
           <div class="sys-panel" id="sys-about">
             <h2>About Osmograph</h2>
             <div class="card">
-              <p class="hint">Osmograph is the desktop front-end for the OpenSmell fleet of metal-oxide (MOX) e-noses —
-                a collaboration between software, firmware and the people running real sensor rigs.</p>
+              <p class="hint">Osmograph is the software for smell — monitor, record and study what your e-nose rig senses, the way an editor is the software for video or a DAW for audio. It reads MOX (and, via the typed serial contract, MEMS) scent arrays live, learns your baseline, flags anomalies — and never invents a number it can&rsquo;t back up.</p>
             </div>
             <div class="card">
               <h3>Links</h3>

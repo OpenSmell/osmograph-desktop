@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Paper field -->
+  <rect width="1024" height="1024" fill="#fbf8f2"/>
+  <!-- Open-corner HUD brackets (paper & ink brand) -->
+  <g stroke="#1a1a17" stroke-width="22" stroke-linecap="square" fill="none">
+    <path d="M64 64 V236 M64 64 H236"/>
+    <path d="M960 64 V236 M960 64 H788"/>
+    <path d="M64 960 V788 M64 960 H236"/>
+    <path d="M960 960 V788 M960 960 H788"/>
+  </g>
+  <!-- "Ø" monogram: scent/olfaction zero-mark, ink annulus + slash -->
+  <circle cx="512" cy="512" r="250" stroke="#1a1a17" stroke-width="112" fill="none"/>
+  <line x1="164" y1="860" x2="860" y2="164" stroke="#1a1a17" stroke-width="96"/>
+</svg>

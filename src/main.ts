@@ -5462,11 +5462,11 @@ function bootDone(): void {
   bootLog('ready');
   setTimeout(() => {
     const ov = document.getElementById('bootOverlay');
-    if (ov) { ov.classList.add('done'); setTimeout(() => ov.remove(), 400); }
-  }, 250);
+    if (ov) { ov.classList.add('done'); setTimeout(() => ov.remove(), 260); }
+  }, 120);
 }
 bootLog('initializing UI…');
-
+bootLog('scanning ports…');
 refreshPorts().then(() => maybeAutoReconnect());
 
 // Restore the last connection and, for serial, reconnect automatically once the
@@ -5515,6 +5515,11 @@ onPresetChange('auto');
 renderHardwareProfile();
 applyCustomNames();
 renderSensorLibrary();
+// Core UI is wired and the window is interactive — hand control over now and
+// let the idempotent data fills below finish behind the fading boot overlay.
+bootLog('core wired');
+bootDone();
+
 updateBuzzerPreviews();
 updateOledPreview();
 renderFleet();
@@ -5526,7 +5531,6 @@ refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
-bootDone();
 
 // Fit the window to the screen: never let it overstretch past the monitor's
 // work area. Degrades silently when the core doesn't grant window sizing.
