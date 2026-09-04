@@ -1535,6 +1535,74 @@
     }
 
     /* OLED Preview */
+/* === RIG BLUEPRINT — technical schematic sheet (Firmware) === */
+    .blueprint-sheet {
+      background:
+        linear-gradient(rgba(26,26,23,0.045) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(26,26,23,0.045) 1px, transparent 1px),
+        var(--bg-1);
+      background-size: 16px 16px;
+    }
+    .sch-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+    .sch-reg {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      color: var(--text-3);
+      text-transform: uppercase;
+    }
+    #rigSchematic {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: var(--bg-0);
+      border: 1px solid var(--border);
+      margin-bottom: 8px;
+    }
+    .sch-stamp {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      color: var(--text-2);
+      background: var(--bg-2);
+      border: 1px dashed var(--border);
+      padding: 5px 8px;
+      margin-bottom: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .preflight {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      padding: 6px 10px;
+      border-left: 2px solid var(--border-strong);
+      background: var(--bg-1);
+      margin-bottom: 12px;
+    }
+    .flight {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.1em;
+      color: var(--text-3);
+      transition: color .15s ease;
+    }
+    .flight.ok { color: var(--green); }
+    .flight.warn { color: var(--yellow); }
+    .flight.bad { color: var(--red); }
+    .board-note {
+      font-size: 10px;
+      color: var(--text-3);
+      margin-top: 8px;
+      line-height: 1.4;
+    }
 /* Peripheral (OLED/buzzer) body dimmed when not installed */
 .periph-body { transition: opacity .2s ease; }
 .periph-body.off { opacity: .45; pointer-events: none; }
@@ -2654,16 +2722,25 @@ Confidence: 97.3%</div>
           <!-- Firmware Panel -->
           <div class="sys-panel" id="sys-firmware">
             <h2>Firmware</h2>
-            <div class="card">
-              <h3>Flash Firmware</h3>
-              <p>Flash ESP32 with OpenSmell firmware for the selected preset.</p>
+            <div class="card blueprint-sheet">
+              <div class="sch-meta">
+                <span class="sch-reg">RIG · SCHEMATIC 001</span>
+                <span class="sch-reg">ESP32 · ARDUINO CORE · REV B</span>
+              </div>
+              <svg id="rigSchematic" viewBox="0 0 560 150" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Rig wiring schematic"></svg>
+              <div class="sch-stamp" id="schStamp">SENSORS · 6ch · 32/33/34/35/25/26</div>
+              <div class="preflight" id="preflight">
+                <span class="flight" id="pfPins">◆ PINS SAFE</span>
+                <span class="flight" id="pfBoot">◆ NO BOOT PINS</span>
+                <span class="flight" id="pfTc">◆ TOOLCHAIN</span>
+              </div>
               <div class="form-row" style="margin-top:10px">
                 <label>Target Port</label>
                 <span id="fwPort" style="color:var(--text-1)">No port selected</span>
               </div>
               <div class="form-row">
-                <label>Preset</label>
-                <span id="fwPreset" style="color:var(--text-1)">6-sensor-full</span>
+                <label>Rig Preset</label>
+                <span id="fwPreset" style="color:var(--text-1);font-family:var(--font-mono);font-size:11px">6-sensor-full</span>
               </div>
               <div class="form-row">
                 <label>WiFi SSID</label>
@@ -2684,6 +2761,7 @@ Confidence: 97.3%</div>
                 <button id="readMacBtn" style="flex:1">Read MAC</button>
                 <button id="eraseBtn" style="flex:1">Erase Flash</button>
               </div>
+              <div class="board-note">BOARD: ESP32 (DEVKIT-V1 / WROOM-32). More boards — Arduino UNO and others — arrive via community firmware PRs; we only flash boards with a supported, safe generator.</div>
             </div>
             <div class="card">
               <h3>Custom Rig Preset</h3>

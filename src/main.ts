@@ -35,7 +35,7 @@ const PRESETS: Record<string, { name: string; sensors: string[] }> = {
 // User-saved rig presets (persisted to localStorage). Unlike the built-in
 // presets these can describe any channel count — the backend auto-assigns ADC
 // pins from the count, so any board works out of the box.
-interface CustomPreset { id: string; name: string; n_channels: number; sensors: string[]; }
+interface CustomPreset { id: string; name: string; n_channels: number; sensors: string[]; peripherals?: { oledEnabled: boolean; buzzerEnabled: boolean }; }
 const CP_KEY = 'osmograph.customPresets.v1';
 let customPresets: CustomPreset[] = [];
 function loadCustomPresets() { try { customPresets = JSON.parse(localStorage.getItem(CP_KEY) || '[]'); } catch { customPresets = []; } }
@@ -1919,6 +1919,138 @@ function updateRigNote() {
 function updateRailCoord() {
   const el = document.getElementById('railCoord');
   if (el) el.textContent = `${channelCount} CH · ${activePreset}`;
+  refreshRigBlueprint();
+}
+
+// === Rig Blueprint (Firmware schematic + pre-flight) ===
+// The schematic is data-derived so the drawing always shows the *actual* rig:
+// active preset → channel count → auto-assigned ADC pins, plus the peripheral
+// state from its own panels. Cyan is never used here — the schematic is
+// hardware/ink; live monitoring data is the only cyan in the app.
+const BOOT_CRITICAL_GPIO: number[] = [0, 2, 12];
+const I2C_PINS = [21, 22];
+const BUZZER_GPIO = 16;
+
+function themeCssVar(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+function rigPeriphPins(): number[] {
+  const pins: number[] = [];
+  if (peripheralState.oledEnabled) pins.push(...I2C_PINS);
+  if (peripheralState.buzzerEnabled) pins.push(BUZZER_GPIO);
+  return pins;
+}
+
+function rigChannelCount(): number {
+  if (autoChannels > 0) return autoChannels;
+  return channelCount > 0 ? channelCount : 0;
+}
+
+function setFlight(id: string, label: string, cls: 'ok' | 'warn' | 'bad') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.textContent = '◆ ' + label;
+  el.className = 'flight ' + cls;
+}
+
+function updatePreflight() {
+  const sensorP = presetPins(rigChannelCount() || 6);
+  const periphP = rigPeriphPins();
+  const clash = sensorP.some(p => periphP.includes(p));
+  const boot = [...sensorP, ...periphP].filter(p => BOOT_CRITICAL_GPIO.includes(p));
+  setFlight('pfPins', clash ? 'PIN CLASH' : 'PINS SAFE', clash ? 'bad' : 'ok');
+  setFlight('pfBoot', boot.length ? `BOOT PIN ${boot.join('/')}` : 'NO BOOT PINS', boot.length ? 'bad' : 'ok');
+}
+
+function renderRigSchematic() {
+  const svg = document.getElementById('rigSchematic');
+  const stamp = document.getElementById('schStamp');
+  if (!svg) return;
+  const ink = themeCssVar('--text-1') || '#201f1c';
+  const dim = themeCssVar('--text-3') || '#9a9484';
+  const faint = themeCssVar('--border') || '#d7cdba';
+  const fillA = themeCssVar('--bg-2') || '#efe8dc';
+  const fillB = themeCssVar('--bg-1') || '#f6f1e7';
+  const n = rigChannelCount();
+  const auto = n === 0;
+  const pins = presetPins(auto ? 6 : n);
+  const names = chNames.length === n
+    ? chNames
+    : Array.from({ length: n }, (_, i) => PRESETS[activePreset]?.sensors[i] || `CH${i + 1}`);
+  const oledOn = peripheralState.oledEnabled;
+  const bzOn = peripheralState.buzzerEnabled;
+  const short = (s: string) => (s.length > 6 ? s.slice(0, 6) : s);
+
+  let rows = '';
+  if (auto) {
+    rows = `<text x="${456}" y="62" text-anchor="middle" font-family="var(--font-mono)" font-size="9" fill="${dim}">AUTO-CHECK</text>
+      <text x="${456}" y="76" text-anchor="middle" font-family="var(--font-mono)" font-size="9" fill="${dim}">detect on connect</text>`;
+  } else {
+    rows = names.slice(0, 8).map((nm, i) => {
+      const y = 34 + i * 11;
+      return `<text x="${410}" y="${y}" font-family="var(--font-mono)" font-size="8" fill="${ink}">CH${i + 1}</text>
+        <text x="${444}" y="${y}" font-family="var(--font-mono)" font-size="8" fill="${ink}">${short(nm)}</text>
+        <text x="${530}" y="${y}" text-anchor="end" font-family="var(--font-mono)" font-size="8" fill="${dim}">GPIO${pins[i]}</text>`;
+    }).join('');
+    if (n > 8) rows += `<text x="${456}" y="${34 + 8 * 11}" text-anchor="middle" font-family="var(--font-mono)" font-size="8" fill="${dim}">+${n - 8} MORE …</text>`;
+  }
+
+  const periphTxt = oledOn
+    ? `<text x="${218}" y="${106}" text-anchor="middle" font-family="var(--font-mono)" font-size="9" fill="${ink}">OLED · SSD1306</text>
+       <text x="${218}" y="${120}" text-anchor="middle" font-family="var(--font-mono)" font-size="8" fill="${dim}">SDA 21 · SCL 22</text>`
+    : `<text x="${218}" y="${106}" text-anchor="middle" font-family="var(--font-mono)" font-size="9" fill="${dim}">OLED · NOT FITTED</text>
+       <text x="${218}" y="${120}" text-anchor="middle" font-family="var(--font-mono)" font-size="8" fill="${faint}">I²C —</text>`;
+  const alertTxt = bzOn
+    ? `<text x="${287}" y="${106}" text-anchor="middle" font-family="var(--font-mono)" font-size="9" fill="${ink}">ALERT · PWM</text>
+       <text x="${287}" y="${120}" text-anchor="middle" font-family="var(--font-mono)" font-size="8" fill="${dim}">GPIO 16</text>`
+    : `<text x="${287}" y="${106}" text-anchor="middle" font-family="var(--font-mono)" font-size="9" fill="${dim}">ALERT · NOT FITTED</text>
+       <text x="${287}" y="${120}" text-anchor="middle" font-family="var(--font-mono)" font-size="8" fill="${faint}">PWM —</text>`;
+
+  const corner = (x: number, y: number) =>
+    `<path d="M${x + 6} ${y} H${x} V${y + 6}" fill="none" stroke="${dim}" stroke-width="1"/>`;
+
+  svg.innerHTML = `
+    ${corner(2, 2)}${corner(558, 2)}${corner(2, 148)}${corner(558, 148)}
+    <g stroke="${ink}" stroke-width="1" fill="none">
+      <path d="M130 75 H200"/>
+      <path d="M200 130 V78"/>
+      <path d="M200 75 H400"/>
+    </g>
+    <circle cx="130" cy="75" r="3" fill="${ink}"/>
+    <circle cx="200" cy="75" r="2.5" fill="${ink}"/>
+    <circle cx="400" cy="75" r="2.5" fill="${ink}"/>
+    <g font-family="var(--font-mono)" text-anchor="middle">
+      <rect x="12" y="45" width="118" height="60" fill="${fillA}" stroke="${ink}"/>
+      <text x="71" y="71" font-size="10" fill="${ink}">ESP32</text>
+      <text x="71" y="86" font-size="8" fill="${dim}">DEVKIT-V1</text>
+      <text x="71" y="97" font-size="7" letter-spacing="1" fill="${dim}">ARDUINO CORE</text>
+      <rect x="402" y="16" width="148" height="118" fill="${fillB}" stroke="${ink}"/>
+      <text x="456" y="29" font-size="10" fill="${ink}">SENSOR ARRAY</text>
+      <path d="M408 34 H504" stroke="${ink}" stroke-width="1"/>
+      ${rows}
+      <rect x="150" y="92" width="155" height="42" fill="${fillA}" stroke="${ink}"/>
+      ${periphTxt}
+      ${alertTxt}
+    </g>`;
+
+  if (stamp) {
+    stamp.textContent = auto
+      ? `SENSORS · AUTO DETECT   ·   I²C ${oledOn ? '· SDA 21 / SCL 22' : '—'}   ·   ALERT ${bzOn ? '· GPIO 16' : '—'}`
+      : `SENSORS · ${n}ch · ${pins.join('/')}   ·   I²C ${oledOn ? '· 21/22' : '—'}   ·   ALERT ${bzOn ? '· GPIO 16' : '—'}`;
+  }
+  const fp = document.getElementById('fwPreset');
+  if (fp) {
+    const label = PRESETS[activePreset]?.name
+      || customPresets.find(c => c.id === activePreset)?.name
+      || (activePreset === 'auto' ? 'auto-detect' : activePreset);
+    fp.textContent = label;
+  }
+  updatePreflight();
+}
+
+function refreshRigBlueprint() {
+  renderRigSchematic();
 }
 
 /// If the hardware profile has custom channel names for the current count,
@@ -2990,6 +3122,7 @@ function syncPeripheralUI() {
       : 'No buzzer. If your board has one, set "I have a buzzer" to configure alerts.';
     buzzerStatus.style.color = peripheralState.buzzerEnabled ? 'var(--green)' : 'var(--text-3)';
   }
+  refreshRigBlueprint();
 }
 // Apply the persisted/peripheral form values into the config state (read from DOM).
 function captureOledFromDom() {
@@ -3484,9 +3617,13 @@ document.getElementById('flashBtn')!.addEventListener('click', async () => {
 async function refreshToolchain() {
   try {
     const tc = await invoke<{ platformio: boolean; arduino_cli: boolean; esptool: boolean; message: string }>('check_flash_toolchain');
-    document.getElementById('fwToolchain')!.textContent = tc.message;
+    const el = document.getElementById('fwToolchain');
+    if (el) el.textContent = tc.message;
+    setFlight('pfTc', tc.esptool ? 'TOOLCHAIN READY' : 'TOOLCHAIN MISSING', tc.esptool ? 'ok' : 'warn');
   } catch {
-    document.getElementById('fwToolchain')!.textContent = 'toolchain check failed';
+    const el = document.getElementById('fwToolchain');
+    if (el) el.textContent = 'toolchain check failed';
+    setFlight('pfTc', 'TOOLCHECK FAILED', 'warn');
   }
 }
 
@@ -3664,21 +3801,30 @@ function renderCustomPresetList() {
   const el = document.getElementById('cpList');
   if (!el) return;
   if (!customPresets.length) { el.innerHTML = '<span style="font-size:11px;color:var(--text-3)">No custom presets saved yet.</span>'; return; }
-  el.innerHTML = customPresets.map(p =>
-    `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">
+  el.innerHTML = customPresets.map(p => {
+    const periphs = p.peripherals && (p.peripherals.oledEnabled || p.peripherals.buzzerEnabled)
+      ? ` <span style="color:var(--text-3);font-size:10px">· ${[p.peripherals.oledEnabled ? 'OLED' : '', p.peripherals.buzzerEnabled ? 'BZR' : ''].filter(Boolean).join('+')}</span>`
+      : '';
+    return `<div style="display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border)">
        <span style="flex:1;font-size:12px" title="${(p.sensors || []).join(', ')}">
-         <strong>${p.name}</strong> <span style="color:var(--text-3)">· ${p.n_channels} ch · ${(p.sensors || []).join(', ')}</span>
+         <strong>${p.name}</strong> <span style="color:var(--text-3)">· ${p.n_channels} ch · ${(p.sensors || []).join(', ')}</span>${periphs}
        </span>
        <button data-cp-use="${p.id}" style="font-size:11px;padding:2px 8px">Use</button>
        <button data-cp-del="${p.id}" style="font-size:11px;padding:2px 8px;color:var(--red)">✕</button>
-     </div>`
-  ).join('');
+     </div>`;
+  }).join('');
 }
 
 function applyCustomPreset(p: CustomPreset) {
   activePreset = p.id;
   chNames = (p.sensors && p.sensors.length ? p.sensors : Array.from({ length: p.n_channels }, (_, i) => `CH${i + 1}`));
   setChannelCount(chNames.length, chNames);
+  if (p.peripherals) {
+    peripheralState.oledEnabled = p.peripherals.oledEnabled;
+    peripheralState.buzzerEnabled = p.peripherals.buzzerEnabled;
+    persistPeripheralState();
+    syncPeripheralUI();
+  }
 }
 
 // Live GPIO-pin hint for the channel-count input, so the auto-assigned analog
@@ -3701,7 +3847,7 @@ document.getElementById('cpSave')?.addEventListener('click', () => {
   const sensors = sensorsRaw ? sensorsRaw.split(',').map(s => s.trim()).filter(Boolean) : [];
   if (!name) { flashStatus('libStatus', 'Give the preset a name first.', 'var(--yellow)'); return; }
   const id = 'custom:' + Date.now().toString(36);
-  customPresets.push({ id, name, n_channels: count, sensors });
+  customPresets.push({ id, name, n_channels: count, sensors, peripherals: { oledEnabled: peripheralState.oledEnabled, buzzerEnabled: peripheralState.buzzerEnabled } });
   persistCustomPresets();
   renderCustomPresetList();
   activePreset = id;
