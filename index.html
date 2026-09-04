@@ -528,6 +528,9 @@
       border-color: var(--border-strong);
     }
     .trace-legend .tl-chip.tl-off .tl-eye { color: var(--text-3); }
+    .trace-legend .tl-kind { color: var(--text-3); font-weight: 700; }
+    .trace-legend .tl-unit { color: var(--text-3); opacity: 0.75; font-size: 8px; }
+    .trace-legend .tl-chip:hover .tl-unit { opacity: 1; }
     /* Trading-view hover readout (per-channel values under the cursor) */
     .hover-readout {
       display: flex;
@@ -2061,6 +2064,8 @@
               <button id="liveZoomReset" class="transport-btn trans-jump" title="Reset zoom to the default window (double-click the graph also returns to live)">⟲ reset</button>
               <span class="plot-readout" id="plotSamples">0 SAMP</span>
               <span class="plot-readout">CH <span id="plotChCount">6</span></span>
+              <span class="plot-readout" id="plotEnv"></span>
+              <span class="plot-readout" id="plotScaleNote" style="display:none"></span>
               <button id="liveClear" class="transport-btn trans-nav" title="Clear the displayed window">⟲</button>
             </div>
             <div id="hoverReadout" class="hover-readout" style="display:none"></div>

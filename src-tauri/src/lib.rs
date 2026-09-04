@@ -271,6 +271,13 @@ fn handle_reader_line(
         Ok(OsmMessage::Error { code, message }) => {
             let _ = app.emit("serial-error", SerialErrorEvent { code, message });
         }
+        Ok(OsmMessage::Kinds { kinds }) => {
+            let kinds: Vec<String> = kinds.iter().map(|k| k.as_str().to_string()).collect();
+            let _ = app.emit("serial-kinds", SerialKindsEvent { kinds });
+        }
+        Ok(OsmMessage::Env { temperature, humidity }) => {
+            let _ = app.emit("serial-env", SerialEnvEvent { temperature, humidity });
+        }
         Ok(OsmMessage::Ping) => {}
         Ok(OsmMessage::Unknown(_)) => {
             if let Some(channels) = parse_osm_line(line, expected) {
@@ -430,6 +437,17 @@ struct SerialCalEvent {
 struct SerialErrorEvent {
     code: i32,
     message: String,
+}
+
+#[derive(Clone, Serialize)]
+struct SerialKindsEvent {
+    kinds: Vec<String>,
+}
+
+#[derive(Clone, Serialize)]
+struct SerialEnvEvent {
+    temperature: f64,
+    humidity: f64,
 }
 
 #[tauri::command]

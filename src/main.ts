@@ -32,6 +32,76 @@ const PRESETS: Record<string, { name: string; sensors: string[] }> = {
   '8-sensor-max': { name: '8-Sensor Max', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8', 'MQ-2', 'MQ-9'] },
 };
 
+// === Channel kinds ===
+// Semantic meaning per streamed column. Default: classic analog MOX. Firmware
+// declares richer rigs (MEMS, DHT env, fan) with an `OSMK` line — the parser
+// defaults every column to analog_mox when absent, so v1 MQ rigs are untouched.
+// Kinds drive honest unit tags and keep a mixed MQ+MEMS array comparable.
+type ChannelKind = 'analog_mox' | 'mems_index' | 'env_temp' | 'env_hum' | 'fan';
+const KIND_META: Record<ChannelKind, { unit: string; tag: string }> = {
+  analog_mox: { unit: 'ΔR/R₀', tag: 'MOX' },
+  mems_index: { unit: 'idx', tag: 'I²C' },
+  env_temp: { unit: '°C', tag: 'T' },
+  env_hum: { unit: '%RH', tag: 'RH' },
+  fan: { unit: 'rpm', tag: 'FAN' },
+};
+const KIND_GLYPH: Record<ChannelKind, string> = {
+  analog_mox: '∿', mems_index: '◍', env_temp: '◇', env_hum: '≋', fan: '→',
+};
+let channelKinds: ChannelKind[] = [];
+function inferKind(name: string): ChannelKind {
+  const n = name.toUpperCase();
+  if (/SGP|BME|CCS|MICS|MEMS|DIGITAL/.test(n)) return 'mems_index';
+  if (/TEMP|DHT.*T/.test(n)) return 'env_temp';
+  if (/HUM/.test(n)) return 'env_hum';
+  if (/FAN|RPM/.test(n)) return 'fan';
+  return 'analog_mox';
+}
+function kindOf(i: number): ChannelKind {
+  if (i >= 0 && i < channelKinds.length) return channelKinds[i];
+  return inferKind(chNames[i] || `CH${i + 1}`);
+}
+function applyChannelKinds(kinds: string[]) {
+  if (!kinds || kinds.length < 1) return;
+  const known: Record<string, ChannelKind> = {
+    'analog_mox': 'analog_mox', 'mems_index': 'mems_index',
+    'env_temp': 'env_temp', 'env_hum': 'env_hum', 'fan': 'fan',
+  };
+  // The kinds row implies the streamed channel width — align the rig so a mixed
+  // declaration never drops or pads columns.
+  if (kinds.length !== chNames.length) {
+    const names = Array.from({ length: kinds.length }, (_, i) => chNames[i] || `CH${i + 1}`);
+    if (connected) setChannelCount(kinds.length, names);
+    else chNames = names;
+  }
+  channelKinds = chNames.map((name, i) => {
+    const k = kinds[i];
+    if (k && k in known) return known[k];
+    return inferKind(name);
+  });
+}
+
+// Ambient telemetry from the device's `ENV` frame (°C / %RH). Rendered as a
+// quiet tagbar readout; NaN halves (unparseable on the device) are skipped so
+// we never print a fake telemetry number.
+let lastEnv: { temperature: number; humidity: number } | null = null;
+function renderEnvReadout(env: { temperature: number; humidity: number } | null) {
+  const el = document.getElementById('plotEnv');
+  if (!el) return;
+  if (!env || (!Number.isFinite(env.temperature) && !Number.isFinite(env.humidity))) {
+    el.textContent = '';
+    el.title = '';
+    lastEnv = null;
+    return;
+  }
+  lastEnv = env;
+  const parts: string[] = [];
+  if (Number.isFinite(env.temperature)) parts.push(`◇ ${env.temperature.toFixed(1)}°C`);
+  if (Number.isFinite(env.humidity)) parts.push(`≋ ${env.humidity.toFixed(0)}%RH`);
+  el.textContent = parts.join(' · ');
+  el.title = 'Ambient telemetry from the device (ENV frame)';
+}
+
 // User-saved rig presets (persisted to localStorage). Unlike the built-in
 // presets these can describe any channel count — the backend auto-assigns ADC
 // pins from the count, so any board works out of the box.
@@ -316,26 +386,37 @@ function drawTraces() {
   // Trading-view style leveled grid: choose a "nice" step for the value levels
   // (1/2/5×10^k) so the labels are clean, then render a strong major level every
   // step with a faint mid-level between. Time axis gets major 1s-ish + minor ticks.
-  let gMin = Infinity, gMax = -Infinity;
-  for (const slice of slices) for (const v of slice) {
-    if (v < gMin) gMin = v;
-    if (v > gMax) gMax = v;
-  }
-  if (gMin === Infinity) gMin = 0;
-  const rawRange = gMax - gMin || 1;
-  gMin -= rawRange * 0.1;
-  gMax += rawRange * 0.1;
-
-  // Nice step for vertical levels (aim for ~8 levels).
-  const targetLevels = 8;
-  const rough = (gMax - gMin) / targetLevels;
-  const mag = Math.pow(10, Math.floor(Math.log10(rough || 1)));
-  const normMag = rough / mag;
-  const step = mag * (normMag < 1.5 ? 1 : normMag < 3.5 ? 2 : normMag < 7.5 ? 5 : 10);
-  const first = Math.ceil(gMin / step) * step;
+  // Mixed rigs (MQ ΔR/R₀ + MEMS index + env + fan) live on incomparable scales,
+  // so they get a fixed normalized 0→100% axis with each trace scaled to its own
+  // window min/max — the crosshair still reads raw values with per-kind units.
+  const mixed = mixedRig();
   const levels: number[] = [];
-  for (let v = first; v <= gMax; v += step) levels.push(v);
-  if (levels.length < 2) { levels.length = 0; levels.push(gMin, gMax); }
+  let gMin: number, gMax: number;
+  if (mixed) {
+    gMin = 0;
+    gMax = 1;
+    levels.push(0, 0.25, 0.5, 0.75, 1);
+  } else {
+    let lo = Infinity, hi = -Infinity;
+    for (const slice of slices) for (const v of slice) {
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }
+    if (lo === Infinity) lo = 0;
+    const rawRange = hi - lo || 1;
+    gMin = lo - rawRange * 0.1;
+    gMax = hi + rawRange * 0.1;
+
+    // Nice step for vertical levels (aim for ~8 levels).
+    const targetLevels = 8;
+    const rough = (gMax - gMin) / targetLevels;
+    const mag = Math.pow(10, Math.floor(Math.log10(rough || 1)));
+    const normMag = rough / mag;
+    const step = mag * (normMag < 1.5 ? 1 : normMag < 3.5 ? 2 : normMag < 7.5 ? 5 : 10);
+    const first = Math.ceil(gMin / step) * step;
+    for (let v = first; v <= gMax; v += step) levels.push(v);
+    if (levels.length < 2) { levels.length = 0; levels.push(gMin, gMax); }
+  }
 
   const span = gMax - gMin || 1;
   const geomY = (v: number) => ph - (ph * ((v - gMin) / span));
@@ -356,7 +437,7 @@ function drawTraces() {
     tracesCtx.lineTo(pw, y);
     tracesCtx.stroke();
     if (!minor) {
-      const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0);
+      const label = mixed ? `${Math.round(v * 100)}%` : (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0));
       tracesCtx.fillStyle = '#9a9484';
       tracesCtx.fillText(label, gutterL - 6, y);
     }
@@ -402,10 +483,24 @@ function drawTraces() {
     tracesCtx.strokeStyle = channelColor(ch);
     tracesCtx.lineWidth = active ? (hoverSeries === ch ? 2.2 : 1.4) : 0.6;
     tracesCtx.globalAlpha = hidden ? 0.08 : (active ? 1 : 0.25);
+    // Mixed rigs: normalize each trace to its own window min/max so shapes on
+    // wildly different scales (ΔR/R₀ vs a 0–500 MEMS index vs °C/%RH) compare.
+    let lo = 0, hi = 1;
+    if (mixed) {
+      lo = Infinity;
+      hi = -Infinity;
+      for (const v of slice) {
+        if (v < lo) lo = v;
+        if (v > hi) hi = v;
+      }
+    }
+    const denom = (hi - lo) || 1;
     tracesCtx.beginPath();
     for (let i = 0; i < slice.length; i++) {
       const x = gutterL + (i / (wlen - 1)) * pw;
-      const y = (ph - (ph * ((slice[i] - gMin) / span)));
+      const y = mixed
+        ? (ph - (ph * ((slice[i] - lo) / denom)))
+        : (ph - (ph * ((slice[i] - gMin) / span)));
       i === 0 ? tracesCtx.moveTo(x, y) : tracesCtx.lineTo(x, y);
     }
     tracesCtx.stroke();
@@ -503,8 +598,9 @@ function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
   const n = vals.slice(0, 12).map(({ name, v }) => {
     const c = chNames.indexOf(name);
     const color = channelColor(c >= 0 ? c : 0);
+    const unit = KIND_META[kindOf(c >= 0 ? c : 0)].unit;
     const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(2)}k` : v.toFixed(2);
-    return `<span class="xr-item"><i class="xr-dot" style="background:${color}"></i>${name} <b>${label}</b></span>`;
+    return `<span class="xr-item"><i class="xr-dot" style="background:${color}"></i>${name} <b>${label} ${unit}</b></span>`;
   }).join('');
   el.innerHTML = n;
 }
@@ -644,11 +740,36 @@ function drawSessionFingerprint(values: number[]) {
 // Toggleable, hover-to-highlight channels (trading-view style). Hovering a chip
 // dims other channels so you can isolate a sensor; clicking toggles it on/off.
 let hiddenChannels = new Set<number>();
+// A rig is "mixed" when its streamed columns carry more than one semantic kind
+// (MQ ΔR/R₀ + MEMS index + DHT env + fan RPM). Mixed arrays live on different
+// scales, so the plot normalizes each trace to its own window min/max — the
+// crosshair readout still shows the raw values with per-kind units (honest).
+function mixedRig(): boolean {
+  const kinds = new Set<ChannelKind>();
+  for (let i = 0; i < chNames.length; i++) kinds.add(kindOf(i));
+  return kinds.size > 1;
+}
+function updatePlotScaleNote() {
+  const el = document.getElementById('plotScaleNote');
+  if (!el) return;
+  if (mixedRig()) {
+    el.textContent = 'MIXED RIG · axis per-channel';
+    el.title = 'Channels carry different units — each trace is scaled to its own window min/max so shapes compare. Crosshair readout shows raw values with units; see the legend.';
+    el.style.display = '';
+  } else {
+    el.textContent = '';
+    el.title = '';
+    el.style.display = 'none';
+  }
+}
 function buildLegend() {
   const el = document.getElementById('traceLegend')!;
-  el.innerHTML = chNames.map((name, i) =>
-    `<span class="tl-chip" data-ch="${i}" title="Hover to isolate · click the eye to show/hide"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span>${name}</span>`
-  ).join('');
+  el.innerHTML = chNames.map((name, i) => {
+    const k = kindOf(i);
+    const meta = KIND_META[k];
+    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) — hover to isolate, click the eye to toggle"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span>${name}<span class="tl-unit">${meta.unit}</span></span>`;
+  }).join('');
+  updatePlotScaleNote();
   el.querySelectorAll<HTMLElement>('.tl-chip').forEach((chip) => {
     chip.addEventListener('mouseenter', () => { hoverSeries = parseInt(chip.dataset.ch || '-1', 10); });
     chip.addEventListener('mouseleave', () => { hoverSeries = -1; });
@@ -1847,6 +1968,7 @@ function setChannelCount(n: number, names?: string[]) {
     channelCount = 0;
     chNames = names && names.length ? names : [];
     autoChannels = 0;
+    channelKinds = [];
     traceData = [];
     historyData = [];
     buildLegend();
@@ -1862,6 +1984,7 @@ function setChannelCount(n: number, names?: string[]) {
   const next = Math.max(1, Math.min(64, Math.floor(n) || 1));
   if (next === channelCount && !names) return;
   channelCount = next;
+  channelKinds = [];
   if (names && names.length === next) {
     chNames = names;
   } else {
@@ -2066,6 +2189,7 @@ function applyCustomNames() {
   } else {
     chNames = [...names];
   }
+  channelKinds = [];
   traceData = chNames.map(() => []);
   buildLegend();
   const pc = document.getElementById('plotChCount');
@@ -2089,6 +2213,7 @@ function onPresetChange(preset: string) {
   if (!p) return;
   chNames = p.sensors;
   channelCount = p.sensors.length;
+  channelKinds = [];
   traceData = chNames.map(() => []);
   buildLegend();
   const pc = document.getElementById('plotChCount');
@@ -3891,6 +4016,19 @@ listen<{ n_channels: number; source: string }>('serial-auto', (event) => {
   applyDetectedChannels(event.payload.n_channels, event.payload.source);
 });
 
+// OSMK — the device declared each streamed column's semantic kind (MQ / MEMS /
+// env / fan). Rust already falls back to analog_mox for unknown tokens; here the
+// real kind name or a name-based inference decides, then the legend/units refresh.
+listen<{ kinds: string[] }>('serial-kinds', (event) => {
+  applyChannelKinds(event.payload.kinds);
+  buildLegend();
+});
+
+// ENV — device-reported ambient telemetry (°C / %RH). Purely informational.
+listen<{ temperature: number; humidity: number }>('serial-env', (event) => {
+  renderEnvReadout(event.payload);
+});
+
 listen<{ code: number; message: string }>('serial-error', (event) => {
   console.error(`Serial error ${event.payload.code}: ${event.payload.message}`);
   const cm = document.getElementById('connMsg');
@@ -3904,6 +4042,8 @@ function dropLink(reason: string) {
   connected = false;
   bootloaderHinted = false;
   autoChannels = 0;
+  channelKinds = [];
+  renderEnvReadout(null);
   bootFlashShown = false;
   updateRigNote();
   document.getElementById('bootBanner')?.classList.remove('show');
