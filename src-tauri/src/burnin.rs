@@ -118,11 +118,18 @@ pub fn get_status(dir: &std::path::Path) -> Result<BurnInStatus, String> {
 
 /// Start/stop the burn-in timer. Acts as a toggle: pressing Start while stopped
 /// begins the countdown; pressing it again pauses it. The countdown only ever
-/// advances while running (see [`reconcile`]).
-pub fn start(dir: &std::path::Path) -> Result<BurnInStatus, String> {
+/// advances while running (see [`reconcile`]). When (re)starting, an optional
+/// `hours` duration is applied so the UI's duration field configures the run —
+/// a countdown that ignores the requested duration looks broken.
+pub fn start(dir: &std::path::Path, hours: Option<f64>) -> Result<BurnInStatus, String> {
     let mut s = reconcile(load(dir));
     s.running = !s.running;
     if s.running {
+        if let Some(h) = hours {
+            if h >= 1.0 && h <= 168.0 {
+                s.total_hours = h;
+            }
+        }
         s.last_active = now_secs();
     }
     save(dir, &s)?;
@@ -188,12 +195,33 @@ mod tests {
         // Start begins counting.
         let status = get_status(&dir).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
-        let started = start(&dir).unwrap();
+        let started = start(&dir, None).unwrap();
         assert!(started.running, "start should begin the countdown");
 
         // Start again toggles it off (a second press pauses).
-        let stopped = start(&dir).unwrap();
+        let stopped = start(&dir, None).unwrap();
         assert!(!stopped.running, "second press should pause");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn start_applies_requested_hours() {
+        let dir = std::env::temp_dir().join("osm_burnin_hours");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        reset(&dir, Some(24.0)).unwrap();
+
+        let started = start(&dir, Some(6.0)).unwrap();
+        assert!(started.running);
+        assert_eq!(started.total_hours, 6.0);
+        // A paused press ignores the duration (still 6h).
+        let stopped = start(&dir, Some(12.0)).unwrap();
+        assert!(!stopped.running);
+        assert_eq!(stopped.total_hours, 6.0);
+        // Re-starting applies the new duration.
+        let restarted = start(&dir, Some(12.0)).unwrap();
+        assert_eq!(restarted.total_hours, 12.0);
 
         let _ = fs::remove_dir_all(&dir);
     }

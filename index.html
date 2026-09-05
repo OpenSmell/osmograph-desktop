@@ -2592,7 +2592,7 @@
               <div class="form-row">
                 <button id="hwExport">Export sensor_profile.json</button>
                 <button id="hwImport">Import profile…</button>
-                <span class="hint" id="hwStatus" style="align-self:center">Set your rig, then export.</span>
+                <span class="hint" id="hwStatus" style="align-self:center;min-width:0;overflow-wrap:anywhere">Set your rig, then export.</span>
               </div>
               <pre id="hwExported" style="display:none;background:var(--bg-2);padding:8px;border-radius:4px;font-size:10px;overflow:auto;max-height:200px"></pre>
             </div>
@@ -2801,9 +2801,15 @@ Confidence: 97.3%</div>
             <h2>Firmware</h2>
             <div class="card blueprint-sheet">
               <div class="sch-meta">
-                <span class="sch-reg">RIG · SCHEMATIC 001</span>
-                <span class="sch-reg">ESP32 · ARDUINO CORE · REV B</span>
+                <span class="sch-reg">RIG WIRING · SCHEMATIC</span>
+                <span class="sch-reg">BOARD · ESP32 (WROOM-32)</span>
               </div>
+              <p style="font-size:11px;color:var(--text-2);line-height:1.5;margin:4px 0 8px">
+                Flashing builds a sketch for the rig below and uploads it over USB.
+                Channels map to GPIO pins automatically — the wiring and the checks
+                here run before anything reaches the board, so a bad build never
+                flashes. Your saved rigs appear in the ⚡ Flash dialog too.
+              </p>
               <svg id="rigSchematic" viewBox="0 0 560 150" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Rig wiring schematic"></svg>
               <div class="sch-stamp" id="schStamp">SENSORS · 6ch · 32/33/34/35/25/26</div>
               <div class="preflight" id="preflight">
@@ -2818,7 +2824,7 @@ Confidence: 97.3%</div>
               </div>
               <div class="form-row">
                 <label>Rig Preset</label>
-                <span id="fwPreset" style="color:var(--text-1);font-family:var(--font-mono);font-size:11px">6-sensor-full</span>
+                <span id="fwPreset" style="color:var(--text-1);font-family:var(--font-mono);font-size:11px">6-Sensor Full</span>
               </div>
               <div class="form-row">
                 <label>WiFi SSID</label>
@@ -2829,21 +2835,21 @@ Confidence: 97.3%</div>
                 <input type="password" id="fwPass" value="" placeholder="network password" autocomplete="off" />
               </div>
               <div class="form-row">
-                <label>Toolchain</label>
-                <span id="fwToolchain" style="font-size:10px;color:var(--text-3)">checking…</span>
+                <label>Arduino tools</label>
+                <span id="fwToolchain" style="font-size:10px;color:var(--text-3);min-width:0;overflow-wrap:anywhere">checking…</span>
               </div>
               <button id="flashBtn" class="green" style="margin-top:8px">Flash Firmware</button>
               <div class="progress-track" id="flashProgress" style="display:none;margin-top:8px"><div class="progress-fill" id="flashBar" style="width:0%"></div></div>
-              <div style="font-size:10px;color:var(--text-3);margin-top:4px" id="flashStatus"></div>
+              <div style="font-size:10px;color:var(--text-3);margin-top:4px;overflow-wrap:anywhere" id="flashStatus"></div>
               <div style="display:flex;gap:6px;margin-top:8px">
                 <button id="readMacBtn" style="flex:1">Read MAC</button>
                 <button id="eraseBtn" style="flex:1">Erase Flash</button>
               </div>
-              <div class="board-note">BOARD: ESP32 (DEVKIT-V1 / WROOM-32). More boards — Arduino UNO and others — arrive via community firmware PRs; we only flash boards with a supported, safe generator.</div>
+              <div class="board-note">BOARD: ESP32 (DEVKIT-V1 / WROOM-32). We only flash boards with a supported generator — Arduino UNO and other boards arrive via community firmware PRs.</div>
             </div>
             <div class="card">
-              <h3>Custom Rig Preset</h3>
-              <p>Save your exact rig (any channel count) so it's one click in the Flash modal next time. ADC pins are auto-assigned from the channel count — no pin setup needed.</p>
+              <h3>Save a Custom Rig</h3>
+              <p>Save your exact rig — any channel count and sensor names. ADC pins are assigned automatically; you can see the mapping live in the flash dialog.</p>
               <div class="form-row"><label>Preset name</label><input type="text" id="cpName" placeholder="e.g. My 5-sensor lab rig" autocomplete="off" /></div>
               <div class="form-row"><label>Channel count</label><input type="number" id="cpCount" value="6" min="1" max="12" /></div>
               <div style="font-size:10px;color:var(--text-3);margin-top:2px" id="cpPinsHint">auto-assigns GPIO 32, 33, 34, 35, 25, 26</div>
@@ -2965,11 +2971,6 @@ Confidence: 97.3%</div>
               <p class="hint">Sessions, calibration and hardware profile are stored only on this device. Anything shared to
                 the community (data hub / HF sync / sensor models) is sent only when you explicitly choose to submit it.</p>
             </div>
-            <div class="card">
-              <h3>Getting help / Windows SmartScreen</h3>
-              <p class="hint">On Windows you may see a blue &ldquo;Windows protected your PC&rdquo; prompt on first run. Because
-                the installer is not yet signed, click <b>More info → Run anyway</b>. See the website for full details.</p>
-            </div>
           </div>
 
           <!-- End System panels -->
@@ -3048,12 +3049,17 @@ Confidence: 97.3%</div>
 
   <!-- Flash Firmware Modal -->
   <div id="flashModal" class="modal" style="display:none">
-    <div class="modal-box" style="width:420px">
+    <div class="modal-box" style="width:440px">
       <h3>⚡ Flash Firmware</h3>
       <div style="font-size:11px;color:var(--text-2);line-height:1.45">
-        Updates your ESP32 with the OpenSmell firmware. Takes ~30s — the board
-        reconnects automatically when it finishes. Pick the number of sensors on
-        your rig first so the firmware matches your hardware.
+        Here's what happens when you flash: we write a small sketch for <i>your</i>
+        rig, compile it on this computer, then upload it to the board over USB.
+        It takes about 30 seconds and the board reconnects on its own when done.
+      </div>
+      <div class="phase-times" style="margin:8px 0 2px">
+        <div style="font-size:10px;letter-spacing:1px;color:var(--text-3);font-family:var(--font-mono)">
+          ① generate sketch → ② compile → ③ upload
+        </div>
       </div>
       <div class="phase-times">
         <label>Target Port
@@ -3061,21 +3067,22 @@ Confidence: 97.3%</div>
             <option value="">Select port...</option>
           </select>
         </label>
-        <label>Rig Preset
+        <label>Rig
           <select id="fmPreset" style="background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;padding:5px 7px;width:100%">
+            <option value="6-sensor-full" selected>6-Sensor Full</option>
             <option value="3-sensor-food">3-Sensor Food</option>
             <option value="4-sensor-safety">4-Sensor Safety</option>
-            <option value="6-sensor-full" selected>6-Sensor Full</option>
             <option value="8-sensor-max">8-Sensor Max</option>
           </select>
         </label>
       </div>
+      <div style="font-size:10px;color:var(--text-3);font-family:var(--font-mono);margin-bottom:6px;overflow-wrap:anywhere" id="fmWiring">—</div>
       <label>WiFi SSID <input id="fmSsid" type="text" placeholder="leave empty for SoftAP mode" autocomplete="off" /></label>
       <label>WiFi Password <input id="fmPass" type="password" placeholder="network password" autocomplete="off" /></label>
-      <div style="font-size:10px;color:var(--text-3)" id="fmToolchain">checking toolchain…</div>
+      <div style="font-size:10px;color:var(--text-3);overflow-wrap:anywhere" id="fmToolchain">checking tools…</div>
       <button id="fmFlash" class="green" style="margin-top:6px">Flash Firmware</button>
       <div class="progress-track" id="fmProgress" style="display:none"><div class="progress-fill" id="fmBar" style="width:0%"></div></div>
-      <div style="font-size:10px;color:var(--text-3)" id="fmStatus"></div>
+      <div style="font-size:10px;color:var(--text-3);overflow-wrap:anywhere" id="fmStatus"></div>
       <div class="modal-actions">
         <button id="fmClose">Not now</button>
       </div>

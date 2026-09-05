@@ -3750,7 +3750,8 @@ async function refreshBurnIn() {
 
 document.getElementById('burninStart')!.addEventListener('click', async () => {
   try {
-    const s = await invoke<BurnInStatus>('burnin_start');
+    const hours = parseFloat((document.getElementById('burninHours') as HTMLInputElement).value) || undefined;
+    const s = await invoke<BurnInStatus>('burnin_start', { hours });
     renderBurnIn(s);
   } catch (e) {
     console.error('Burn-in start failed:', e);
@@ -3833,14 +3834,15 @@ document.getElementById('flashBtn')!.addEventListener('click', async () => {
 
 async function refreshToolchain() {
   try {
-    const tc = await invoke<{ platformio: boolean; arduino_cli: boolean; esptool: boolean; message: string }>('check_flash_toolchain');
+    const tc = await invoke<ToolchainInfo>('check_flash_toolchain');
     const el = document.getElementById('fwToolchain');
-    if (el) el.textContent = tc.message;
-    setFlight('pfTc', tc.esptool ? 'TOOLCHAIN READY' : 'TOOLCHAIN MISSING', tc.esptool ? 'ok' : 'warn');
+    const s = toolchainSummary(tc);
+    if (el) { el.textContent = s.text; el.title = tc.message; }
+    setFlight('pfTc', s.flight, s.kind);
   } catch {
     const el = document.getElementById('fwToolchain');
-    if (el) el.textContent = 'toolchain check failed';
-    setFlight('pfTc', 'TOOLCHECK FAILED', 'warn');
+    if (el) el.textContent = 'tool check failed';
+    setFlight('pfTc', 'TOOLS UNKNOWN', 'warn');
   }
 }
 
@@ -3878,17 +3880,43 @@ document.getElementById('eraseBtn')!.addEventListener('click', async () => {
 // it drives the same `flash_firmware` backend as the System tab.
 let fmTimer: number | null = null;
 
+// Live wiring preview: shows, in plain words, exactly which firmware gets built
+// for the preset currently selected in the dialog — channel count, sensor
+// names, and the GPIO pins the backend will assign. Mirrors `presetPins` and
+// the Rust `sensor_pins_for`, so the preview shows the *real* firmware pins.
+function renderFmWiring() {
+  const el = document.getElementById('fmWiring');
+  const preset = (document.getElementById('fmPreset') as HTMLSelectElement).value;
+  if (!el || !preset) { if (el) el.textContent = '—'; return; }
+  const count = presetChannelCount(preset);
+  const sensors = (isCustomPreset(preset)
+    ? customPresets.find(p => p.id === preset)?.sensors
+    : PRESETS[preset]?.sensors) || [];
+  const pins = presetPins(count);
+  if (count < 1 || pins.length === 0) {
+    el.innerHTML = '<b>WIRING</b> · pick a rig preset above';
+    return;
+  }
+  const names = Array.from({ length: count }, (_, i) => sensors[i] || `CH${i + 1}`);
+  el.innerHTML = `<b>WIRING</b> · ${count} CH → GPIO ${pins.join('/')}<br><span style="opacity:.75">${names.join(' · ')}</span>`;
+}
+
 // Fill the modal's rig-preset dropdown with the built-in presets plus any
 // user-saved custom rigs. Keeps the current selection when it still exists.
 function populateFmPresets() {
   loadCustomPresets();
   const sel = document.getElementById('fmPreset') as HTMLSelectElement;
   if (!sel) return;
-  const prev = sel.value;
+  // Default to the rig the panel is showing when the dialog first opens, so
+  // the wiring preview and the flashed firmware always agree out of the box.
+  // The panel starts in auto-detect mode (not a buildable preset), so fall back
+  // to the flagship 6-sensor rig until the panel has a concrete preset to carry.
+  const prev = sel.value || (activePreset === 'auto' ? '6-sensor-full' : activePreset);
   const builtIns = Object.keys(PRESETS).map(id => `<option value="${id}">${PRESETS[id].name}</option>`);
   const customs = customPresets.map(p => `<option value="${p.id}">${p.name} (custom, ${p.n_channels} ch)</option>`);
   sel.innerHTML = builtIns.join('') + customs.join('');
   if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+  renderFmWiring();
 }
 
 function openFlashModal() {
@@ -3909,6 +3937,11 @@ function openFlashModal() {
   if (ssid && ssid.value) {
     (document.getElementById('fmSsid') as HTMLInputElement).value = ssid.value;
   }
+  const pass = document.getElementById('fwPass') as HTMLInputElement | null;
+  if (pass && pass.value) {
+    (document.getElementById('fmPass') as HTMLInputElement).value = pass.value;
+  }
+  renderFmWiring();
   void checkFmToolchain();
   modal.style.display = 'flex';
   setTimeout(() => (document.getElementById('fmPort') as HTMLSelectElement)?.focus(), 50);
@@ -3964,21 +3997,60 @@ async function populateFmPort() {
   }
 }
 
+interface ToolchainInfo { platformio: boolean; arduino_cli: boolean; esptool: boolean; message: string }
+
+// Plain-language summary of the flash toolchain state, keyed off the same flags
+// the Rust side reports. The raw `message` stays available as a tooltip detail;
+// the visible copy avoids jargon ("PlatformIO", "arduino-cli") for anyone who
+// just wants to know "can I flash or not". Honest: a build needs a compiler
+// (PlatformIO or Arduino CLI); esptool alone can wipe/read, not rebuild.
+function toolchainSummary(tc: ToolchainInfo): { text: string; flight: string; kind: 'ok' | 'warn'; color: string } {
+  if (tc.platformio || tc.arduino_cli) {
+    return { text: 'Ready — build and upload tools installed.', flight: 'TOOLS READY', kind: 'ok', color: 'var(--green)' };
+  }
+  if (tc.esptool) {
+    return { text: 'Upload tool found, but no compiler — install Arduino IDE or PlatformIO to flash.', flight: 'TOOLS PARTIAL', kind: 'warn', color: 'var(--yellow)' };
+  }
+  return { text: 'No Arduino tools found — install Arduino IDE or PlatformIO, then retry.', flight: 'TOOLS MISSING', kind: 'warn', color: 'var(--red)' };
+}
+
 async function checkFmToolchain() {
   const el = document.getElementById('fmToolchain');
   if (!el) return;
   try {
-    const tc = await invoke<{ platformio: boolean; arduino_cli: boolean; esptool: boolean; message: string }>('check_flash_toolchain');
-    el.textContent = tc.message;
-    el.style.color = tc.esptool ? 'var(--green)' : 'var(--yellow)';
+    const tc = await invoke<ToolchainInfo>('check_flash_toolchain');
+    const s = toolchainSummary(tc);
+    el.textContent = s.text;
+    el.style.color = s.color;
+    el.title = tc.message;
   } catch (e) {
-    el.textContent = 'Toolchain check failed: ' + e;
+    el.textContent = 'Tool check failed: ' + e;
     el.style.color = 'var(--red)';
   }
 }
 
 document.getElementById('flashQuick')?.addEventListener('click', () => openFlashModal());
 document.getElementById('fmClose')?.addEventListener('click', closeFlashModal);
+// Keep the dialog and the Firmware panel in agreement: choosing a rig preset in
+// the dialog updates the wiring preview and the panel's Rig Preset label, and
+// edits to the WiFi fields echo straight back to the System tab's fields. The
+// reverse copy happens in `openFlashModal`, so the two never drift apart.
+document.getElementById('fmPreset')?.addEventListener('change', () => {
+  renderFmWiring();
+  const preset = (document.getElementById('fmPreset') as HTMLSelectElement).value;
+  if (preset && (PRESETS[preset] || isCustomPreset(preset))) {
+    activePreset = preset;
+    renderRigSchematic();
+  }
+});
+document.getElementById('fmSsid')?.addEventListener('input', () => {
+  const t = document.getElementById('fwSsid') as HTMLInputElement | null;
+  if (t) t.value = (document.getElementById('fmSsid') as HTMLInputElement).value;
+});
+document.getElementById('fmPass')?.addEventListener('input', () => {
+  const t = document.getElementById('fwPass') as HTMLInputElement | null;
+  if (t) t.value = (document.getElementById('fmPass') as HTMLInputElement).value;
+});
 // Close on backdrop click and Escape (same pattern as other modals); never let
 // a stray key while typing in a field close it.
 document.getElementById('flashModal')?.addEventListener('click', (e) => {

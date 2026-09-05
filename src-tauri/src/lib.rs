@@ -2765,8 +2765,8 @@ fn burnin_get_status(state: State<'_, AppState>) -> Result<burnin::BurnInStatus,
 }
 
 #[tauri::command]
-fn burnin_start(state: State<'_, AppState>) -> Result<burnin::BurnInStatus, String> {
-    burnin::start(&burnin_dir(&state))
+fn burnin_start(state: State<'_, AppState>, hours: Option<f64>) -> Result<burnin::BurnInStatus, String> {
+    burnin::start(&burnin_dir(&state), hours)
 }
 
 #[tauri::command]
