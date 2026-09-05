@@ -838,7 +838,7 @@ async function ingestReading(values: number[]) {
       document.getElementById('mCh')!.textContent = `—/${chNames.length}`;
       document.getElementById('mAlert')!.textContent = 'warming_up';
       const wDot = document.getElementById('statusDot')!;
-      wDot.className = connected ? 'status-dot' : 'status-dot';
+      wDot.className = 'status-dot warn';
     } else {
       card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
       document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
@@ -1158,7 +1158,15 @@ function renderLibrary() {
     document.getElementById('libStatus')!.textContent = '0 sessions';
     return;
   }
-  body.innerHTML = sessions.map((s, i) => {
+  const q = ((document.getElementById('libSearch') as HTMLInputElement | null)?.value || '').trim().toLowerCase();
+  const rows = sessions
+    .map((s, i) => ({ s, i }))
+    .filter(({ s }) => !q || `${s.substance} ${s.label} ${s.format} ${s.duration} ${s.sensors}`.toLowerCase().includes(q));
+  if (rows.length === 0) {
+    body.innerHTML = `<tr class="empty-row"><td colspan="8">Nothing matches "${q}" — try a different search.</td></tr>`;
+    return;
+  }
+  body.innerHTML = rows.map(({ s, i }) => {
     const analyzed = s.quality_report && typeof s.quality_report.total === 'number';
     let badge = '';
     let statusCell: string;
@@ -2808,6 +2816,7 @@ document.getElementById('compareRef')!.addEventListener('change', (e) => {
 });
 
 document.getElementById('libRefresh')!.addEventListener('click', () => reloadLibrary());
+document.getElementById('libSearch')?.addEventListener('input', () => renderLibrary());
 
 document.getElementById('inspAnalyze')!.addEventListener('click', async () => {
   const s = sessions[selectedSession ?? -1];
@@ -3257,20 +3266,6 @@ document.getElementById('fleetScan')!.addEventListener('click', async () => {
     renderFleet();
   } catch { renderFleet(); }
 });
-document.getElementById('fleetAdd')!.addEventListener('click', () => {
-  const n = fleetDevices.length + 1;
-  const name = prompt('Device name') || `Device ${n}`;
-  const port = prompt('Port / address (e.g. /dev/ttyUSB0 or host:port)') || '';
-  if (!port) { renderFleet(); return; }
-  fleetDevices.push({
-    id: `dev-${Date.now()}`, name, status: 'offline',
-    sensors: chNames.map(s => ({ name: s, value: 0, health: 'OK' })),
-    firmware_version: 'v0.1.0', n_channels: chNames.length, port,
-    uptime_seconds: 0, ip: '',
-    kind: 'manual-add', is_recognized: false,
-  });
-  renderFleet();
-});
 
 // OLED + Buzzer: conditional (only if the user actually has the peripheral
 // wired up), persisted, and pushed into Rust state so the plumbing is real.
@@ -3385,7 +3380,7 @@ document.getElementById('oledEnabled')!.addEventListener('change', () => {
   document.getElementById(id)!.addEventListener('change', () => { captureBuzzerFromDom(); persistPeripheralState(); updateBuzzerPreviews(); });
 });
 document.getElementById('buzzerVolume')!.addEventListener('input', (e) => {
-  document.getElementById('buzVolVal')!.textContent = `${(e.target as HTMLInputElement).value}%`;
+  document.getElementById('buzzerVolVal')!.textContent = `${(e.target as HTMLInputElement).value}%`;
 });
 document.getElementById('buzzerVolume')!.addEventListener('change', () => { captureBuzzerFromDom(); persistPeripheralState(); });
 document.getElementById('buzzerFreq')!.addEventListener('change', () => { captureBuzzerFromDom(); persistPeripheralState(); });
@@ -3988,11 +3983,13 @@ async function populateFmPort() {
   const opts = cur ? Array.from(cur.options).map(o => o.value).filter(Boolean) : [];
   if (opts.length) {
     sel.innerHTML = '<option value="">Select port...</option>' + opts.map(o => `<option value="${o}">${o}</option>`).join('');
-    sel.value = cur!.value || '';
+    sel.value = cur!.value || (opts.length === 1 ? opts[0] : '');
   } else {
     try {
       const ports = await invoke<{ name: string; description: string }[]>('list_serial_ports');
-      sel.innerHTML = '<option value="">Select port...</option>' + ports.map(p => `<option value="${p.name}">${p.name} — ${p.description || ''}</option>`).join('');
+      const real = ports.filter(p => p.name);
+      sel.innerHTML = '<option value="">Select port...</option>' + real.map(p => `<option value="${p.name}">${p.name} — ${p.description || ''}</option>`).join('');
+      if (real.length === 1) sel.value = real[0].name;
     } catch { /* flow through */ }
   }
 }
@@ -4680,9 +4677,6 @@ document.getElementById('liveClear')!.addEventListener('click', clearLiveView);
   dock.classList.toggle('collapsed');
   const btn = document.getElementById('dockToggle');
   if (btn) btn.textContent = dock.classList.contains('collapsed') ? '▦' : '—';
-});
-(document.getElementById('liveWindow') as HTMLSelectElement | null)?.addEventListener('change', (e) => {
-  setLiveWindow(parseInt((e.target as HTMLSelectElement).value, 10) || 800);
 });
 (document.getElementById('liveScrub') as HTMLInputElement | null)?.addEventListener('input', (e) => {
   const pct = (parseInt((e.target as HTMLInputElement).value, 10) || 0) / 1000;

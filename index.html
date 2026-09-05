@@ -1530,6 +1530,13 @@
       font-size: 10px;
       color: var(--text-3);
     }
+    .hint {
+      font-size: 11px;
+      color: var(--text-2);
+      line-height: 1.45;
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
 
     .card {
       background: var(--bg-2);
@@ -2250,11 +2257,6 @@
               <button id="libRefresh">Refresh</button>
               <span style="width:1px;height:16px;background:var(--border)"></span>
               <input type="text" id="libSearch" placeholder="Search substance, label..." />
-              <select id="libFormatFilter" style="width:90px">
-                <option value="">All formats</option>
-                <option value="csv">CSV</option>
-                <option value="osmell">OSMELL</option>
-              </select>
             </div>
             <div class="lib-table-wrap">
               <table>
@@ -2467,7 +2469,6 @@
             <span class="fleet-summary" id="fleetSummary">No devices</span>
             <div style="flex:1"></div>
             <button id="fleetScan">Scan Network</button>
-            <button id="fleetAdd" class="blue">+ Add Device</button>
           </div>
           <div class="fleet-grid hud-panel" id="fleetGrid"></div>
         </div>
@@ -2496,24 +2497,13 @@
             <div class="card">
               <h3>Serial Port</h3>
               <div class="form-row">
-                <label>Baud Rate</label>
-                <select id="sysBaud"><option>115200</option><option>230400</option><option>921600</option><option>9600</option></select>
-                <button id="sysRefreshPorts">Refresh</button>
-              </div>
-              <div class="form-row">
-                <label>Data Bits</label>
-                <select><option>8</option></select>
-                <label style="min-width:auto">Stop Bits</label>
-                <select style="width:50px"><option>1</option></select>
+                <label>Ports</label>
+                <button id="sysRefreshPorts">Refresh List</button>
               </div>
               <p style="margin-top:8px">Select port from the titlebar and click Connect. Use Detect for auto-discovery.</p>
             </div>
             <div class="card">
-              <h3>Protocol</h3>
-              <div class="form-row">
-                <label>Format</label>
-                <select id="sysProtocol"><option value="osm">OSM (OSM,CH1,CH2,...)</option><option value="csv">CSV</option><option value="json">JSON Lines</option></select>
-              </div>
+              <h3>Channels</h3>
               <div class="form-row">
                 <label>Expected Channels</label>
                 <input type="number" id="sysChannels" value="0" min="0" max="128" style="width:60px" />
@@ -2858,8 +2848,7 @@ Confidence: 97.3%</div>
               <div id="cpList" style="margin-top:10px"></div>
             </div>
             <div class="card">
-              <h3>Firmware Info</h3>
-              <div class="form-row"><label>Version</label><span style="color:var(--text-1)">--</span></div>
+              <h3>Firmware</h3>
               <div class="form-row"><label>Board</label><span style="color:var(--text-1)">ESP32</span></div>
               <div class="form-row"><label>MAC</label><span style="color:var(--text-1)" id="fwMac">--</span></div>
             </div>
@@ -2889,8 +2878,8 @@ Confidence: 97.3%</div>
               <h3>Save Directory</h3>
               <div class="form-row">
                 <label>Path</label>
-                <input type="text" id="dataDir" value="" style="flex:1" />
-                <button id="dataBrowse">Browse</button>
+                <input type="text" id="dataDir" value="" style="flex:1" readonly title="Save directory is managed by the app" />
+                <button id="dataBrowse">Refresh</button>
               </div>
             </div>
             <div class="card">
@@ -3052,14 +3041,9 @@ Confidence: 97.3%</div>
     <div class="modal-box" style="width:440px">
       <h3>⚡ Flash Firmware</h3>
       <div style="font-size:11px;color:var(--text-2);line-height:1.45">
-        Here's what happens when you flash: we write a small sketch for <i>your</i>
-        rig, compile it on this computer, then upload it to the board over USB.
-        It takes about 30 seconds and the board reconnects on its own when done.
-      </div>
-      <div class="phase-times" style="margin:8px 0 2px">
-        <div style="font-size:10px;letter-spacing:1px;color:var(--text-3);font-family:var(--font-mono)">
-          ① generate sketch → ② compile → ③ upload
-        </div>
+        One click. We build the firmware for your rig and upload it over USB —
+        about 30 seconds. The wiring and tool checks below run <i>first</i>, so a
+        bad build never reaches the board.
       </div>
       <div class="phase-times">
         <label>Target Port
