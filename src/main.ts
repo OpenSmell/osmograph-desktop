@@ -2885,6 +2885,41 @@ async function reloadLibrary() {
   renderLibrary();
 }
 
+// Recover recordings that were interrupted before save (a crash left a
+// `.journal` behind). Offered once on boot, then the recovered `.osmell` files
+// are indexed into the library. Never blocks — a failure just logs.
+async function checkRecoveredSessions() {
+  try {
+    const leftover = await invoke<Array<{
+      journal_path: string; label: string; preset: string;
+      rec_start_epoch_ms: number; baseline_sec: number; exposure_sec: number;
+      recovery_sec: number; n_sensors: number; sample_count: number;
+    }>>('recover_phase_sessions');
+    if (!leftover.length) return;
+    const ok = window.confirm(
+      `Smellholt found ${leftover.length} recording${leftover.length === 1 ? '' : 's'} that ${leftover.length === 1 ? 'was' : 'were'} interrupted before saving (e.g. a crash). ` +
+      `Recover ${leftover.length} session${leftover.length === 1 ? '' : 's'} so nothing is lost?`
+    );
+    if (!ok) return;
+    let recovered = 0;
+    for (const s of leftover) {
+      try {
+        await invoke('recover_phase_session', { journalPath: s.journal_path });
+        recovered++;
+      } catch (e) {
+        console.error('Recovery failed for', s.journal_path, e);
+      }
+    }
+    if (recovered > 0) {
+      showToast(`Recovered ${recovered} interrupted session${recovered === 1 ? '' : 's'} — check the Library.`);
+      await reloadLibrary();
+      await refreshTrainLibrary();
+    }
+  } catch (e) {
+    console.error('Recovery scan failed:', e);
+  }
+}
+
 // Import files/folders from anywhere via the native picker (Tauri dialog
 // plugin). The Rust `import_paths` command registers the chosen absolute
 // paths with the session index; we then refresh the library.
@@ -5606,6 +5641,7 @@ refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
+checkRecoveredSessions();
 
 // Fit the window to the screen: never let it overstretch past the monitor's
 // work area. Degrades silently when the core doesn't grant window sizing.

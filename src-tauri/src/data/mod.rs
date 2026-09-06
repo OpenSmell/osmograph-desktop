@@ -15,6 +15,7 @@ pub mod csv_parse;
 pub mod osmell_read;
 pub mod export;
 pub mod hub;
+pub mod journal;
 
 use std::fs;
 use std::io::Write;

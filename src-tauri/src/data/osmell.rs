@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use super::journal::{self, AppendJournal, JournalSession};
 use super::{now_secs, sanitize_label};
 
 pub const DEAD_CV_THRESHOLD: f64 = 0.001;
@@ -140,6 +141,9 @@ pub struct OsmellRecorder {
     phase_idx: usize,
     active: bool,
     saved_path: Option<PathBuf>,
+    /// Append-only `.journal` (see `journal.rs`) that mirrors every sample to
+    /// disk the moment it arrives, so a crash mid-recording loses nothing.
+    journal: Option<AppendJournal>,
 }
 
 impl OsmellRecorder {
@@ -158,6 +162,7 @@ impl OsmellRecorder {
             phase_idx: 0,
             active: false,
             saved_path: None,
+            journal: None,
         }
     }
 
@@ -274,6 +279,20 @@ impl OsmellRecorder {
 
     pub fn start(&mut self, label: &str) {
         self.start_at(label, now_secs());
+        // Open the crash-safe journal on the real-clock path only. `start_at`
+        // (used by tests with injected clocks) stays journal-free.
+        self.journal = AppendJournal::open(
+            &self.save_dir,
+            label,
+            &self.preset_name,
+            now_secs() * 1000.0,
+            self.baseline_sec,
+            self.exposure_sec,
+            self.recovery_sec,
+            self.n_sensors,
+            &self.channel_names,
+        )
+        .ok();
     }
 
     pub fn write_sample(&mut self, sensor_values: &[f64]) {
@@ -287,6 +306,7 @@ impl OsmellRecorder {
     pub fn cancel(&mut self) {
         self.active = false;
         self.phases.clear();
+        self._finish_journal();
         log::info!("OsmellRecorder cancelled");
     }
 
@@ -295,7 +315,9 @@ impl OsmellRecorder {
             return self.saved_path.clone();
         }
         self.active = false;
-        self._build_and_write()
+        let result = self._build_and_write();
+        self._finish_journal();
+        result
     }
 
     // ---- lifecycle (injected clock, used by tests) ----
@@ -338,6 +360,10 @@ impl OsmellRecorder {
         let vals: Vec<f64> = (0..self.n_sensors)
             .map(|i| sensor_values.get(i).copied().unwrap_or(f64::NAN))
             .collect();
+        if let Some(j) = self.journal.as_mut() {
+            let phase = self.phases[self.phase_idx].name;
+            let _ = j.append(elapsed_ms, phase, &vals);
+        }
         let p = &mut self.phases[self.phase_idx];
         p.timestamps_ms.push(elapsed_ms);
         p.samples.push(vals);
@@ -367,11 +393,21 @@ impl OsmellRecorder {
         if self.phase_idx >= self.phases.len() {
             self.active = false;
             self._build_and_write();
+            self._finish_journal();
             return;
         }
         let p = &mut self.phases[self.phase_idx];
         p.start_time = Some(now);
         log::info!("OsmellRecorder phase -> {}", p.name);
+    }
+
+    /// Drop the append-only journal now that the session reached a final state
+    /// (saved or cancelled) — the data lives in the `.osmell`/CSV or is gone.
+    fn _finish_journal(&mut self) {
+        if let Some(mut j) = self.journal.take() {
+            j.flush();
+            j.finish_ok();
+        }
     }
 
     // ---- bundle building ----
@@ -645,6 +681,173 @@ pub struct PhaseSnapshot {
     pub sample_count: usize,
 }
 
+/// One recovered (crash-left-over) session, described for the UI before import.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveredSession {
+    pub journal_path: String,
+    pub label: String,
+    pub preset: String,
+    pub rec_start_epoch_ms: f64,
+    pub baseline_sec: f64,
+    pub exposure_sec: f64,
+    pub recovery_sec: f64,
+    pub n_sensors: usize,
+    pub sample_count: usize,
+}
+
+/// Scan the recordings dir for crash-left-over `.journal` files and describe
+/// them so the UI can offer "recover N interrupted sessions".
+pub fn recover_sessions(dir: &Path) -> Vec<RecoveredSession> {
+    journal::scan(dir)
+        .iter()
+        .filter_map(|p| journal::recover(p).ok())
+        .map(|s| RecoveredSession {
+            journal_path: s.path.to_string_lossy().to_string(),
+            label: s.label.clone(),
+            preset: s.preset.clone(),
+            rec_start_epoch_ms: s.rec_start_epoch_ms,
+            baseline_sec: s.baseline_sec,
+            exposure_sec: s.exposure_sec,
+            recovery_sec: s.recovery_sec,
+            n_sensors: s.n_sensors,
+            sample_count: s.rows.len(),
+        })
+        .collect()
+}
+
+/// Rebuild a `.osmell` bundle from a leftover journal and return its path.
+/// On success the journal is removed. This is the crash-recovery write path
+/// and mirrors `OsmellRecorder::_build_and_write`.
+pub fn build_osmell_from_journal(j: &JournalSession) -> Result<PathBuf, String> {
+    if j.rows.is_empty() {
+        return Err(format!("journal {} has no recoverable samples", j.path.display()));
+    }
+    let n_cols = j.rows[0].2.len().max(1);
+    let all_ts: Vec<f64> = j.rows.iter().map(|r| r.0).collect();
+    let all_vals: Vec<Vec<f64>> = j.rows.iter().map(|r| r.2.clone()).collect();
+    let from_phase: Vec<&str> = j.rows.iter().map(|r| r.1.as_str()).collect();
+
+    // Dead-channel detection (match `_build_and_write`).
+    let mut active_idx: Vec<usize> = Vec::new();
+    for i in 0..n_cols {
+        let col: Vec<f64> = all_vals
+            .iter()
+            .filter_map(|row| row.get(i).copied().filter(|v| v.is_finite()))
+            .collect();
+        if col.is_empty() {
+            continue;
+        }
+        let mean = col.iter().sum::<f64>() / col.len() as f64;
+        let variance = col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / col.len() as f64;
+        let std = variance.sqrt();
+        let cv = if mean.abs() > 1e-9 { std / mean.abs() } else { 0.0 };
+        if cv > DEAD_CV_THRESHOLD {
+            active_idx.push(i);
+        }
+    }
+    if active_idx.is_empty() {
+        active_idx = (0..n_cols).collect();
+    }
+
+    let dead_ids: Vec<String> = (0..n_cols)
+        .filter(|i| !active_idx.contains(i))
+        .map(|i| channel_id(i, &j.channel_names))
+        .collect();
+    let channel_ids: Vec<String> = active_idx.iter().map(|&i| channel_id(i, &j.channel_names)).collect();
+
+    // Sampling-rate estimate from the median inter-sample gap (Hz), clamped >= 0.1.
+    let mut sr_hz = 0.1f64;
+    if all_ts.len() > 1 {
+        let mut diffs: Vec<f64> = all_ts.windows(2).map(|w| w[1] - w[0]).collect();
+        diffs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let med_ms = diffs[diffs.len() / 2];
+        if med_ms > 0.0 {
+            sr_hz = ((1000.0 / med_ms) * 100.0).round() / 100.0;
+        }
+    }
+
+    // One event per phase at its first timestamp.
+    let mut events: Vec<Value> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for (phase_name, ts_ms) in from_phase.iter().zip(all_ts.iter()) {
+        if !seen.contains(phase_name) {
+            seen.push(phase_name);
+            events.push(json!({"label": phase_name, "startMs": *ts_ms as i64}));
+        }
+    }
+
+    let data: Vec<(String, Vec<f64>)> = active_idx
+        .iter()
+        .map(|&i| (channel_id(i, &j.channel_names), all_vals.iter().map(|row| row[i]).collect()))
+        .collect();
+
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+    let duration_ms = if all_ts.len() > 1 {
+        (all_ts[all_ts.len() - 1] - all_ts[0]) as i64
+    } else {
+        0
+    };
+
+    let mut phases_obj = serde_json::Map::new();
+    for phase in PHASE_ORDER.iter() {
+        let count = from_phase.iter().filter(|p| *p == phase).count();
+        let dur = match *phase {
+            PHASE_BASELINE => j.baseline_sec,
+            PHASE_EXPOSURE => j.exposure_sec,
+            _ => j.recovery_sec,
+        };
+        phases_obj.insert(phase.to_string(), json!({"durationSec": dur, "sampleCount": count}));
+    }
+
+    let mut session = json!({
+        "role": "single",
+        "label": j.label,
+        "groupId": j.label,
+        "recordedAt": recorded_at,
+        "durationMs": duration_ms,
+        "recovered": true,
+    });
+    if !j.preset.is_empty() {
+        session["notes"] = json!(j.preset);
+    }
+
+    let manifest = json!({
+        "osmell": {"formatVersion": OSMELL_FORMAT_VERSION},
+        "sensor": {
+            "sensorType": "mox",
+            "channels": channel_ids
+                .iter()
+                .map(|cid| json!({"id": cid, "unit": "adc"}))
+                .collect::<Vec<Value>>(),
+            "samplingRateHz": sr_hz,
+            "timeColumn": "timestamp_ms",
+        },
+        "session": session,
+        "software": {"recorder": "Osmograph", "preset": j.preset},
+        "recording": {
+            "protocol": "before-during-after",
+            "phases": Value::Object(phases_obj),
+            "deadChannels": dead_ids,
+            "totalChannels": n_cols,
+            "activeChannels": active_idx.len(),
+            "recovered": true,
+        }
+    });
+
+    let safe = sanitize_label(&j.label);
+    let ts_str = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
+    let path = j.path.with_file_name(format!("{}_{}_recovered.osmell", ts_str, safe));
+
+    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
+    let events_json = serde_json::to_string_pretty(&json!(events)).map_err(|e| e.to_string())?;
+    let data_csv = serialize_csv(&all_ts, &data);
+
+    write_bundle(&path, &manifest_json, &data_csv, &events_json)?;
+    let _ = std::fs::remove_file(&j.path);
+    log::info!("Recovered {} -> {}", j.path.display(), path.display());
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -862,5 +1065,36 @@ mod tests {
         assert!(phase_instruction("baseline").contains("stabilise"));
         assert!(phase_instruction("exposure").contains("Introduce"));
         assert!(phase_instruction("recovery").contains("Remove"));
+    }
+
+    #[test]
+    fn journal_recovery_builds_osmell() {
+        let dir = std::env::temp_dir().join("osm_test_osmell_journal_recovery");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Simulate a crash-interrupted recording by writing a journal directly.
+        let names: Vec<String> = vec!["VOC".into(), "LPG".into()];
+        let mut j = super::journal::AppendJournal::open(
+            &dir, "crashed session", "6-sensor-full", 1700000000000.0,
+            30.0, 60.0, 30.0, 2, &names,
+        ).unwrap();
+        for i in 0..30 {
+            let t = i as f64 * 100.0;
+            let phase = if t < 30000.0 { "baseline" } else if t < 90000.0 { "exposure" } else { "recovery" };
+            j.append(t, phase, &[1000.0 + i as f64, 2000.0 + i as f64]).unwrap();
+        }
+        j.flush();
+        drop(j);
+
+        let mut left = super::journal::scan(&dir);
+        assert_eq!(left.len(), 1);
+        let session = super::journal::recover(&left.pop().unwrap()).unwrap();
+        let out = build_osmell_from_journal(&session).unwrap();
+        assert_eq!(out.extension().and_then(|e| e.to_str()), Some("osmell"));
+        assert!(out.exists());
+        // Journal should be removed after successful recovery.
+        assert!(!session.path.exists(), "journal removed on recovery");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

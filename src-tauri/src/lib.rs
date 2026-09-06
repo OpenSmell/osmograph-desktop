@@ -1206,6 +1206,54 @@ fn cancel_phase_recording(state: State<AppState>) -> Result<(), String> {
     Ok(())
 }
 
+/// List crash-left-over recording journals in the recordings dir, so the UI can
+/// offer to recover sessions that were interrupted before save.
+#[tauri::command]
+fn recover_phase_sessions(state: State<AppState>) -> Result<Vec<data::osmell::RecoveredSession>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    Ok(data::osmell::recover_sessions(&dir))
+}
+
+/// Rebuild one leftover journal into a `.osmell` and index it in the library.
+#[tauri::command]
+fn recover_phase_session(
+    state: State<AppState>,
+    journal_path: String,
+) -> Result<String, String> {
+    let path = std::path::PathBuf::from(&journal_path);
+    let session = data::journal::recover(&path)?;
+    let new_path = data::osmell::build_osmell_from_journal(&session)?;
+
+    let label = session.label.clone();
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let n_samples = session.rows.len();
+    let total_duration = if session.rows.len() > 1 {
+        (session.rows[session.rows.len() - 1].0 - session.rows[0].0) / 1000.0
+    } else {
+        0.0
+    };
+    let quality = SessionIndex::provision_quality(total_duration, n_samples);
+    let fid = SessionIndex::make_file_id(chrono::Local::now());
+    let record = SessionRecord {
+        file_id: fid.clone(),
+        substance: label.clone(),
+        label: "Recovered".to_string(),
+        csv_path: new_path.to_string_lossy().to_string(),
+        timestamp: now_secs(),
+        duration_sec: total_duration,
+        sensor_count: 0,
+        preset_name: session.preset.clone(),
+        notes: "Recovered after an interruption".to_string(),
+        opensmell_result: None,
+        quality_report: None,
+        quality,
+    };
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    index.upsert(record);
+    let _ = index.save(&dir);
+    Ok(new_path.to_string_lossy().to_string())
+}
+
 /// Poll the recorder; advances phases on the wall-clock base and returns state.
 #[tauri::command]
 fn get_phase_recorder_state(state: State<AppState>) -> Result<PhaseRecorderState, String> {
@@ -2911,6 +2959,8 @@ pub fn run() {    env_logger::init();
             burnin_get_status,
             burnin_start,
             burnin_reset,
+            recover_phase_sessions,
+            recover_phase_session,
             discover_plugins,
             get_plugins_dir,
             classifier::train_classifier,
