@@ -161,15 +161,57 @@ let activePreset = '6-sensor-full';
 // the right firmware/toolchain: 'esp32' | 'arduino_uno' | '' (unknown).
 const portBoardMap = new Map<string, string>();
 let chNames: string[] = PRESETS['6-sensor-full'].sensors;
-let traceData: number[][] = chNames.map(() => []);
+// Fixed-size rolling buffers: push is O(1) regardless of window length (no
+// array `shift` memmove on every sample). Reads mirror the array surface the
+// trace renderer uses: length / map / slice / last.
+class RingBuffer {
+  private buf: Float64Array;
+  private start = 0;
+  private size = 0;
+  constructor(readonly capacity: number) {
+    this.buf = new Float64Array(capacity);
+  }
+  get length(): number { return this.size; }
+  push(v: number): void {
+    if (this.size < this.capacity) {
+      this.buf[(this.start + this.size) % this.capacity] = v;
+      this.size++;
+    } else {
+      this.buf[this.start] = v;
+      this.start = (this.start + 1) % this.capacity;
+    }
+  }
+  last(): number { return this.size ? this.buf[(this.start + this.size - 1) % this.capacity] : NaN; }
+  slice(from: number = 0, to: number = this.size): number[] {
+    if (this.size === 0 || to <= from) return [];
+    const a = Math.max(0, from), b = Math.min(this.size, to);
+    const out = new Array(b - a);
+    for (let i = a; i < b; i++) out[i - a] = this.buf[(this.start + i) % this.capacity];
+    return out;
+  }
+  map<T>(fn: (v: number) => T): T[] {
+    const out = new Array<T>(this.size);
+    for (let i = 0; i < this.size; i++) out[i] = fn(this.buf[(this.start + i) % this.capacity]);
+    return out;
+  }
+}
+function newTraceChannels(count: number): RingBuffer[] {
+  return Array.from({ length: count }, () => new RingBuffer(MAX_TRACE));
+}
+function newHistoryChannels(count: number): RingBuffer[] {
+  return Array.from({ length: count }, () => new RingBuffer(MAX_HISTORY));
+}
+let traceData: RingBuffer[] = newTraceChannels(chNames.length);
 // History ring: a longer rolling buffer (independent of the 800-sample display
 // window) so the user can rewind / scrub / fast-forward through recent history.
-let historyData: number[][] = chNames.map(() => []);
+let historyData: RingBuffer[] = newHistoryChannels(chNames.length);
 let liveScrollSeek = 0;      // samples back from the newest sample the view is anchored at (0 = live)
 let isLiveScrubbing = false; // a scrub is dragging / or user rewound: show frozen history window
 // Trading-view style hover crosshair + geometry captured each draw for mapping
 // cursor -> sample / value, plus interactive legend hover-highlight.
 let cursorPX = -1, cursorPY = -1;
+let traceDirty = true; // set when new samples / crosshair motion arrive; gates re-renders
+let lastTraceDraw = 0;
 let hoverSeries = -1; // legend chip hovered: highlight that channel's trace
 let lastPlotGeo: { wlen: number; gMin: number; gMax: number; slices: number[][] } | null = null;
 
@@ -181,6 +223,7 @@ let frozenTrace: number[][] = [];
 let liveWindowSamples = 800; // trailing samples drawn on the x-axis
 let liveRateHz = 20;         // updated from measured sample timing, falls back to 20
 let sessionLabels: { ts: number; anomaly: boolean; note: string }[] = [];let sessions: SessionRecord[] = [];
+let libSearchDebounce: number | null = null;
 let selectedSession: number | null = null;
 let compareFiles: string[] = [];
 const compareSeriesCache = new Map<string, SessionSeries | null>();
@@ -796,9 +839,10 @@ tracesCanvas?.addEventListener('mousemove', (e) => {
   const r = tracesCanvas.getBoundingClientRect();
   cursorPX = e.clientX - r.left;
   cursorPY = e.clientY - r.top;
+  traceDirty = true;
 });
-tracesCanvas?.addEventListener('mouseleave', () => { cursorPX = -1; cursorPY = -1; drawCrosshairReadout(null); });
-tracesCanvas?.addEventListener('click', () => { cursorPX = -1; cursorPY = -1; drawCrosshairReadout(null); });
+tracesCanvas?.addEventListener('mouseleave', () => { cursorPX = -1; cursorPY = -1; traceDirty = true; drawCrosshairReadout(null); });
+tracesCanvas?.addEventListener('click', () => { cursorPX = -1; cursorPY = -1; traceDirty = true; drawCrosshairReadout(null); });
 
 // === Data Ingestion ===
 async function ingestReading(values: number[]) {
@@ -807,11 +851,10 @@ async function ingestReading(values: number[]) {
   // events → applyDetectedChannels). Here we just push whatever the stream gave.
   for (let ch = 0; ch < Math.min(values.length, traceData.length); ch++) {
     traceData[ch].push(values[ch]);
-    if (traceData[ch].length > MAX_TRACE) traceData[ch].shift();
     historyData[ch].push(values[ch]);
-    if (historyData[ch].length > MAX_HISTORY) historyData[ch].shift();
   }
   sampleCount++;
+  traceDirty = true;
 
   // HUD readout
   const samplesEl = document.getElementById('plotSamples');
@@ -1915,7 +1958,7 @@ function renderFleet() {
 function updateOledPreview() {
   const layout = (document.getElementById('oledLayout') as HTMLSelectElement).value;
   const preview = document.getElementById('oledPreview')!;
-  const last = traceData.map(ch => ch[ch.length - 1] || 0);
+  const last = traceData.map(ch => ch.last() || 0);
   const previewLines = chNames.slice(0, 6).map((name, i) =>
     `CH${i + 1}: ${name.padEnd(8)} ${(last[i] || 0).toFixed(0).padStart(5)} Ω`
   ).join('\n');
@@ -2005,8 +2048,9 @@ function setChannelCount(n: number, names?: string[]) {
   } else {
     chNames = Array.from({ length: next }, (_, i) => PRESETS[activePreset]?.sensors[i] || `CH${i + 1}`);
   }
-  traceData = chNames.map(() => []);
-  historyData = chNames.map(() => []);
+  traceData = newTraceChannels(next);
+  historyData = newHistoryChannels(next);
+  traceDirty = true;
   buildLegend();
   const sc = document.getElementById('sysChannels') as HTMLInputElement | null;
   if (sc && sc.value !== String(next)) sc.value = String(next);
@@ -2307,7 +2351,8 @@ function applyCustomNames() {
     chNames = [...names];
   }
   channelKinds = [];
-  traceData = chNames.map(() => []);
+  traceData = newTraceChannels(channelCount);
+  traceDirty = true;
   buildLegend();
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(channelCount);
@@ -2331,7 +2376,9 @@ function onPresetChange(preset: string) {
   chNames = p.sensors;
   channelCount = p.sensors.length;
   channelKinds = [];
-  traceData = chNames.map(() => []);
+  traceData = newTraceChannels(channelCount);
+  historyData = newHistoryChannels(channelCount);
+  traceDirty = true;
   buildLegend();
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(channelCount);
@@ -2848,7 +2895,10 @@ document.getElementById('compareRef')!.addEventListener('change', (e) => {
 });
 
 document.getElementById('libRefresh')!.addEventListener('click', () => reloadLibrary());
-document.getElementById('libSearch')?.addEventListener('input', () => renderLibrary());
+document.getElementById('libSearch')?.addEventListener('input', () => {
+  if (libSearchDebounce !== null) clearTimeout(libSearchDebounce);
+  libSearchDebounce = window.setTimeout(renderLibrary, 150);
+});
 
 document.getElementById('inspAnalyze')!.addEventListener('click', async () => {
   const s = sessions[selectedSession ?? -1];
@@ -3638,6 +3688,26 @@ async function pollPhaseRecorder() {
 let recPhaseActive = false;
 let prevPhaseActive = false;
 let autoFinalized = false;
+
+// Adaptive phase-recorder polling: while a recording runs (or its modal is on
+// screen) we need fresh state every 500 ms for the HUD and auto-finalize; once
+// idle a slow 4 s heartbeat still catches externally-started recordings without
+// burning an IPC round-trip every half second for nothing.
+let phasePollBusy = false;
+let phasePollTimer: number | null = null;
+
+async function phasePollTick() {
+  if (!phasePollBusy) {
+    phasePollBusy = true;
+    try {
+      await pollPhaseRecorder();
+    } finally {
+      phasePollBusy = false;
+    }
+  }
+  const fast = recPhaseActive || prevPhaseActive || document.getElementById('recordModal')?.style.display === 'flex';
+  phasePollTimer = window.setTimeout(phasePollTick, fast ? 500 : 4000);
+}
 
 // A recording is only meaningful if a device is actually streaming data. This
 // returns true when we're connected AND fresh readings are arriving (same
@@ -4663,6 +4733,7 @@ function toggleLivePause() {
     liveScrollSeek = 0;
     isLiveScrubbing = false;
   }
+  traceDirty = true;
   updateTransportUI();
 }
 function setLiveWindow(samples: number) {
@@ -4673,15 +4744,17 @@ function setLiveWindow(samples: number) {
     liveScrollSeek = Math.max(0, maxSeek);
     isLiveScrubbing = liveScrollSeek > 0;
   }
+  traceDirty = true;
   updateTransportUI();
 }
 function clearLiveView() {
-  traceData = traceData.map(() => []);
-  historyData = historyData.map(() => []);
+  traceData = newTraceChannels(traceData.length);
+  historyData = newHistoryChannels(historyData.length);
   frozenTrace = [];
   liveScrollSeek = 0;
   isLiveScrubbing = false;
   lastSampleTime = 0;
+  traceDirty = true;
   updateTransportUI();
   updateScrubber();
 }
@@ -4690,6 +4763,7 @@ function setLiveSeek(offsetSamples: number) {
   const maxSeek = Math.max(0, (historyData[0] ? historyData[0].length : 0) - liveWindowSamples);
   liveScrollSeek = Math.max(0, Math.min(maxSeek, Math.round(offsetSamples)));
   isLiveScrubbing = liveScrollSeek > 0;
+  traceDirty = true;
   updateTransportUI();
   updateScrubber();
 }
@@ -4703,7 +4777,7 @@ function liveTotalHistory(): number {
   }
   return historyData[0] ? historyData[0].length : 0;
 }
-function liveHistorySource(): number[][] {
+function liveHistorySource(): number[][] | RingBuffer[] {
   return (livePaused && frozenTrace.length && frozenTrace[0] && frozenTrace[0].length > 0) ? frozenTrace : historyData;
 }
 function liveMaxSeek(): number { return Math.max(0, liveTotalHistory() - liveWindowSamples); }
@@ -4859,8 +4933,16 @@ function handleTracesWheel(ev: WheelEvent) {
 tracesCanvas.addEventListener('wheel', handleTracesWheel, { passive: false });
 
 // === Animation Loop ===
+// The canvas only changes when new samples arrive, the crosshair moves, or the
+// user scrubs — gate re-renders on that instead of repainting at 60 fps while
+// idle. A slow 250 ms heartbeat keeps the time axis / HUD ticking on still data.
 function animate() {
-  drawTraces();
+  const now = performance.now();
+  if (traceDirty || now - lastTraceDraw > 250) {
+    drawTraces();
+    lastTraceDraw = now;
+    traceDirty = false;
+  }
   updateSessionTime();
   updateTransportUI();
   requestAnimationFrame(animate);
@@ -4869,7 +4951,7 @@ function animate() {
 // === Periodic Updates ===
 setInterval(updateSensorHealth, 2000);
 setInterval(updateOledPreview, 1000);
-setInterval(pollPhaseRecorder, 500);
+phasePollTick();
 setInterval(reloadClassifiers, 4000);
 setInterval(refreshBurnIn, 1000);
 

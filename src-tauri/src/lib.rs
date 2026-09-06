@@ -44,6 +44,7 @@ pub struct AppState {
     pub phase_recorder: Arc<Mutex<Option<OsmellRecorder>>>,
     pub recordings_dir: Arc<Mutex<std::path::PathBuf>>,
     pub session_index: Arc<Mutex<SessionIndex>>,
+    pub csv_summaries: Arc<Mutex<std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>>>,
     pub wifi_connected: Arc<Mutex<bool>>,
     pub wifi_host: Arc<Mutex<Option<String>>>,
     pub ble_connected: Arc<Mutex<bool>>,
@@ -75,6 +76,7 @@ impl Default for AppState {
             phase_recorder: Arc::new(Mutex::new(None)),
             recordings_dir: Arc::new(Mutex::new(rec_dir.clone())),
             session_index: Arc::new(Mutex::new(SessionIndex::load(&rec_dir))),
+            csv_summaries: Arc::new(Mutex::new(std::collections::HashMap::new())),
             wifi_connected: Arc::new(Mutex::new(false)),
             wifi_host: Arc::new(Mutex::new(None)),
             ble_connected: Arc::new(Mutex::new(false)),
@@ -1751,10 +1753,17 @@ fn get_recordings_dir(state: State<AppState>) -> Result<String, String> {
 #[tauri::command]
 fn list_recordings(state: State<AppState>) -> Result<Vec<RecordingFile>, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    scan_recordings(&dir)
+    let files = {
+        let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+        scan_recordings(&dir, &mut cache)?
+    };
+    Ok(files)
 }
 
-fn scan_recordings(dir: &std::path::Path) -> Result<Vec<RecordingFile>, String> {
+fn scan_recordings(
+    dir: &std::path::Path,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+) -> Result<Vec<RecordingFile>, String> {
     let mut out = Vec::new();
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
@@ -1765,7 +1774,7 @@ fn scan_recordings(dir: &std::path::Path) -> Result<Vec<RecordingFile>, String> 
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
-                let (rows, sensor_count, duration_sec) = parse_csv_summary(&path);
+                let (rows, sensor_count, duration_sec) = parse_csv_summary_cached(&path, cache);
                 out.push(RecordingFile {
                     path: path.to_string_lossy().to_string(),
                     name: name.clone(),
@@ -1786,6 +1795,42 @@ fn scan_recordings(dir: &std::path::Path) -> Result<Vec<RecordingFile>, String> 
     }
     out.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap());
     Ok(out)
+}
+
+#[derive(Clone, Copy)]
+pub struct CsvSummarySnapshot {
+    mtime_nanos: u128,
+    len: u64,
+    rows: usize,
+    sensor_count: usize,
+    duration_sec: f64,
+}
+
+/// Stat-keyed parse cache: while a file's (mtime, size) are unchanged, reuse the
+/// previously parsed summary instead of re-reading the whole CSV on every
+/// library reload. `import_recordings` runs on each reload, so this turns a
+/// full-file rescan into one O(1) lookup per recording.
+fn parse_csv_summary_cached(
+    path: &std::path::Path,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+) -> (usize, usize, f64) {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return (0, 0, 0.0),
+    };
+    let mtime = meta.modified().ok().and_then(|m| m.duration_since(UNIX_EPOCH).ok());
+    let key = (mtime.map(|d| d.as_nanos()).unwrap_or(0), meta.len());
+    if let Some(c) = cache.get(path) {
+        if c.mtime_nanos == key.0 && c.len == key.1 {
+            return (c.rows, c.sensor_count, c.duration_sec);
+        }
+    }
+    let (rows, sensor_count, duration_sec) = parse_csv_summary(path);
+    cache.insert(
+        path.to_path_buf(),
+        CsvSummarySnapshot { mtime_nanos: key.0, len: key.1, rows, sensor_count, duration_sec },
+    );
+    (rows, sensor_count, duration_sec)
 }
 
 /// Best-effort header/rows/duration scan of a recorded CSV (Python library import parity).
@@ -1858,7 +1903,10 @@ fn file_id_from_filename(name: &str) -> String {
 #[tauri::command]
 fn import_recordings(state: State<AppState>) -> Result<Vec<SessionRecord>, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    let files = scan_recordings(&dir)?;
+    let files = {
+        let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+        scan_recordings(&dir, &mut cache)?
+    };
     let mut imported = Vec::new();
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
     for f in files {
@@ -1873,7 +1921,9 @@ fn import_recordings(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
         index.upsert(record.clone());
         imported.push(record);
     }
-    let _ = index.save(&dir);
+    if !imported.is_empty() {
+        let _ = index.save(&dir);
+    }
     Ok(imported)
 }
 
@@ -1905,9 +1955,11 @@ fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<Sessio
         let path = std::path::PathBuf::from(&p);
         let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {}", p, e))?;
         if meta.is_dir() {
-            collect_recordings_in_tree(&path, &mut files);
+            let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+            collect_recordings_in_tree(&path, &mut files, &mut cache);
         } else if matches_file_ext(&path) {
-            if let Some(rf) = recording_from_path(&path) {
+            let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+            if let Some(rf) = recording_from_path(&path, &mut cache) {
                 files.push(rf);
             }
         }
@@ -1944,13 +1996,16 @@ fn matches_file_ext(path: &std::path::Path) -> bool {
 }
 
 /// Read a single file into a `RecordingFile` (generalizes `scan_recordings`).
-fn recording_from_path(path: &std::path::Path) -> Option<RecordingFile> {
+fn recording_from_path(
+    path: &std::path::Path,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+) -> Option<RecordingFile> {
     let meta = std::fs::metadata(path).ok()?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    let (rows, sensor_count, duration_sec) = parse_csv_summary(path);
+    let (rows, sensor_count, duration_sec) = parse_csv_summary_cached(path, cache);
     Some(RecordingFile {
         path: path.to_string_lossy().to_string(),
         name: name.clone(),
@@ -1969,7 +2024,11 @@ fn recording_from_path(path: &std::path::Path) -> Option<RecordingFile> {
 }
 
 /// Recursively scan a directory tree for recording files.
-fn collect_recordings_in_tree(dir: &std::path::Path, out: &mut Vec<RecordingFile>) {
+fn collect_recordings_in_tree(
+    dir: &std::path::Path,
+    out: &mut Vec<RecordingFile>,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -1981,9 +2040,9 @@ fn collect_recordings_in_tree(dir: &std::path::Path, out: &mut Vec<RecordingFile
             Err(_) => continue,
         };
         if meta.is_dir() {
-            collect_recordings_in_tree(&path, out);
+            collect_recordings_in_tree(&path, out, cache);
         } else if matches_file_ext(&path) {
-            if let Some(rf) = recording_from_path(&path) {
+            if let Some(rf) = recording_from_path(&path, cache) {
                 out.push(rf);
             }
         }
