@@ -679,6 +679,143 @@
     .boot-banner.show { display: flex; }
     .boot-banner .bb-fill { flex: 1; }
     .boot-banner button { padding: 3px 10px; font-family: var(--font-mono); font-size: 10px; }
+
+    /* === Guided analysis banner === */
+    .guided-banner {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-shrink: 0;
+      margin: 10px 10px 0;
+      padding: 8px 12px;
+      font-family: var(--font-mono);
+      background: color-mix(in srgb, var(--bg-2) 85%, transparent);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--green);
+      border-radius: var(--radius-sm);
+    }
+    .gb-step {
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--bg-1);
+      background: var(--green);
+      border-radius: 50%;
+      clip-path: polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%);
+    }
+    .gb-copy {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+      min-width: 0;
+      flex: 1;
+    }
+    .gb-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      color: var(--text-0);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gb-sub {
+      font-size: 10px;
+      letter-spacing: 0.03em;
+      color: var(--text-2);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .gb-fill { flex: 1; }
+    .guided-banner #gbAction {
+      padding: 4px 12px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.06em;
+      white-space: nowrap;
+    }
+    .gi-x {
+      flex-shrink: 0;
+      background: none;
+      border: none;
+      color: var(--text-3);
+      font-size: 11px;
+      cursor: pointer;
+      padding: 2px 4px;
+    }
+    .gi-x:hover { color: var(--text-0); background: none; }
+    .gb-peek {
+      align-self: flex-start;
+      margin: 10px 10px 0;
+      padding: 3px 10px;
+      background: color-mix(in srgb, var(--bg-2) 85%, transparent);
+      border: 1px solid var(--border-strong);
+      border-left: 3px solid var(--green);
+      border-radius: var(--radius-sm);
+      color: var(--text-2);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+    }
+    .gb-peek:hover { color: var(--text-0); }
+
+    /* === First-run guided intro card === */
+    .guided-intro {
+      flex-shrink: 0;
+      margin: 10px 10px 0;
+      padding: 10px 14px;
+      background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+      border: 1px solid var(--green);
+      border-radius: var(--radius-sm);
+      font-family: var(--font-mono);
+    }
+    .gi-head {
+      display: flex;
+      align-items: center;
+      color: var(--green);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.16em;
+    }
+    .gi-head .gi-x { margin-left: auto; }
+    .gi-title {
+      margin-top: 6px;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--text-0);
+    }
+    .gi-step {
+      display: flex;
+      gap: 8px;
+      margin-top: 7px;
+      font-size: 10.5px;
+      color: var(--text-1);
+      letter-spacing: 0.03em;
+      line-height: 1.5;
+    }
+    .gi-step b { color: var(--green); flex-shrink: 0; }
+    .gi-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .gi-actions button {
+      padding: 4px 12px;
+      font-size: 10px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.06em;
+    }
+    .tabbar-spacer { flex: 1; }
+    #uiModeBtn { color: var(--text-3); font-size: 10px; }
+    #uiModeBtn:hover { color: var(--text-0); }
     /* Reserved under-graph dock: spans only the traces column, never the side
        rail, so the fingerprint keeps its full height. */
     .dock {
@@ -2090,12 +2227,40 @@
       <button class="tab-btn" data-tab="train">Train</button>
       <button class="tab-btn" data-tab="fleet">Fleet <span class="badge" id="fleetBadge" style="display:none">0</span></button>
       <button class="tab-btn" data-tab="system">System</button>
+      <div class="tabbar-spacer"></div>
+      <button class="tab-btn" id="uiModeBtn" title="Switch between the guided flow (basic tabs only) and all tools">◈ Guided</button>
     </nav>
 
     <!-- Main Content -->
     <div class="content">
       <!-- ===== DASHBOARD ===== -->
       <div class="tab-panel active" id="panel-dashboard">
+        <div class="guided-intro" id="guidedIntro" style="display:none">
+          <div class="gi-head">
+            <span>GUIDED ANALYSIS</span>
+            <button class="gi-x" id="giClose" title="Dismiss">✕</button>
+          </div>
+          <div class="gi-title">The e-nose flow, guided.</div>
+          <div class="gi-step"><b>1 · Connect</b><span>Plug in a board, pick its port (Serial / WiFi / BLE), and press Connect.</span></div>
+          <div class="gi-step"><b>2 · Warm up</b><span>Smellholt builds the detection baseline — wait for the sensors to settle.</span></div>
+          <div class="gi-step"><b>3 · Record</b><span>Name the substance and run a Baseline → Exposure → Recovery session.</span></div>
+          <div class="gi-step"><b>4 · Review</b><span>Get a quality report in the Library and compare sessions side-by-side.</span></div>
+          <div class="gi-actions">
+            <button id="giGuided" class="green">Start guided mode</button>
+            <button id="giFull">Show all tools</button>
+          </div>
+        </div>
+        <div class="guided-banner" id="guidedBanner">
+          <span class="gb-step" id="gbStep">1</span>
+          <div class="gb-copy">
+            <span class="gb-title" id="gbTitle">Connect your e-nose</span>
+            <span class="gb-sub" id="gbSub">Plug in a device, pick its port, and press Connect in the header.</span>
+          </div>
+          <span class="gb-fill"></span>
+          <button id="gbAction" class="green" style="display:none"></button>
+          <button class="gi-x" id="gbDismiss" title="Collapse the guide">—</button>
+        </div>
+        <button id="gbPeek" class="gb-peek" style="display:none" title="Expand the guide">▶ Guide</button>
         <div class="boot-banner" id="bootBanner">
           <span style="color:var(--yellow);font-weight:700">⚠ BOOTLOADER</span>
           <span>This device is answering in bootloader mode — it will not stream data until it is flashed. Firmware may be missing or corrupt.</span>

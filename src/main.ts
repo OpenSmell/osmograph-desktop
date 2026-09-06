@@ -355,18 +355,23 @@ interface LiveSnapshot {
 }
 
 // === Tab Navigation ===
+function switchTab(tab: string) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  const btn = document.querySelector<HTMLElement>(`.tab-btn[data-tab="${tab}"]`);
+  btn?.classList.add('active');
+  document.getElementById(`panel-${tab}`)?.classList.add('active');
+  if (tab === 'dashboard') {
+    requestAnimationFrame(() => resizeTraces());
+  } else if (tab === 'compare') {
+    requestAnimationFrame(() => updateCompare());
+  }
+}
+
 document.querySelectorAll('.tab-btn').forEach(btn => {
+  if (!(btn as HTMLElement).dataset.tab) return; // uiMode toggle isn't a tab
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    const tab = (btn as HTMLElement).dataset.tab!;
-    document.getElementById(`panel-${tab}`)?.classList.add('active');
-    if (tab === 'dashboard') {
-      requestAnimationFrame(() => resizeTraces());
-    } else if (tab === 'compare') {
-      requestAnimationFrame(() => updateCompare());
-    }
+    switchTab((btn as HTMLElement).dataset.tab!);
   });
 });
 
@@ -903,6 +908,11 @@ async function ingestReading(values: number[]) {
       } else {
         statusDot.className = connected ? 'status-dot ok' : 'status-dot';
       }
+      // Guided banner warm-up signal: the backend is the single source of
+      // truth for whether the detection baseline is still settling.
+      flowWarming = result.warming_up;
+      if (result.baseline_progress != null) flowWarmPct = result.baseline_progress;
+      recomputeFlow();
     }
   } catch (err) {
     console.error('Detection error:', err);
@@ -1077,6 +1087,7 @@ async function toggleConnection() {
     document.getElementById('statusDot')!.className = 'status-dot';
     setPlotLink(false);
     setMsg('');
+    flowResetForDisconnect();
     return;
   }
 
@@ -1112,6 +1123,7 @@ async function toggleConnection() {
       document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('WiFi connected', true);
       saveLastConnection();
+      onFlowConnected();
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('WiFi connect failed:', e);
@@ -1139,6 +1151,7 @@ async function toggleConnection() {
       document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('BLE connected', true);
       saveLastConnection();
+      onFlowConnected();
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('BLE connect failed:', e);
@@ -1161,6 +1174,7 @@ async function toggleConnection() {
       document.getElementById('bootBanner')?.classList.remove('show');
       setMsg('Serial connected', true);
       saveLastConnection();
+      onFlowConnected();
     } catch (e) {
       setMsg(String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, ''));
       console.error('Connect failed:', e);
@@ -3597,6 +3611,7 @@ function buildPhaseBars(
 }
 
 function renderPhaseState(s: PhaseRecorderState) {
+  lastPhaseState = s;
   const hud = document.getElementById('phaseHud')!;
   hud.style.display = s.active ? '' : 'none';
   if (!s.active) return;
@@ -3645,16 +3660,22 @@ function addPhaseToLibrary(summary: PhaseRecordingSummary) {
 }
 
 async function stopPhaseRecordingFromUI() {
+  autoFinalized = true; // prevent the poll from also trying to finalize
   try {
     const summary = await invoke<PhaseRecordingSummary>('stop_phase_recording');
     addPhaseToLibrary(summary);
+    flowRecordActive = false;
+    flowReviewPending = true;
+    prevPhaseActive = false;
   } catch (e) {
     console.error('Stop phase recording failed:', e);
+    flowRecordActive = false;
   }
   recPhaseActive = false;
   sessionStart = null;
   setRecordButton(false);
   closeRecordModal();
+  recomputeFlow();
 }
 
 // Sync both record controls (header + graph-proximate) to the recording state.
@@ -3670,16 +3691,235 @@ function setRecordButton(active: boolean) {
   }
 }
 
+// === Guided Analysis Flow ===
+// The dashboard's guided banner walks the operator through the core loop:
+// connect → warm up → record → review. The step is *derived* from signals
+// already tracked in this module (connection, recorder activity, warm-up
+// report) so the banner never claims a state the backend hasn't confirmed.
+type FlowStep = 'idle' | 'warming' | 'ready' | 'recording' | 'reviewing';
+let flowStep: FlowStep = 'idle';
+let flowRecordActive = false;   // start/stop/cancel + recorder poll keep this honest
+let flowWarming = false;        // backend says the detection baseline isn't ready
+let flowWarmPct = 0;            // baseline_progress 0..1
+let flowReviewPending = false;  // a session just finished; offer the review
+let lastPhaseState: PhaseRecorderState | null = null; // cached for banner copy
+
+// After any signal that can change the step (connect, disconnect, ingest,
+// record start/stop, recorder poll) the flow re-derives and re-renders.
+function recomputeFlow(): void {
+  const next: FlowStep =
+    !connected ? 'idle'
+    : flowRecordActive ? 'recording'
+    : flowReviewPending ? 'reviewing'
+    : flowWarming ? 'warming'
+    : 'ready';
+  if (next !== flowStep) {
+    flowStep = next;
+    gbLastKey = '';
+  }
+  renderGuideBanner();
+}
+
+function onFlowConnected(): void {
+  // A freshly-connected e-nose needs to settle before detection can be
+  // trusted, so the default is "warming" until the first NORMAL report.
+  flowWarming = true;
+  flowWarmPct = 0;
+  flowReviewPending = false;
+  recomputeFlow();
+}
+
+function flowResetForDisconnect(): void {
+  flowRecordActive = false;
+  flowWarming = false;
+  flowWarmPct = 0;
+  flowReviewPending = false;
+  recomputeFlow();
+}
+
+// Banner render — no-op when the rendered copy hasn't actually changed so the
+// 10 Hz ingest loop can't cause DOM churn.
+let gbLastKey = '';
+interface GuideCfg {
+  n: number;
+  title: string;
+  sub: string;
+  actionText: string | null;
+  run: (() => void) | null;
+}
+function guideStepConfig(): GuideCfg {
+  const pct = Math.round(flowWarmPct * 100);
+  switch (flowStep) {
+    case 'idle':
+      return {
+        n: 1,
+        title: 'Connect your e-nose',
+        sub: 'Plug in a board, pick its port (Serial / WiFi / BLE), then press Connect in the header.',
+        actionText: '↻ Scan ports',
+        run: () => { void refreshPorts(); },
+      };
+    case 'warming':
+      if (!isStreamingActive()) {
+        return { n: 2, title: 'Connected — stabilizing', sub: 'Waiting for fresh readings while the sensors settle.', actionText: null, run: null };
+      }
+      return {
+        n: 2,
+        title: 'Warming up',
+        sub: flowWarmPct > 0
+          ? `Establishing the detection baseline… ${pct}% — keep the sensors at rest.`
+          : 'Establishing the detection baseline — keep the sensors at rest.',
+        actionText: null,
+        run: null,
+      };
+    case 'ready':
+      return {
+        n: 3,
+        title: 'Ready to record',
+        sub: 'Baseline is stable. Label the substance, then run a Baseline → Exposure → Recovery session.',
+        actionText: '● Record',
+        run: () => {
+          if (isStreamingActive()) openRecordModal();
+          else alertNotStreaming();
+        },
+      };
+    case 'recording': {
+      const s = lastPhaseState;
+      return {
+        n: 4,
+        title: 'Recording',
+        sub: s
+          ? `${s.current_phase_label} — ${s.current_phase_instruction} · ${fmtDur(s.total_elapsed)} / ${fmtDur(s.total_duration)}`
+          : 'Baseline → Exposure → Recovery session in progress.',
+        actionText: '■ End now',
+        run: () => {
+          if (recPhaseActive || prevPhaseActive) void stopPhaseRecordingFromUI();
+        },
+      };
+    }
+    case 'reviewing':
+      return {
+        n: 5,
+        title: 'Recording saved',
+        sub: 'Your session is in the Library — open the review for the full quality report.',
+        actionText: 'Review',
+        run: () => { void goReviewRecording(); },
+      };
+  }
+}
+
+function setGbText(id: string, v: string): void {
+  const el = document.getElementById(id);
+  if (el) el.textContent = v;
+}
+
+function renderGuideBanner(): void {
+  const banner = document.getElementById('guidedBanner');
+  const peek = document.getElementById('gbPeek');
+  if (!banner) return;
+  if (localStorage.getItem('osmograph.guidedBanner') === 'collapsed') {
+    banner.style.display = 'none';
+    if (peek) peek.style.display = '';
+    return;
+  }
+  if (peek) peek.style.display = 'none';
+  if (banner.style.display === 'none') banner.style.display = 'flex';
+  const cfg = guideStepConfig();
+  const key = `${cfg.n}|${cfg.title}|${cfg.sub}|${cfg.actionText ?? ''}`;
+  if (key === gbLastKey) return;
+  gbLastKey = key;
+  setGbText('gbStep', cfg.n.toString());
+  setGbText('gbTitle', cfg.title);
+  setGbText('gbSub', cfg.sub);
+  const act = document.getElementById('gbAction') as HTMLButtonElement | null;
+  if (act) {
+    act.style.display = cfg.actionText ? '' : 'none';
+    act.textContent = cfg.actionText ?? '';
+    act.onclick = cfg.run as unknown as ((ev: MouseEvent) => void) | null;
+  }
+}
+
+// Collapse / expand the guided banner (persisted across launches).
+document.getElementById('gbDismiss')!.addEventListener('click', () => {
+  localStorage.setItem('osmograph.guidedBanner', 'collapsed');
+  renderGuideBanner();
+});
+document.getElementById('gbPeek')!.addEventListener('click', () => {
+  localStorage.removeItem('osmograph.guidedBanner');
+  renderGuideBanner();
+});
+
+// Guided vs. all-tools UI mode: guides beginners toward the core loop by
+// hiding the advanced tabs (Compare / Train / Fleet / System).
+const FLOW_ADV_TABS = ['compare', 'train', 'fleet', 'system'];
+type UiMode = 'guided' | 'full';
+function currentUiMode(): UiMode {
+  return localStorage.getItem('osmograph.uiMode') === 'full' ? 'full' : 'guided';
+}
+function applyUiMode(mode: UiMode): void {
+  localStorage.setItem('osmograph.uiMode', mode);
+  FLOW_ADV_TABS.forEach(t => {
+    const b = document.querySelector<HTMLElement>(`.tab-btn[data-tab="${t}"]`);
+    if (b) b.style.display = mode === 'guided' ? 'none' : '';
+  });
+  const active = document.querySelector<HTMLElement>('.tab-btn.active');
+  if (active && active.dataset.tab && FLOW_ADV_TABS.includes(active.dataset.tab)) switchTab('dashboard');
+  const btn = document.getElementById('uiModeBtn');
+  if (btn) btn.textContent = mode === 'guided' ? '◈ Guided' : '◈ All tools';
+}
+document.getElementById('uiModeBtn')!.addEventListener('click', () => {
+  const next: UiMode = currentUiMode() === 'guided' ? 'full' : 'guided';
+  applyUiMode(next);
+  showToast(next === 'guided' ? 'Guided mode — basic tabs only.' : 'All tools — every tab is visible.');
+});
+
+// First-run wizard — one-time welcome to the flow, sets the UI mode.
+function maybeShowGuidedIntro(): void {
+  if (localStorage.getItem('osmograph.guidedIntroSeen')) return;
+  const card = document.getElementById('guidedIntro');
+  if (card) card.style.display = '';
+}
+function dismissGuidedIntro(mode: UiMode): void {
+  localStorage.setItem('osmograph.guidedIntroSeen', '1');
+  const card = document.getElementById('guidedIntro');
+  if (card) card.style.display = 'none';
+  applyUiMode(mode);
+  recomputeFlow();
+}
+document.getElementById('giGuided')!.addEventListener('click', () => dismissGuidedIntro('guided'));
+document.getElementById('giFull')!.addEventListener('click', () => dismissGuidedIntro('full'));
+document.getElementById('giClose')!.addEventListener('click', () => dismissGuidedIntro(currentUiMode()));
+
+// Review: jump to the Library and open (analyzing if needed) the newest session.
+async function goReviewRecording(): Promise<void> {
+  flowReviewPending = false;
+  recomputeFlow();
+  const search = document.getElementById('libSearch') as HTMLInputElement | null;
+  if (search) search.value = '';
+  switchTab('library');
+  await reloadLibrary();
+  if (sessions.length > 0) {
+    selectedSession = 0;
+    renderLibrary();
+    inspectSession(sessions[0]);
+    if (!sessions[0].quality_report) void analyzeLibrarySession(0);
+  }
+}
+
 async function pollPhaseRecorder() {
   try {
     const s = await invoke<PhaseRecorderState>('get_phase_recorder_state');
     renderPhaseState(s);
     setRecordButton(s.active);
+    if (s.active && !flowRecordActive) {
+      flowRecordActive = true;
+      recomputeFlow();
+    }
     if (!s.active && prevPhaseActive && !autoFinalized) {
       autoFinalized = true;
       await stopPhaseRecordingFromUI();
     }
     prevPhaseActive = s.active;
+    recomputeFlow();
   } catch (e) {
     console.error('Phase recorder poll error:', e);
   }
@@ -3806,11 +4046,14 @@ function updateProtocolSeq() {
     recPhaseActive = true;
     prevPhaseActive = true;
     autoFinalized = false;
+    flowRecordActive = true;
+    flowReviewPending = false;
     sessionStart = Date.now() / 1000;
     setRecordButton(true);
     document.getElementById('recSetup')!.style.display = 'none';
     document.getElementById('recLive')!.style.display = '';
     renderPhaseState(state);
+    recomputeFlow();
   } catch (e) {
     console.error('Start phase recording failed:', e);
   }
@@ -3827,11 +4070,14 @@ document.getElementById('recCancel')!.addEventListener('click', async () => {
   } catch (e) {
     console.error('Cancel phase recording failed:', e);
   }
-  recPhaseActive = false;
+  flowRecordActive = false;
+  flowReviewPending = false;
   prevPhaseActive = false;
+  recPhaseActive = false;
   sessionStart = null;
   document.getElementById('recordBtn')!.textContent = '● Record';
   closeRecordModal();
+  recomputeFlow();
 });
 
 // System sub-nav interactions
@@ -4371,6 +4617,7 @@ listen<{ code: number; message: string }>('serial-error', (event) => {
 
 function dropLink(reason: string) {
   connected = false;
+  flowResetForDisconnect();
   bootloaderHinted = false;
   autoChannels = 0;
   channelKinds = [];
@@ -5770,6 +6017,9 @@ onPresetChange('auto');
 renderHardwareProfile();
 applyCustomNames();
 renderSensorLibrary();
+applyUiMode(currentUiMode());
+maybeShowGuidedIntro();
+renderGuideBanner();
 // Core UI is wired and the window is interactive — hand control over now and
 // let the idempotent data fills below finish behind the fading boot overlay.
 bootLog('core wired');
