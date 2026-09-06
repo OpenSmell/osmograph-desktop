@@ -157,6 +157,9 @@ let bootloaderHinted = false; // device answered in bootloader during the curren
 let bootFlashShown = false;   // the Flash modal was already auto-offered during this bootloader stall
 let autoChannels = 0;         // channel count auto-detected from the live device stream (0 = none yet)
 let activePreset = '6-sensor-full';
+// Board type per serial port, from the last port refresh, so flashing can pick
+// the right firmware/toolchain: 'esp32' | 'arduino_uno' | '' (unknown).
+const portBoardMap = new Map<string, string>();
 let chNames: string[] = PRESETS['6-sensor-full'].sensors;
 let traceData: number[][] = chNames.map(() => []);
 // History ring: a longer rolling buffer (independent of the 800-sample display
@@ -898,20 +901,24 @@ async function refreshPorts() {
     const sel = document.getElementById('portSelect') as HTMLSelectElement;
     const cur = sel.value;
     sel.innerHTML = '<option value="">Select port...</option>';
+    portBoardMap.clear();
     for (const p of ports) {
       const opt = document.createElement('option');
       opt.value = p.name;
       const kind = p.kind;
+      // Map the raw kind to a board key that flash_firmware understands.
+      const board = (kind === 'osmograph-e-nose' || kind === 'esp32') ? 'esp32' :
+        kind === 'arduino_uno' ? 'arduino_uno' : '';
+      if (board) portBoardMap.set(p.name, board);
       const boardLabel = kind === 'osmograph-e-nose' ? 'ESP32 e-nose' :
-        kind && kind !== 'unknown-usb' ? kind.replace(/_/g, ' ').toUpperCase() : 'USB-SERIAL';
-      // Every USB/BT serial device is listed and connectable — Arduino, Pico,
-      // or any third-party controller — regardless of whether we recognise its
-      // VID:PID. Unknown boards still get the manufacturer/product name shown.
+        kind === 'arduino_uno' ? 'Arduino Uno' :
+        kind && kind !== 'unknown-usb' ? kind.replace(/_/g, ' ') : 'USB-SERIAL';
       const desc = p.description || p.manufacturer || '';
       opt.textContent = `${p.name} · ${boardLabel}${desc ? ' — ' + desc : ''}`;
       if (p.name === cur) opt.selected = true;
       sel.appendChild(opt);
     }
+    updateFwBoardLabel();
   } catch (e) {
     console.error('Port refresh failed:', e);
   }
@@ -2166,6 +2173,29 @@ function updatePreflight() {
   if (svg) svg.classList.toggle('energized', !clash && boot.length === 0 && duplicated.length === 0);
 }
 
+function boardDisplay(board: string): string {
+  if (board === 'esp32') return 'ESP32';
+  if (board === 'arduino_uno') return 'ARDUINO UNO';
+  return board ? board.replace(/_/g, ' ').toUpperCase() : '—';
+}
+
+function activeBoard(): string {
+  const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
+  return port ? portBoardMap.get(port) || '' : '';
+}
+
+function updateFwBoardLabel() {
+  const b = boardDisplay(activeBoard());
+  const label = document.getElementById('fwBoardLabel');
+  if (label) label.textContent = 'BOARD · ' + b;
+  const detail = document.getElementById('fwBoardDetail');
+  if (detail) detail.textContent = b;
+}
+
+function maxChannelsForBoard(board: string): number {
+  return board === 'arduino_uno' ? 6 : 12;
+}
+
 function renderRigSchematic() {
   const svg = document.getElementById('rigSchematic');
   const stamp = document.getElementById('schStamp');
@@ -2256,6 +2286,7 @@ function renderRigSchematic() {
     fp.textContent = label;
   }
   updatePreflight();
+  updateFwBoardLabel();
 }
 
 function refreshRigBlueprint() {
@@ -2782,6 +2813,7 @@ document.getElementById('detectBtn')!.addEventListener('click', async () => {
       sel.appendChild(opt);
     }
     sel.value = esp.port;
+    updateFwBoardLabel();
     status.textContent = `${esp.label} on ${esp.port} (${esp.vid_pid})${esp.serial_number ? ' · SN ' + esp.serial_number : ''}`;
   } catch (e) {
     status.textContent = `Detection failed: ${e}`;
@@ -3845,13 +3877,18 @@ document.getElementById('flashBtn')!.addEventListener('click', async () => {
   if (!port) return;
   const wifiSsid = (document.getElementById('fwSsid') as HTMLInputElement).value.trim();
   const wifiPassword = (document.getElementById('fwPass') as HTMLInputElement).value;
+  const board = portBoardMap.get(port) || 'esp32';
+  if (board === 'arduino_uno' && presetChannelCount(activePreset) > 6) {
+    document.getElementById('flashStatus')!.textContent = 'Arduino UNO has 6 analog inputs — pick a 6-channel (or smaller) rig preset.';
+    return;
+  }
   const fp = document.getElementById('flashProgress')!;
   fp.style.display = '';
   fp.classList.add('flashing');
   document.getElementById('flashStatus')!.textContent = 'Flashing...';
   document.getElementById('flashBar')!.style.width = '30%';
   try {
-    await invoke('flash_firmware', { port, preset: activePreset, nChannels: presetChannelCount(activePreset), sensorPins: [], wifiSsid, wifiPassword });
+    await invoke('flash_firmware', { port, preset: activePreset, nChannels: presetChannelCount(activePreset), sensorPins: [], wifiSsid, wifiPassword, board });
     document.getElementById('flashBar')!.style.width = '100%';
     document.getElementById('flashStatus')!.textContent = 'Complete — mDNS: osmograph.local (service _osmograph._tcp)';
   } catch (e) {
@@ -3879,6 +3916,8 @@ async function refreshToolchain() {
 document.getElementById('readMacBtn')!.addEventListener('click', async () => {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   if (!port) { document.getElementById('fwMac')!.textContent = 'Select a port first'; return; }
+  const board = portBoardMap.get(port) || '';
+  if (board !== 'esp32') { document.getElementById('fwMac')!.textContent = 'MAC read is ESP32-only — Arduino runs no esptool.'; return; }
   document.getElementById('fwMac')!.textContent = 'Reading…';
   try {
     const mac = await invoke<string>('read_mac', { port });
@@ -3891,6 +3930,8 @@ document.getElementById('readMacBtn')!.addEventListener('click', async () => {
 document.getElementById('eraseBtn')!.addEventListener('click', async () => {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   if (!port) { document.getElementById('flashStatus')!.textContent = 'Select a port first'; return; }
+  const board = portBoardMap.get(port) || '';
+  if (board !== 'esp32') { document.getElementById('flashStatus')!.textContent = 'Erase is ESP32-only — Arduino runs no esptool.'; return; }
   const ok = confirm('Erase the entire flash on ' + port + '? This is irreversible.');
   if (!ok) return;
   document.getElementById('flashStatus')!.textContent = 'Erasing…';
@@ -3922,13 +3963,20 @@ function renderFmWiring() {
   const sensors = (isCustomPreset(preset)
     ? customPresets.find(p => p.id === preset)?.sensors
     : PRESETS[preset]?.sensors) || [];
-  const pins = presetPins(count);
+  const port = (document.getElementById('fmPort') as HTMLSelectElement).value;
+  const activePort = (document.getElementById('portSelect') as HTMLSelectElement).value;
+  const board = portBoardMap.get(port || activePort) || 'esp32';
+  const isAvr = board === 'arduino_uno';
+  const pins = isAvr
+    ? Array.from({ length: Math.min(count, 6) }, (_, i) => `A${i}`)
+    : presetPins(count).map(String);
   if (count < 1 || pins.length === 0) {
     el.innerHTML = '<b>WIRING</b> · pick a rig preset above';
     return;
   }
-  const names = Array.from({ length: count }, (_, i) => sensors[i] || `CH${i + 1}`);
-  el.innerHTML = `<b>WIRING</b> · ${count} CH → GPIO ${pins.join('/')}<br><span style="opacity:.75">${names.join(' · ')}</span>`;
+  const names = Array.from({ length: Math.min(count, pins.length) }, (_, i) => sensors[i] || `CH${i + 1}`);
+  const pinLabel = isAvr ? 'ANALOG' : 'GPIO';
+  el.innerHTML = `<b>BOARD · ${boardDisplay(board)}</b> · <b>WIRING</b> · ${pins.length} CH → ${pinLabel} ${pins.join('/')}<br><span style="opacity:.75">${names.join(' · ')}</span>`;
 }
 
 // Fill the modal's rig-preset dropdown with the built-in presets plus any
@@ -3942,10 +3990,19 @@ function populateFmPresets() {
   // The panel starts in auto-detect mode (not a buildable preset), so fall back
   // to the flagship 6-sensor rig until the panel has a concrete preset to carry.
   const prev = sel.value || (activePreset === 'auto' ? '6-sensor-full' : activePreset);
-  const builtIns = Object.keys(PRESETS).map(id => `<option value="${id}">${PRESETS[id].name}</option>`);
-  const customs = customPresets.map(p => `<option value="${p.id}">${p.name} (custom, ${p.n_channels} ch)</option>`);
+  const fmPort = (document.getElementById('fmPort') as HTMLSelectElement).value;
+  const activePort = (document.getElementById('portSelect') as HTMLSelectElement).value;
+  const board = portBoardMap.get(fmPort || activePort) || 'esp32';
+  const max = maxChannelsForBoard(board);
+  const builtIns = Object.keys(PRESETS)
+    .filter(id => PRESETS[id].sensors.length <= max)
+    .map(id => `<option value="${id}">${PRESETS[id].name}</option>`);
+  const customs = customPresets
+    .filter(p => p.n_channels <= max)
+    .map(p => `<option value="${p.id}">${p.name} (custom, ${p.n_channels} ch)</option>`);
   sel.innerHTML = builtIns.join('') + customs.join('');
   if (prev && Array.from(sel.options).some(o => o.value === prev)) sel.value = prev;
+  else if (Array.from(sel.options).some(o => o.value === '6-sensor-full')) sel.value = '6-sensor-full';
   renderFmWiring();
 }
 
@@ -4075,6 +4132,10 @@ document.getElementById('fmPreset')?.addEventListener('change', () => {
     renderRigSchematic();
   }
 });
+document.getElementById('fmPort')?.addEventListener('change', () => {
+  populateFmPresets();
+  renderFmWiring();
+});
 document.getElementById('fmSsid')?.addEventListener('input', () => {
   const t = document.getElementById('fwSsid') as HTMLInputElement | null;
   if (t) t.value = (document.getElementById('fmSsid') as HTMLInputElement).value;
@@ -4100,6 +4161,7 @@ document.getElementById('fmFlash')?.addEventListener('click', async () => {
   const preset = (document.getElementById('fmPreset') as HTMLSelectElement).value;
   const wifiSsid = (document.getElementById('fmSsid') as HTMLInputElement).value.trim();
   const wifiPassword = (document.getElementById('fmPass') as HTMLInputElement).value;
+  const board = portBoardMap.get(port) || 'esp32';
   const status = document.getElementById('fmStatus') as HTMLDivElement;
   if (!port) { status.textContent = 'Pick a port first.'; status.style.color = 'var(--yellow)'; return; }
   resetFmState();
@@ -4107,7 +4169,7 @@ document.getElementById('fmFlash')?.addEventListener('click', async () => {
   status.textContent = 'Building & flashing… this can take ~30 s.';
   status.style.color = '';
   try {
-    const done = await invoke<string>('flash_firmware', { port, preset, nChannels: presetChannelCount(preset), sensorPins: [], wifiSsid, wifiPassword });
+    const done = await invoke<string>('flash_firmware', { port, preset, nChannels: presetChannelCount(preset), sensorPins: [], wifiSsid, wifiPassword, board });
     setFmBusy(false);
     status.textContent = done || 'Complete — mDNS: osmograph.local (_osmograph._tcp)';
     status.style.color = 'var(--green)';
@@ -4295,6 +4357,7 @@ document.getElementById('bootToFlash')?.addEventListener('click', () => {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   const fwPort = document.getElementById('fwPort');
   if (fwPort) fwPort.textContent = port || 'No port selected';
+  updateFwBoardLabel();
   document.getElementById('flashBtn')?.focus();
 });
 

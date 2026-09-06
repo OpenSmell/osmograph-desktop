@@ -665,6 +665,31 @@ fn sensor_pins_for(n_channels: usize) -> Vec<u8> {
     PINS[..n_channels.min(PINS.len())].to_vec()
 }
 
+/// Arduino Uno / Nano analog pin names (A0–A5) — 6 analog inputs max.
+fn avr_pins_for(n_channels: usize) -> Vec<String> {
+    const PINS: [&str; 6] = ["A0", "A1", "A2", "A3", "A4", "A5"];
+    PINS[..n_channels.min(PINS.len())]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Return the arduino-cli Fully Qualified Board Name for a board type.
+fn board_fqbn(board: &str) -> &'static str {
+    match board {
+        "arduino_uno" => "arduino:avr:uno",
+        _ => "esp32:esp32:esp32",
+    }
+}
+
+/// Return the PlatformIO `[env:*]` settings for a board type.
+fn board_pio_env(board: &str) -> String {
+    match board {
+        "arduino_uno" => "[env:uno]\nplatform = atmelavr\nboard = uno\nframework = arduino\nupload_speed = 115200\n".to_string(),
+        _ => "[env:esp32]\nplatform = espressif32\nboard = esp32dev\nframework = arduino\nupload_speed = 921600\n".to_string(),
+    }
+}
+
 fn channels_for(preset: &str) -> usize {
     match preset {
         "3-sensor-food" | "3-sensor-safety" => 3,
@@ -690,11 +715,12 @@ fn run_upload(last: Result<std::process::Output, std::io::Error>, tool: &str, po
     }
 }
 
-/// Generate, compile (if possible), and flash the OpenSmell ESP32 firmware.
+/// Generate, compile (if possible), and flash the OpenSmell firmware.
 ///
-/// The firmware advertises mDNS `_osmograph._tcp` on port 8080 (TCP OSM protocol).
-/// Uses PlatformIO if available, else Arduino CLI; reports install hints otherwise.
-/// Empty `wifi_ssid`/`wifi_password` produce a board that boots into SoftAP mode.
+/// Supports ESP32 (WiFi + TCP OSM + mDNS) and AVR (Arduino Uno/Nano, serial
+/// only). Uses PlatformIO if available, else Arduino CLI. Empty
+/// `wifi_ssid`/`wifi_password` produce an ESP32 that boots into SoftAP mode.
+/// `board` is one of `esp32` / `arduino_uno` (defaults to `esp32`).
 #[tauri::command]
 fn flash_firmware(
     port: String,
@@ -703,27 +729,68 @@ fn flash_firmware(
     sensor_pins: Vec<u8>,
     wifi_ssid: String,
     wifi_password: String,
+    board: Option<String>,
 ) -> Result<String, String> {
-    // An explicit pin list wins (custom presets). Otherwise derive a
-    // board-agnostic pinout from the requested channel count; the preset name
-    // is only used to nudge a sensible default channel count.
+    let board = board.unwrap_or_else(|| "esp32".to_string());
+    let is_avr = board == "arduino_uno";
+
+    // An explicit pin list wins (custom presets). Otherwise derive a board
+    // pinout from the requested channel count; the preset name nudges a default.
     let (n_channels, sensor_pins) = if !sensor_pins.is_empty() {
         (n_channels.max(1), sensor_pins)
     } else {
         let n = if n_channels > 0 { n_channels } else { channels_for(&preset) };
-        (n, sensor_pins_for(n))
+        if is_avr {
+            // AVR: cap at 6 analog inputs; convert to pin-name strings.
+            let names = avr_pins_for(n);
+            // Re-encode the names as numeric placeholders via a dedicated path
+            // below — AVR uses a string pin list, so handle it before sketches.
+            let mut pins = Vec::with_capacity(names.len());
+            for name in names {
+                match name.as_str() {
+                    "A0" => pins.push(100),
+                    "A1" => pins.push(101),
+                    "A2" => pins.push(102),
+                    "A3" => pins.push(103),
+                    "A4" => pins.push(104),
+                    _ => pins.push(105),
+                }
+            }
+            (pins.len().max(1), pins)
+        } else {
+            (n.max(1), sensor_pins_for(n))
+        }
     };
-    let sketch = opensmell::protocol::generate_arduino_sketch(&sensor_pins, &wifi_ssid, &wifi_password);
 
     let temp_dir = std::env::temp_dir().join("osmograph_firmware");
     let _ = std::fs::create_dir_all(&temp_dir);
 
+    // Pick the firmware source + note the toolchain requirements up front.
+    let (sketch, toolchain_hint): (String, String) = if is_avr {
+        let names = sensor_pins
+            .iter()
+            .map(|&p| match p {
+                100 => "A0",
+                101 => "A1",
+                102 => "A2",
+                103 => "A3",
+                104 => "A4",
+                _ => "A5",
+            }.to_string())
+            .collect::<Vec<_>>();
+        let sketch = opensmell::protocol::generate_avr_sketch(&names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+        (sketch, "Install the Arduino AVR core: arduino-cli core install arduino:avr".to_string())
+    } else {
+        let sketch = opensmell::protocol::generate_arduino_sketch(&sensor_pins, &wifi_ssid, &wifi_password);
+        (sketch, "Is the esp32 core installed? Try: arduino-cli core install esp32:esp32".to_string())
+    };
+
     // PlatformIO project layout
+    let pio_board = if is_avr { "arduino_uno" } else { "esp32" };
     let pio_dir = temp_dir.join("pio");
     let _ = std::fs::create_dir_all(pio_dir.join("src"));
-    std::fs::write(pio_dir.join("platformio.ini"), format!(
-        "[env:esp32]\nplatform = espressif32\nboard = esp32dev\nframework = arduino\nupload_speed = 921600\n"
-    )).map_err(|e| format!("Failed to write platformio.ini: {}", e))?;
+    std::fs::write(pio_dir.join("platformio.ini"), board_pio_env(pio_board))
+        .map_err(|e| format!("Failed to write platformio.ini: {}", e))?;
     std::fs::write(pio_dir.join("src").join("main.cpp"), &sketch)
         .map_err(|e| format!("Failed to write main.cpp: {}", e))?;
 
@@ -732,6 +799,9 @@ fn flash_firmware(
     let _ = std::fs::create_dir_all(&ino_dir);
     std::fs::write(ino_dir.join("osmograph_firmware.ino"), &sketch)
         .map_err(|e| format!("Failed to write .ino: {}", e))?;
+
+    let fqbn = board_fqbn(pio_board);
+    let board_name = if is_avr { "Arduino Uno" } else { "ESP32" };
 
     if command_exists("pio") {
         let out = std::process::Command::new("pio")
@@ -747,23 +817,22 @@ fn flash_firmware(
         let ino = ino_dir.to_str().ok_or_else(|| "Temp path invalid".to_string())?;
         let out_dir = build_dir.to_str().ok_or_else(|| "Temp path invalid".to_string())?;
         let compile = std::process::Command::new("arduino-cli")
-            .args(["compile", "--fqbn", "esp32:esp32:esp32", "--output-dir", out_dir, ino])
+            .args(["compile", "--fqbn", fqbn, "--output-dir", out_dir, ino])
             .output()
             .map_err(|e| format!("Failed to run arduino-cli: {}", e))?;
         if !compile.status.success() {
             let stderr = String::from_utf8_lossy(&compile.stderr);
-            return Err(format!(
-                "Compile failed. Is the esp32 core installed? Try: arduino-cli core install esp32:esp32\n{}",
-                stderr
-            ));
+            return Err(format!("Compile failed for {board_name}. {toolchain_hint}\n{}", stderr));
         }
         let upload = std::process::Command::new("arduino-cli")
-            .args(["upload", "-p", &port, "--fqbn", "esp32:esp32:esp32", ino])
+            .args(["upload", "-p", &port, "--fqbn", fqbn, ino])
             .output();
         return run_upload(upload, "arduino-cli", &port, &preset, n_channels);
     }
 
-    Err("No ESP32 flashing toolchain found. Install PlatformIO (pip install platformio) or Arduino CLI (arduino-cli core install esp32:esp32).".to_string())
+    Err(format!(
+        "No {board_name} flashing toolchain found. Install PlatformIO (pip install platformio) or Arduino CLI ({toolchain_hint})."
+    ))
 }
 
 // === esptool device operations (mirrors Python `board/flasher.py`) ===
@@ -2978,7 +3047,7 @@ pub fn run() {    env_logger::init();
 
 #[cfg(test)]
 mod tests {
-    use super::{board_label, channels_for, classify_vid_pid, sensor_pins_for};
+    use super::{avr_pins_for, board_fqbn, board_label, board_pio_env, channels_for, classify_vid_pid, sensor_pins_for};
 
     #[test]
     fn preset_channel_counts_match_frontend_presets() {
@@ -3104,5 +3173,20 @@ mod tests {
         assert_eq!(s.values[0], vec![1000.0, 1100.0, 1300.0, 1600.0]);
         assert_eq!(s.values[1], vec![20.0, 25.0, 30.0, 40.0]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn avr_pins_for_channel_counts() {
+        assert_eq!(avr_pins_for(3), vec!["A0", "A1", "A2"]);
+        assert_eq!(avr_pins_for(6), vec!["A0", "A1", "A2", "A3", "A4", "A5"]);
+        assert_eq!(avr_pins_for(8), vec!["A0", "A1", "A2", "A3", "A4", "A5"]);
+    }
+
+    #[test]
+    fn board_fqbn_and_pio_env() {
+        assert_eq!(board_fqbn("esp32"), "esp32:esp32:esp32");
+        assert_eq!(board_fqbn("arduino_uno"), "arduino:avr:uno");
+        assert!(board_pio_env("arduino_uno").contains("atmelavr"));
+        assert!(board_pio_env("esp32").contains("espressif32"));
     }
 }

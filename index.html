@@ -2792,7 +2792,7 @@ Confidence: 97.3%</div>
             <div class="card blueprint-sheet">
               <div class="sch-meta">
                 <span class="sch-reg">RIG WIRING · SCHEMATIC</span>
-                <span class="sch-reg">BOARD · ESP32 (WROOM-32)</span>
+                <span class="sch-reg" id="fwBoardLabel">BOARD · ESP32</span>
               </div>
               <p style="font-size:11px;color:var(--text-2);line-height:1.5;margin:4px 0 8px">
                 Flashing builds a sketch for the rig below and uploads it over USB.
@@ -2835,7 +2835,7 @@ Confidence: 97.3%</div>
                 <button id="readMacBtn" style="flex:1">Read MAC</button>
                 <button id="eraseBtn" style="flex:1">Erase Flash</button>
               </div>
-              <div class="board-note">BOARD: ESP32 (DEVKIT-V1 / WROOM-32). We only flash boards with a supported generator — Arduino UNO and other boards arrive via community firmware PRs.</div>
+              <div class="board-note">FLASH TARGET: ESP32 (DEVKIT-V1 / WROOM-32) or Arduino UNO. The generator builds for these two boards; other boards aren't supported yet.</div>
             </div>
             <div class="card">
               <h3>Save a Custom Rig</h3>
@@ -2849,7 +2849,7 @@ Confidence: 97.3%</div>
             </div>
             <div class="card">
               <h3>Firmware</h3>
-              <div class="form-row"><label>Board</label><span style="color:var(--text-1)">ESP32</span></div>
+              <div class="form-row"><label>Board</label><span style="color:var(--text-1)" id="fwBoardDetail">—</span></div>
               <div class="form-row"><label>MAC</label><span style="color:var(--text-1)" id="fwMac">--</span></div>
             </div>
           </div>
