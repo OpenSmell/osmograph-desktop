@@ -85,6 +85,19 @@
       height: 100vh;
       font-size: 13px;
       user-select: none;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+    }
+    /* The bundled Geist/Geist Mono are variable fonts whose non-400 weights can
+       get synthesised by the WebView (ghost-doubling strokes => "double text").
+       Weight-aware smoothing plus 'font-synthesis: none' keeps every face crisp
+       and stops the fuzzy re-render that used to clear only on hover. */
+    :root, body, button, input, select, textarea {
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: optimizeLegibility;
+      font-synthesis: none;
     }
 
     /* === Boot loader (ink-on-paper, shown before JS initializes) === */
@@ -572,6 +585,14 @@
     .hover-readout .xr-item { display: inline-flex; align-items: center; gap: 4px; }
     .hover-readout .xr-dot { width: 7px; height: 3px; border-radius: 0; display: inline-block; }
     .hover-readout b { color: var(--text-0); font-weight: 600; }
+    .hover-readout .xr-ppm {
+      font-size: 8px;
+      letter-spacing: 0.03em;
+      color: var(--text-2);
+      border: 1px solid var(--border);
+      padding: 0 4px;
+      border-radius: 8px;
+    }
     .canvas-wrap {
       flex: 1;
       position: relative;
@@ -1878,11 +1899,32 @@
 
     /* Burn-In */
     .burnin-display {
-      font-size: 32px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      margin: 12px 0 2px;
+    }
+    .burnin-display .bd-label {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.14em;
+      color: var(--text-3);
+      font-weight: 600;
+    }
+    .burnin-display #burninTime {
+      font-size: 34px;
       font-weight: 700;
       font-family: var(--font-mono);
-      color: var(--cyan);
-      margin: 12px 0;
+      color: var(--text-0);
+      line-height: 1.1;
+      letter-spacing: 0.02em;
+    }
+    .burnin-display .bd-elapsed {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      letter-spacing: 0.04em;
+      color: var(--text-2);
+      min-height: 14px;
     }
     .progress-track {
       height: 6px;
@@ -2795,10 +2837,10 @@ Confidence: 97.3%</div>
                 <span class="sch-reg" id="fwBoardLabel">BOARD · ESP32</span>
               </div>
               <p style="font-size:11px;color:var(--text-2);line-height:1.5;margin:4px 0 8px">
-                Flashing builds a sketch for the rig below and uploads it over USB.
-                Channels map to GPIO pins automatically — the wiring and the checks
-                here run before anything reaches the board, so a bad build never
-                flashes. Your saved rigs appear in the ⚡ Flash dialog too.
+                Builds a sketch for the rig shown below and uploads it over USB.
+                Pins map to GPIO automatically — the pre-flight checks above run
+                before anything reaches the board, so a bad build never flashes.
+                Saved rigs also appear in the quick ⚡ Flash dialog.
               </p>
               <svg id="rigSchematic" viewBox="0 0 560 150" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Rig wiring schematic"></svg>
               <div class="sch-stamp" id="schStamp">SENSORS · 6ch · 32/33/34/35/25/26</div>
@@ -2825,7 +2867,7 @@ Confidence: 97.3%</div>
                 <input type="password" id="fwPass" value="" placeholder="network password" autocomplete="off" />
               </div>
               <div class="form-row">
-                <label>Arduino tools</label>
+                <label>Device & tools</label>
                 <span id="fwToolchain" style="font-size:10px;color:var(--text-3);min-width:0;overflow-wrap:anywhere">checking…</span>
               </div>
               <button id="flashBtn" class="green" style="margin-top:8px">Flash Firmware</button>
@@ -2849,7 +2891,6 @@ Confidence: 97.3%</div>
             </div>
             <div class="card">
               <h3>Firmware</h3>
-              <div class="form-row"><label>Board</label><span style="color:var(--text-1)" id="fwBoardDetail">—</span></div>
               <div class="form-row"><label>MAC</label><span style="color:var(--text-1)" id="fwMac">--</span></div>
             </div>
           </div>
@@ -2859,14 +2900,18 @@ Confidence: 97.3%</div>
             <h2>Burn-In Timer</h2>
             <div class="card">
               <p>New MOX sensors need 24-hour burn-in to stabilise. The timer persists across app restarts.</p>
-              <div class="burnin-display" id="burninTime">--:--:--</div>
+              <div class="burnin-display">
+                <span class="bd-label">REMAINING</span>
+                <span id="burninTime">--:--:--</span>
+                <span class="bd-elapsed" id="burninElapsed"></span>
+              </div>
               <div class="progress-track"><div class="progress-fill" id="burninBar" style="width:0%"></div></div>
               <div class="burnin-status" id="burninStatus" style="font-size:11px;color:var(--text-3);margin-top:6px">Not started</div>
               <div class="form-row" style="margin-top:10px">
                 <label>Duration (hours)</label>
                 <input type="number" id="burninHours" value="24" min="1" max="168" style="width:60px" />
-                <button id="burninStart">Start</button>
-                <button id="burninReset">Reset</button>
+                <button id="burninStart" class="green">Start</button>
+                <button id="burninReset" class="blue">Reset</button>
               </div>
             </div>
           </div>
@@ -3041,9 +3086,9 @@ Confidence: 97.3%</div>
     <div class="modal-box" style="width:440px">
       <h3>⚡ Flash Firmware</h3>
       <div style="font-size:11px;color:var(--text-2);line-height:1.45">
-        One click. We build the firmware for your rig and upload it over USB —
-        about 30 seconds. The wiring and tool checks below run <i>first</i>, so a
-        bad build never reaches the board.
+        Builds your rig&rsquo;s firmware and uploads it over USB &mdash; about
+        30 seconds. Port, rig and tool checks below run <i>first</i>, so a bad
+        build never reaches the board.
       </div>
       <div class="phase-times">
         <label>Target Port

@@ -646,7 +646,11 @@ function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
     const color = channelColor(c >= 0 ? c : 0);
     const unit = KIND_META[kindOf(c >= 0 ? c : 0)].unit;
     const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(2)}k` : v.toFixed(2);
-    return `<span class="xr-item"><i class="xr-dot" style="background:${color}"></i>${name} <b>${label} ${unit}</b></span>`;
+    const ppm = c >= 0 ? calibratedPPM(c, v) : null;
+    const ppmTag = ppm !== null
+      ? `<span class="xr-ppm" title="Estimated from your calibration constants (datasheet curve — an estimate, not a lab figure)">${ppm >= 1000 ? `${(ppm / 1000).toFixed(1)}k ppm` : `${Math.round(ppm)} ppm`}</span>`
+      : '';
+    return `<span class="xr-item"><i class="xr-dot" style="background:${color}"></i>${name} <b>${label} ${unit}</b>${ppmTag}</span>`;
   }).join('');
   el.innerHTML = n;
 }
@@ -3645,6 +3649,7 @@ function addPhaseToLibrary(summary: PhaseRecordingSummary) {
 }
 
 async function stopPhaseRecordingFromUI() {
+  autoFinalized = true; // claim finalize so the poll loop can't double-fire
   try {
     const summary = await invoke<PhaseRecordingSummary>('stop_phase_recording');
     addPhaseToLibrary(summary);
@@ -3858,32 +3863,61 @@ function renderBurnIn(s: BurnInStatus) {
   const total = s.total_hours * 3600;
   const pct = total > 0 ? Math.min(100, (s.elapsed_seconds / total) * 100) : 0;
   document.getElementById('burninBar')!.style.width = `${pct.toFixed(1)}%`;
+  const elapsedEl = document.getElementById('burninElapsed');
+  if (elapsedEl) {
+    const hours = s.total_hours;
+    elapsedEl.textContent = s.is_complete
+      ? `${hours}h complete — sensors should be stable now`
+      : `${fmtClock(s.elapsed_seconds)} of ${hours}h elapsed`;
+  }
   const startBtn = document.getElementById('burninStart') as HTMLButtonElement | null;
   const statusEl = document.getElementById('burninStatus');
-  if (startBtn) startBtn.textContent = s.running && !s.is_complete ? 'Stop' : 'Start';
+  if (startBtn) {
+    // Explicit label — the timer is a Start/Pause, never a hidden toggle.
+    startBtn.textContent = s.is_complete ? 'Restart' : (s.running ? 'Pause' : 'Start');
+    startBtn.classList.toggle('green', !s.running);
+    startBtn.classList.toggle('blue', s.running);
+  }
   if (statusEl) {
     const label = s.is_complete
       ? 'Complete'
       : s.running
-        ? 'Running — countdown active'
+        ? 'Running — counting down'
         : s.elapsed_seconds > 0
           ? 'Paused'
-          : 'Not started';
+          : 'Waiting to start';
     statusEl.textContent = label;
   }
 }
 
+// Local 1 s tick so the countdown visibly moves between backend polls and
+// never looks frozen. Mirrors the wall-clock reconcile the backend already does.
+let burninLocal: BurnInStatus | null = null;
+function burninTick() {
+  if (burninLocal && burninLocal.running && !burninLocal.is_complete) {
+    const remaining = Math.max(0, burninLocal.remaining_seconds - 1);
+    const total = burninLocal.total_hours * 3600;
+    const elapsed = Math.min(total, total - remaining);
+    burninLocal = { ...burninLocal, remaining_seconds: remaining, elapsed_seconds: elapsed };
+    renderBurnIn(burninLocal);
+  }
+}
+setInterval(burninTick, 1000);
+
 async function refreshBurnIn() {
   try {
     const s = await invoke<BurnInStatus>('burnin_get_status');
+    burninLocal = s;
     renderBurnIn(s);
   } catch {}
 }
 
 document.getElementById('burninStart')!.addEventListener('click', async () => {
   try {
-    const hours = parseFloat((document.getElementById('burninHours') as HTMLInputElement).value) || undefined;
+    const raw = (document.getElementById('burninHours') as HTMLInputElement).value.trim();
+    const hours = raw === '' ? undefined : parseFloat(raw);
     const s = await invoke<BurnInStatus>('burnin_start', { hours });
+    burninLocal = s;
     renderBurnIn(s);
   } catch (e) {
     console.error('Burn-in start failed:', e);
@@ -3894,6 +3928,7 @@ document.getElementById('burninReset')!.addEventListener('click', async () => {
   const hrs = parseFloat((document.getElementById('burninHours') as HTMLInputElement).value) || 24;
   try {
     const s = await invoke<BurnInStatus>('burnin_reset', { hours: hrs });
+    burninLocal = s;
     renderBurnIn(s);
   } catch (e) {
     console.error('Burn-in reset failed:', e);
