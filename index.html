@@ -967,13 +967,14 @@
     }
     .plot-tagbar .transport-scrub:disabled { opacity: 0.35; cursor: default; }
 
-    /* Right telemetry rail — a pinned, full-height panel (no mid-screen scroll) */
+    /* Right telemetry rail — pinned panel that scrolls internally when the
+       sensor health list outgrows the viewport. */
     .sidebar {
       background: var(--bg-1);
       border: var(--hairline) solid var(--border);
       display: flex;
       flex-direction: column;
-      overflow: hidden;
+      overflow-y: auto;
       position: relative;
     }
     .sidebar::before,
@@ -991,12 +992,6 @@
       padding: 10px 12px;
       border-bottom: var(--hairline) solid var(--border);
       flex-shrink: 0;
-    }
-    .sidebar-section.grow {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      min-height: 0;
     }
     .sidebar-section h3 {
       font-family: var(--font-mono);
@@ -1030,6 +1025,20 @@
     .anomaly-card .label { font-size: 12px; font-weight: 600; }
     .anomaly-card .sub { font-size: 10px; color: var(--text-2); margin-top: 2px; }
 
+    /* Buzzer alert frame flash — pink for alarms, red for emergency. */
+    body.alert-flash::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+      box-shadow: inset 0 0 0 3px var(--pink), inset 0 0 90px rgba(219, 39, 119, 0.22);
+      animation: alertPulse 0.8s ease-in-out 3;
+    }
+    @keyframes alertPulse {
+      50% { box-shadow: inset 0 0 0 3px var(--red), inset 0 0 120px rgba(225, 29, 72, 0.35); }
+    }
+
     .metric-row {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -1044,20 +1053,18 @@
     .metric .k { font-size: 9px; color: var(--text-3); text-transform: uppercase; }
     .metric .v { font-size: 16px; font-weight: 600; margin-top: 1px; }
 
-    /* Fingerprint Canvas */
-    .fingerprint-wrap {
-      background: var(--bg-2);
-      border-radius: var(--radius);
-      padding: 4px;
-      margin-top: 6px;
-      flex: 1;
-      min-height: 0;
-      display: flex;
-    }
-    canvas#fingerprint {
+    /* Fingerprint radar inside the phenotype dock (replaces the Boundaries cell).
+       The live per-channel responsiveness map — cyan live-monitoring accent. */
+    .pheno-cell canvas#fingerprint {
       width: 100%;
       flex: 1;
-      min-height: 80px;
+      min-height: 60px;
+      display: block;
+    }
+    .pheno-bound-cap {
+      max-height: 34px;
+      padding: 2px 0;
+      line-height: 1.5;
     }
 
     /* === Library Tab === */
@@ -2228,14 +2235,15 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell grow" id="phenoBound">
-                    <div class="pheno-cell-head">Boundaries</div>
-                    <div class="pheno-limits" id="phenoBoundList"></div>
-                    <a class="pheno-limits-link" href="https://github.com/opensmell/opensmell-web/blob/main/README.md" target="_blank" rel="noreferrer">docs ↗</a>
-                  </div>
+                    <div class="pheno-cell-head">Fingerprint</div>
+                    <div class="pheno-limits pheno-bound-cap" id="phenoBoundList"></div>
+                    <canvas id="fingerprint"></canvas>
+</div>
                 </div>
               </div>
             </div>
           </div>
+          <aside class="sidebar">
           <aside class="sidebar">
             <div class="rail-head">
               <span class="section-label">Live Telemetry</span>
@@ -2270,14 +2278,6 @@
             <div class="sidebar-section">
               <h3>Sensor Health</h3>
               <div id="sensorHealthList"></div>
-            </div>
-
-            <!-- Fingerprint -->
-            <div class="sidebar-section grow">
-              <h3>Fingerprint</h3>
-              <div class="fingerprint-wrap">
-                <canvas id="fingerprint"></canvas>
-              </div>
             </div>
           </aside>
         </div>
@@ -2826,6 +2826,32 @@ Confidence: 97.3%</div>
               </div>
             </div>
             </div>
+
+            <!-- Detection Sensitivity — applies live to the anomaly detector,
+                 independent of whether a physical buzzer is installed. -->
+            <div class="card">
+              <h3>Detection Sensitivity</h3>
+              <div class="form-row">
+                <label>How different («it smells different», by how much)</label>
+                <input type="range" id="detSensitivity" min="0.2" max="5" step="0.1" value="1" style="flex:1;max-width:200px" />
+                <span id="detSensitivityVal">1.0×</span>
+              </div>
+              <div class="form-row">
+                <label>Smoothing (EWMA weight per sample)</label>
+                <input type="range" id="detSmoothing" min="0.1" max="1" step="0.05" value="0.6" style="flex:1;max-width:200px" />
+                <span id="detSmoothingVal">0.60</span>
+              </div>
+              <div class="form-row">
+                <label>Drift forgiveness (baseline chase rate)</label>
+                <input type="range" id="detDrift" min="0" max="0.05" step="0.001" value="0.002" style="flex:1;max-width:200px" />
+                <span id="detDriftVal">0.002</span>
+              </div>
+              <div id="detStatus" class="hint" style="margin-top:6px">
+                Sensitivity &gt; 1 flags smaller deviations; &lt; 1 requires a bigger
+                difference. Smoothing dampens single-sample spikes; drift forgives
+                slow environmental change without masking real steps. Applied live.
+              </div>
+            </div>
           </div>
 
           <!-- Firmware Panel -->
@@ -3022,6 +3048,14 @@ Confidence: 97.3%</div>
       <div class="footer-stat">Session: <strong id="fSession">00:00:00</strong></div>
       <div class="sep"></div>
       <div class="footer-stat">Device: <strong id="fDevice">None</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Burn-in: <strong id="fBurnin">—</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Alert: <strong id="fAlert">idle</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Classifier: <strong id="fClassifier">none</strong></div>
+      <div class="sep"></div>
+      <div class="footer-stat">Rec: <strong id="fRec">—</strong></div>
       <div style="flex:1"></div>
       <div class="footer-stat" style="color:var(--text-3)">OpenSmell v0.1.0</div>
     </footer>

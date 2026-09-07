@@ -876,6 +876,7 @@ async function ingestReading(values: number[]) {
 
     // Anomaly card
     const card = document.getElementById('anomalyCard')!;
+    const fAlert = document.getElementById('fAlert')!;
     if (result.warming_up) {
       // Baseline not established yet — show honest warm-up progress instead of
       // either a false "ANOMALY" or a premature "NORMAL".
@@ -889,6 +890,8 @@ async function ingestReading(values: number[]) {
       document.getElementById('mAlert')!.textContent = 'warming_up';
       const wDot = document.getElementById('statusDot')!;
       wDot.className = 'status-dot warn';
+      fAlert.textContent = `warm-up ${pct}%`;
+      fAlert.style.color = 'var(--yellow)';
     } else {
       card.className = 'anomaly-card' + (result.is_anomaly ? (result.alert_level >= 2 ? ' critical' : ' warning') : '');
       document.getElementById('anomalyLabel')!.textContent = result.is_anomaly ? 'ANOMALY DETECTED' : 'NORMAL';
@@ -900,6 +903,8 @@ async function ingestReading(values: number[]) {
         : `${((1 - result.calibrated_confidence) * 100).toFixed(0)}%`;
       document.getElementById('mCh')!.textContent = `${result.triggered_channels.length}/${chNames.length}`;
       document.getElementById('mAlert')!.textContent = result.alert_name;
+      fAlert.textContent = result.is_anomaly ? result.alert_name : 'nominal';
+      fAlert.style.color = result.alert_level >= 2 ? 'var(--red)' : result.is_anomaly ? 'var(--yellow)' : '';
 
       const statusDot = document.getElementById('statusDot')!;
       if (result.is_anomaly) {
@@ -2755,6 +2760,8 @@ function renderLiveControls(classifiers: ClassifierInfo[]) {
 }
 
 function renderLiveState() {
+  const clsFoot = document.getElementById('fClassifier');
+  if (clsFoot) clsFoot.textContent = (liveSnapshot && liveSnapshot.loaded) ? liveSnapshot.classifier_name : 'none';
   const wrap = document.getElementById('liveProbs')!;
   const lock = document.getElementById('liveLock')!;
   if (!liveSnapshot || !liveSnapshot.loaded) {
@@ -3510,10 +3517,66 @@ document.getElementById('buzzerEnabled')!.addEventListener('change', () => {
   persistPeripheralState(); syncPeripheralUI();
 });
 
+// === Detection Sensitivity (live anomaly-tuning) ===
+// Mirrors the BuzzerConfig persistence pattern: pull the Rust-side
+// opensmell::DetectionConfig, push it back on change — the backend applies it
+// to every ensemble detector immediately.
+interface DetectionConfigApi {
+  smoothing_alpha: number;
+  drift_alpha: number;
+  sensitivity: number;
+}
+let detectionConfig: DetectionConfigApi = { smoothing_alpha: 0.6, drift_alpha: 0.002, sensitivity: 1.0 };
+
+async function loadDetectionConfig() {
+  try {
+    detectionConfig = await invoke<DetectionConfigApi>('detection_get_config');
+  } catch (e) { console.error('detection_get_config failed:', e); }
+  applyDetectionToDom();
+}
+function saveDetectionToRust() {
+  invoke('detection_set_config', { config: detectionConfig }).catch(e => console.error('detection_set_config failed:', e));
+}
+function captureDetectionFromDom() {
+  detectionConfig.smoothing_alpha = Number((document.getElementById('detSmoothing') as HTMLInputElement).value) || 0.6;
+  detectionConfig.drift_alpha = Number((document.getElementById('detDrift') as HTMLInputElement).value) || 0.002;
+  detectionConfig.sensitivity = Number((document.getElementById('detSensitivity') as HTMLInputElement).value) || 1.0;
+  saveDetectionToRust();
+}
+function applyDetectionToDom() {
+  const set = (id: string, v: string) => {
+    const el = document.getElementById(id) as HTMLInputElement | null;
+    if (el) el.value = v;
+  };
+  set('detSmoothing', String(detectionConfig.smoothing_alpha));
+  set('detDrift', String(detectionConfig.drift_alpha));
+  set('detSensitivity', String(detectionConfig.sensitivity));
+  const sv = document.getElementById('detSensitivityVal');
+  if (sv) sv.textContent = `${detectionConfig.sensitivity.toFixed(1)}×`;
+  const sm = document.getElementById('detSmoothingVal');
+  if (sm) sm.textContent = detectionConfig.smoothing_alpha.toFixed(2);
+  const dr = document.getElementById('detDriftVal');
+  if (dr) dr.textContent = detectionConfig.drift_alpha.toFixed(3);
+}
+
+['detSmoothing', 'detDrift', 'detSensitivity'].forEach(id => {
+  document.getElementById(id)!.addEventListener('change', () => { captureDetectionFromDom(); });
+});
+document.getElementById('detSensitivity')!.addEventListener('input', (e) => {
+  document.getElementById('detSensitivityVal')!.textContent = `${(e.target as HTMLInputElement).value}×`;
+});
+document.getElementById('detSmoothing')!.addEventListener('input', (e) => {
+  document.getElementById('detSmoothingVal')!.textContent = Number((e.target as HTMLInputElement).value).toFixed(2);
+});
+document.getElementById('detDrift')!.addEventListener('input', (e) => {
+  document.getElementById('detDriftVal')!.textContent = Number((e.target as HTMLInputElement).value).toFixed(3);
+});
+
 // Load once at startup: prefer Rust-side defaults (fresh), fall back to saved local.
 loadPeripheralState();
 applyOledToDom(); applyBuzzerToDom(); syncPeripheralUI();
 updateBuzzerPreviews(); updateOledPreview();
+loadDetectionConfig();
 
 // Preset
 document.getElementById('sysPreset')!.addEventListener('change', (e) => {
@@ -3603,6 +3666,11 @@ function buildPhaseBars(
 function renderPhaseState(s: PhaseRecorderState) {
   const hud = document.getElementById('phaseHud')!;
   hud.style.display = s.active ? '' : 'none';
+  const frec = document.getElementById('fRec');
+  if (frec) {
+    frec.textContent = s.active ? `${s.label} · ${s.current_phase_label}` : '—';
+    frec.style.color = s.active ? 'var(--red)' : '';
+  }
   if (!s.active) return;
   document.getElementById('phasePhase')!.textContent = s.current_phase_label;
   document.getElementById('phaseSub')!.textContent = s.label;
@@ -3860,6 +3928,16 @@ function fmtClock(totalSeconds: number): string {
 
 function renderBurnIn(s: BurnInStatus) {
   document.getElementById('burninTime')!.textContent = fmtClock(s.remaining_seconds);
+  const foot = document.getElementById('fBurnin');
+  if (foot) {
+    foot.textContent = s.is_complete
+      ? 'done'
+      : s.running
+        ? `${fmtClock(s.remaining_seconds)} left`
+        : s.elapsed_seconds > 0
+          ? 'paused'
+          : 'idle';
+  }
   const total = s.total_hours * 3600;
   const pct = total > 0 ? Math.min(100, (s.elapsed_seconds / total) * 100) : 0;
   document.getElementById('burninBar')!.style.width = `${pct.toFixed(1)}%`;
@@ -4438,6 +4516,84 @@ listen<string>('ble-connected', (event) => {
 
 listen('ble-disconnected', () => {
   dropLink('BLE device disconnected.');
+});
+
+// === Buzzer Alerts ===
+// Tauri v2 (WebKitGTK) exposes no Web Audio API, so anomaly escalation is
+// signalled with a generated WAV through a plain <audio> element plus a frame
+// flash. Honest levels: 1 = warning (amber), 2+ = critical/emergency (pink/red).
+
+let buzzerArmed = 0;
+
+function buzzerToneWav(frequencyHz: number, pattern: string, volume: number): string {
+  const sr = 8000;
+  const beepMs = pattern === 'continuous' ? 500 : 150;
+  const repeats = pattern === 'double' ? 2 : pattern === 'triple' ? 3 : 2;
+  const gapMs = 180;
+  const amp = Math.round((Math.min(100, Math.max(0, volume)) / 100) * 7000);
+  const seg = (ms: number, sound: boolean): Int16Array => {
+    const n = Math.round((sr * ms) / 1000);
+    const out = new Int16Array(n);
+    if (!sound) return out;
+    let phase = 0;
+    const step = frequencyHz / sr;
+    for (let i = 0; i < n; i++) {
+      phase += step;
+      if (phase >= 1) phase -= 1;
+      out[i] = phase < 0.5 ? amp : -amp;
+    }
+    return out;
+  };
+  const parts: Int16Array[] = [];
+  for (let i = 0; i < repeats; i++) {
+    parts.push(seg(beepMs, true));
+    if (i < repeats - 1) parts.push(seg(gapMs, false));
+  }
+  const nSamples = parts.reduce((a, p) => a + p.length, 0);
+  const wav = new Uint8Array(44 + nSamples * 2);
+  const dv = new DataView(wav.buffer);
+  const put = (off: number, s: string): void => {
+    for (let i = 0; i < s.length; i++) wav[off + i] = s.charCodeAt(i);
+  };
+  put(0, 'RIFF'); dv.setUint32(4, 36 + nSamples * 2, true); put(8, 'WAVE');
+  put(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true);
+  dv.setUint16(22, 1, true); dv.setUint32(24, sr, true);
+  dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+  put(36, 'data'); dv.setUint32(40, nSamples * 2, true);
+  let off = 44;
+  for (const p of parts) {
+    wav.set(new Uint8Array(p.buffer, p.byteOffset, p.byteLength), off);
+    off += p.byteLength;
+  }
+  let bin = '';
+  for (let i = 0; i < wav.length; i++) bin += String.fromCharCode(wav[i]);
+  return 'data:audio/wav;base64,' + btoa(bin);
+}
+
+function fireBuzzerAlert(level: number, pattern: string, volume: number, frequencyHz: number): void {
+  if (level <= buzzerArmed) return;
+  buzzerArmed = level;
+  document.body.classList.add('alert-flash');
+  window.setTimeout(() => document.body.classList.remove('alert-flash'), 2600);
+  try {
+    const a = new Audio(buzzerToneWav(frequencyHz || 2000, pattern || 'double', volume || 70));
+    a.volume = 1;
+    a.play().catch(() => {});
+  } catch (err) {
+    console.error('buzzer audio unavailable:', err);
+  }
+}
+
+listen<{
+  alert_level: number; alert_name: string; consecutive_anomalies: number;
+  pattern: string; volume: number; frequency_hz: number;
+}>('buzzer-alert', (event) => {
+  fireBuzzerAlert(event.payload.alert_level, event.payload.pattern, event.payload.volume, event.payload.frequency_hz);
+});
+
+listen('buzzer-alert-clear', () => {
+  buzzerArmed = 0;
+  document.body.classList.remove('alert-flash');
 });
 
 // A device answering in bootloader streams nothing, so the graph looks "dead"

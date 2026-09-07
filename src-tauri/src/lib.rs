@@ -51,6 +51,8 @@ pub struct AppState {
     pub ble_device_address: Arc<Mutex<Option<String>>>,
     pub oled_config: Arc<Mutex<OledConfig>>,
     pub buzzer_config: Arc<Mutex<BuzzerConfig>>,
+    pub detection_config: Arc<Mutex<opensmell::DetectionConfig>>,
+    pub last_alert_level: Arc<Mutex<u8>>,
     pub fleet: Arc<Mutex<Vec<FleetDeviceState>>>,
     pub last_channels: Arc<Mutex<Vec<f64>>>,
     pub live_classifier: Arc<Mutex<opensmell::LiveClassifier>>,
@@ -83,6 +85,8 @@ impl Default for AppState {
             ble_device_address: Arc::new(Mutex::new(None)),
             oled_config: Arc::new(Mutex::new(OledConfig::default())),
             buzzer_config: Arc::new(Mutex::new(BuzzerConfig::default())),
+            detection_config: Arc::new(Mutex::new(opensmell::DetectionConfig::default())),
+            last_alert_level: Arc::new(Mutex::new(0)),
             fleet: Arc::new(Mutex::new(Vec::new())),
             last_channels: Arc::new(Mutex::new(Vec::new())),
             live_classifier: Arc::new(Mutex::new(opensmell::LiveClassifier::new())),
@@ -958,7 +962,42 @@ fn ingest_reading_with_failsafe(
     }
 
     let mut fail_safe = state.fail_safe.lock().map_err(|e| e.to_string())?;
-    fail_safe.detect(&reading).map_err(|e| e.to_string())
+    let result = fail_safe.detect(&reading).map_err(|e| e.to_string())?;
+
+    // Escalation emits a buzzer-alert event (level 1 warning / 2 critical /
+    // 3 emergency) carrying the operator's programmed pattern, volume and
+    // frequency, so the frontend can trigger the alert mechanism. Emitted once
+    // per level change to avoid flooding at stream rate.
+    if result.alert_level > 0 && result.alert_level != *state.last_alert_level.lock().map_err(|e| e.to_string())? {
+        let buzzer = state.buzzer_config.lock().map_err(|e| e.to_string())?;
+        let pattern = match result.alert_level {
+            1 => buzzer.warning_pattern.clone(),
+            2 => buzzer.critical_pattern.clone(),
+            _ => buzzer.emergency_pattern.clone(),
+        };
+        let _ = app.emit(
+            "buzzer-alert",
+            BuzzerAlertEvent {
+                alert_level: result.alert_level,
+                alert_name: result.alert_name.clone(),
+                consecutive_anomalies: result.consecutive_anomalies,
+                pattern,
+                volume: buzzer.volume,
+                frequency_hz: buzzer.frequency_hz,
+            },
+        );
+        *state.last_alert_level.lock().map_err(|e| e.to_string())? = result.alert_level;
+    }
+    // Escalation down to normal clears the armed alert.
+    if result.alert_level == 0 {
+        let mut armed = state.last_alert_level.lock().map_err(|e| e.to_string())?;
+        if *armed != 0 {
+            *armed = 0;
+            let _ = app.emit("buzzer-alert-clear", ());
+        }
+    }
+
+    Ok(result)
 }
 
 // === User Feedback ===
@@ -2682,6 +2721,45 @@ fn buzzer_set_config(state: State<AppState>, config: BuzzerConfig) -> Result<Buz
     Ok(config)
 }
 
+/// Buzzer alert payload forwarded to the frontend on anomaly escalation.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct BuzzerAlertEvent {
+    pub alert_level: u8,
+    pub alert_name: String,
+    pub consecutive_anomalies: usize,
+    pub pattern: String,
+    pub volume: u8,
+    pub frequency_hz: u16,
+}
+
+// === Detection Configuration ===
+
+#[tauri::command]
+fn detection_get_config(state: State<AppState>) -> Result<opensmell::DetectionConfig, String> {
+    let cfg = state.detection_config.lock().map_err(|e| e.to_string())?;
+    Ok(cfg.clone())
+}
+
+#[tauri::command]
+fn detection_set_config(
+    state: State<AppState>,
+    config: opensmell::DetectionConfig,
+) -> Result<opensmell::DetectionConfig, String> {
+    {
+        let mut fail_safe = state.fail_safe.lock().map_err(|e| e.to_string())?;
+        fail_safe.set_config(config.clone());
+    }
+    {
+        let mut detector = state.detector.lock().map_err(|e| e.to_string())?;
+        detector.set_config(config.clone());
+    }
+    {
+        let mut cfg = state.detection_config.lock().map_err(|e| e.to_string())?;
+        *cfg = config.clone();
+    }
+    Ok(config)
+}
+
 // === Data Commons ===
 
 #[tauri::command]
@@ -3070,6 +3148,8 @@ pub fn run() {    env_logger::init();
             oled_set_config,
             buzzer_get_config,
             buzzer_set_config,
+            detection_get_config,
+            detection_set_config,
             commons_submit,
             export_and_submit_commons,
             get_data_dir,
