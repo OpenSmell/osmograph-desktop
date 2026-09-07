@@ -2940,6 +2940,14 @@ async function analyzeLibrarySession(idx: number) {
   }
 }
 
+// Compact library timestamp — one line, no seconds/AM-PM noise. Sessions are
+// usually minutes apart; the full date is a hover away in the inspector.
+function fmtLibTime(ts: number): string {
+  const d = new Date(ts * 1000);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 async function reloadLibrary() {
   try {
     compareSeriesCache.clear();
@@ -2960,7 +2968,7 @@ async function reloadLibrary() {
       if (report && typeof report.total === 'number') quality = Math.round(report.total);
       return {
         id: `s-${r.file_id}`,
-        time: new Date(r.timestamp * 1000).toLocaleString(),
+        time: fmtLibTime(r.timestamp),
         substance: r.substance === 'unknown' ? 'Unknown' : r.substance,
         label: r.label,
         format: 'CSV',
@@ -3703,7 +3711,7 @@ function addPhaseToLibrary(summary: PhaseRecordingSummary) {
   if (!summary.path || !summary.file_id) return;
   sessions.unshift({
     id: `s-${summary.file_id}`,
-    time: new Date().toLocaleString(),
+    time: fmtLibTime(Date.now() / 1000),
     substance: summary.label === 'unknown' ? 'Unknown' : summary.label,
     label: 'Recorded',
     format: 'OSMELL',
@@ -5269,11 +5277,16 @@ function phenoA3Reason(reason: string): string {
 }
 
 function drawBoundaryList(p: PhenotypeReport) {
+  // The fingerprint cell hosts the live radar; the honesty caveats (what the
+  // measured phenotype can/can't claim) belong on the ⓘ affordance's hover
+  // tooltip rather than cluttering the canvas.
   const el = document.getElementById('phenoBoundList');
-  if (!el) return;
-  const cannot = p.boundaries_cannot.length ? p.boundaries_cannot.map((b) => `✗ ${b}`).join('<br/>') : '';
-  const caveat = p.caveat ? `<span title="${esc(p.caveat)}">⚠ ${esc(p.caveat)}</span>` : '';
-  el.innerHTML = cannot + (cannot && caveat ? '<br/><br/>' : '') + caveat;
+  if (el) el.innerHTML = '';
+  const hint = document.querySelector('#phenoBound .fp-hint');
+  if (hint) {
+    const cannot = p.boundaries_cannot.map((b) => `✗ ${b}`).join('\n');
+    hint.setAttribute('title', `${cannot}\n\n${p.caveat}`);
+  }
 }
 
 function renderPhenotype(p: PhenotypeReport) {

@@ -786,6 +786,11 @@
       border-bottom: 1px dashed var(--border);
       padding-bottom: 3px;
     }
+    .fp-hint {
+      cursor: help;
+      color: var(--cyan);
+      margin-left: 4px;
+    }
     .pheno-val {
       font-family: var(--font-mono);
       font-size: 13px;
@@ -1061,11 +1066,6 @@
       min-height: 60px;
       display: block;
     }
-    .pheno-bound-cap {
-      max-height: 34px;
-      padding: 2px 0;
-      line-height: 1.5;
-    }
 
     /* === Library Tab === */
     .library {
@@ -1259,6 +1259,7 @@
       border-bottom: 1px solid var(--border);
       color: var(--text-1);
     }
+    tbody td:nth-child(2) { white-space: nowrap; } /* Time — single line */
     tbody tr:hover { background: var(--bg-2); }
     tbody tr.selected { background: var(--blue-dim); }
     .quality-badge {
@@ -2234,11 +2235,10 @@
                     <div class="pheno-sub" id="phenoA2Sub">—</div>
                   </div>
                   <div class="pheno-sep"></div>
-                  <div class="pheno-cell grow" id="phenoBound">
-                    <div class="pheno-cell-head">Fingerprint</div>
-                    <div class="pheno-limits pheno-bound-cap" id="phenoBoundList"></div>
+<div class="pheno-cell grow" id="phenoBound">
+                    <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span></div>
                     <canvas id="fingerprint"></canvas>
-</div>
+                  </div>
                 </div>
               </div>
             </div>
