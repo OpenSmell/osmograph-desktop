@@ -222,7 +222,7 @@ fn handle_reader_line(
     }
 
     let now = now_secs();
-    let mut detect_and_publish = |n: usize, source: &str| {
+    let detect_and_publish = |n: usize, source: &str| {
         if (1..=MAX_CHANNELS).contains(&n) {
             if let Ok(mut cc) = channel_count.lock() {
                 if *cc != n {
@@ -2788,7 +2788,7 @@ fn export_and_submit_commons(
     let dir = std::path::Path::new(&data_dir);
     // Export labeled data — writes session_*.csv / session_*.json into dir.
     {
-        let mut labeling = state.labeling.lock().map_err(|e| e.to_string())?;
+        let labeling = state.labeling.lock().map_err(|e| e.to_string())?;
         labeling.export_for_commons(dir).map_err(|e| e.to_string())?;
     }
     // Submit every exported session pair.

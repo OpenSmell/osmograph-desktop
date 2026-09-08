@@ -13,7 +13,7 @@ use super::csv_parse::parse_session_csv;
 /// + time/channel series). Events are carried for future analysis panels.
 #[derive(Debug, Clone)]
 pub struct OsmellBundle {
-    pub sensor_type: String,
+    #[allow(dead_code)] pub sensor_type: String,
     pub channels: Vec<(String, Vec<f64>)>,
     pub time: Vec<f64>,
     pub adc_max: Option<f64>,
@@ -21,7 +21,7 @@ pub struct OsmellBundle {
     pub role: String,
     pub baseline_source: String,
     pub r0_samples: Option<usize>,
-    pub events: Vec<Value>,
+    #[allow(dead_code)] pub events: Vec<Value>,
 }
 
 /// Read a `.osmell` bundle from disk (io.py::parse_osmell_file).

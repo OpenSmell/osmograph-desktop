@@ -186,11 +186,11 @@ fn a2_kinetics(per_channel: &[ChannelVerdict], vals_by_channel: &[Vec<f64>]) -> 
         }
         // Locate the peak relative to the window start.
         let n = vals.len();
-        let (mut peak_i, mut peak_v) = (0usize, f64::MIN);
+        let (mut _peak_i, mut peak_v) = (0usize, f64::MIN);
         for (i, &v) in vals.iter().enumerate() {
             if v > peak_v {
                 peak_v = v;
-                peak_i = i;
+                _peak_i = i;
             }
         }
         let peak_abs = peak_v.abs();
@@ -200,7 +200,7 @@ fn a2_kinetics(per_channel: &[ChannelVerdict], vals_by_channel: &[Vec<f64>]) -> 
         // Rise completed once the signal passes 90% of its (from-start) swing.
         let start = vals[0];
         let swing = peak_v - start;
-        let high = start + swing * 0.9;
+        let _high = start + swing * 0.9;
         let mut rise_frac = 1.0_f64;
         for (i, &v) in vals.iter().enumerate() {
             if swing > 0.0 && (v - start) >= swing * 0.5 {
