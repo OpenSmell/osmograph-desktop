@@ -865,8 +865,16 @@ tracesCanvas?.addEventListener('click', () => { cursorPX = -1; cursorPY = -1; tr
 // === Data Ingestion ===
 async function ingestReading(values: number[]) {
   if (values.length === 0) return;
-  // Channels are auto-detected from the device (Rust `serial-auto`/`serial-info`
-  // events → applyDetectedChannels). Here we just push whatever the stream gave.
+  // Self-heal the live buffers to the ACTUAL stream width before pushing.
+  // Auto-detect can race the first samples and an "Auto" connect leaves
+  // traceData empty — without this, live samples are silently dropped by the
+  // `min(values.length, traceData.length)` guard below and the plot stays blank
+  // while the fingerprint (which reads `values` directly) still moves.
+  // setChannelCount early-returns when count already matches, so this is a
+  // no-op on the steady-state path and only reallocates on a real width change.
+  if (traceData.length !== values.length) {
+    setChannelCount(values.length);
+  }
   for (let ch = 0; ch < Math.min(values.length, traceData.length); ch++) {
     traceData[ch].push(values[ch]);
     historyData[ch].push(values[ch]);
@@ -2374,8 +2382,11 @@ function applyCustomNames() {
     chNames = [...names];
   }
   channelKinds = [];
-  traceData = newTraceChannels(channelCount);
-  traceDirty = true;
+  // NOTE: renaming must NEVER reallocate the live buffers. This runs on every
+  // serial-info/serial-auto event, and wiping traceData there blanked the plot
+  // on each INFO (the old `traceData = newTraceChannels(...)` reset caused a
+  // subtle "graph keeps starting over / never shows" bug on devices that re-send
+  // INFO). Buffer width is owned by setChannelCount + ingest-time adaptation.
   buildLegend();
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(channelCount);
