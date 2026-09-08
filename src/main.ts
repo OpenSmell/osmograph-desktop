@@ -658,6 +658,10 @@ function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
 // === Canvas: Fingerprint (radar) ===
 const fpCanvas = document.getElementById('fingerprint') as HTMLCanvasElement;
 const fpCtx = fpCanvas.getContext('2d')!;
+// Stable per-channel scale for the live fingerprint radar (peak-hold with slow
+// decay), so a single noisy sample cannot re-normalize the whole radar and make
+// the shape "breathe" or jerk sample to sample.
+let fingerprintScale: number[] = [];
 
 function drawFingerprint(values: number[]) {
   const rect = fpCanvas.parentElement!.getBoundingClientRect();
@@ -697,8 +701,18 @@ function drawFingerprint(values: number[]) {
 
   if (values.length === 0) return;
 
-  // Normalize values
-  const maxVal = Math.max(...values, 1);
+  // Peak-hold scale per channel with slow decay; seed on first sight. Norming
+  // each axis against its own scale (not one global max) keeps the radar shape
+  // stable while a single channel spikes or the rig idles at baseline.
+  if (fingerprintScale.length !== n) fingerprintScale = new Array(n).fill(0);
+  const norms: number[] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const mag = Math.abs(values[i] ?? 0);
+    fingerprintScale[i] = fingerprintScale[i] <= 0
+      ? (mag || 1e-9)
+      : Math.max(fingerprintScale[i] * 0.99, mag);
+    norms[i] = fingerprintScale[i] > 0 ? Math.abs(values[i] ?? 0) / fingerprintScale[i] : 0;
+  }
 
   // Fill — cyan (live monitoring data accent), per the paper & ink discipline
   fpCtx.fillStyle = 'rgba(14, 116, 144, 0.12)';
@@ -708,7 +722,7 @@ function drawFingerprint(values: number[]) {
   for (let i = 0; i <= n; i++) {
     const idx = i % n;
     const angle = (idx / n) * Math.PI * 2 - Math.PI / 2;
-    const norm = values[idx] !== undefined ? values[idx] / maxVal : 0;
+    const norm = norms[idx] ?? 0;
     const x = cx + Math.cos(angle) * r * norm;
     const y = cy + Math.sin(angle) * r * norm;
     i === 0 ? fpCtx.moveTo(x, y) : fpCtx.lineTo(x, y);
@@ -722,7 +736,7 @@ function drawFingerprint(values: number[]) {
   fpCtx.textAlign = 'center';
   for (let i = 0; i < n; i++) {
     const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-    const norm = values[i] !== undefined ? values[i] / maxVal : 0;
+    const norm = norms[i] ?? 0;
     const x = cx + Math.cos(angle) * r * norm;
     const y = cy + Math.sin(angle) * r * norm;
     fpCtx.fillStyle = channelColor(i);

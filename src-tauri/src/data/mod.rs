@@ -108,7 +108,13 @@ pub fn parse_osm_line(line: &str, expected_channels: usize) -> Option<Vec<f64>> 
     Some(values)
 }
 
-/// Python `DataValidator` (validator.py:19-72): per-sample streaming validation.
+/// Streaming sample validation. Based on Python `DataValidator`
+/// (validator.py:19-72) with one deliberate hardening change: a resting baseline
+/// where all channels sit at the same value is legitimate stream data and is
+/// kept (the Python rule that dropped near-zero-variance samples blanked the
+/// live plot for idle rigs). Small negative dips are tolerated; only genuinely
+/// out-of-range or non-finite samples count as gibberish. Quality analysis
+/// still grades recordings honestly on top of this.
 #[derive(Clone)]
 pub struct SampleValidator {
     consecutive_zeros: usize,
@@ -147,18 +153,15 @@ impl SampleValidator {
         }
         self.consecutive_zeros = 0;
 
-        if sample.iter().any(|&v| v < 0.0 || v > VALIDATOR_HARD_LIMIT) {
+        if sample.iter().any(|&v| v < -50.0 || v > VALIDATOR_HARD_LIMIT) {
             self.total_gibberish += 1;
             return None;
         }
 
-        let mean = sample.iter().sum::<f64>() / sample.len() as f64;
-        let variance =
-            sample.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / sample.len() as f64;
-        if variance.sqrt() < 1e-8 {
-            self.total_gibberish += 1;
-            return None;
-        }
+        // A resting baseline where all channels sit at the same value is
+        // legitimate stream data (an idle MOX array idles equal), not garbage —
+        // dropping it blanks the live plot. Only non-finite / out-of-range
+        // samples are counted as gibberish.
 
         Some(sample.to_vec())
     }
@@ -500,9 +503,13 @@ mod tests {
         let mut v = SampleValidator::new();
         assert!(v.validate(&[1200.0, 1300.0, 1400.0]).is_some());
         assert!(v.validate(&[f64::NAN, 1.0, 2.0]).is_none());
-        assert!(v.validate(&[-1.0, 2.0, 3.0]).is_none());
+        // Small negative dips from relative signals are noise, not garbage.
+        assert!(v.validate(&[-1.0, 2.0, 3.0]).is_some());
+        // A resting baseline (all channels equal) is legitimate — the graph must
+        // still render it.
+        assert!(v.validate(&[1.0, 1.0, 1.0]).is_some());
+        assert!(v.validate(&[-1000.0, 2.0, 3.0]).is_none());
         assert!(v.validate(&[6000.0, 2.0, 3.0]).is_none());
-        assert!(v.validate(&[1.0, 1.0, 1.0]).is_none()); // std < 1e-8
     }
 
     #[test]
