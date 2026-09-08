@@ -193,7 +193,6 @@ mod tests {
         assert!(!status.running, "must not auto-run on a fresh install");
 
         // Start begins counting.
-        let status = get_status(&dir).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10));
         let started = start(&dir, None).unwrap();
         assert!(started.running, "start should begin the countdown");

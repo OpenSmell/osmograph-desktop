@@ -4490,6 +4490,16 @@ listen<{ code: number; message: string }>('serial-error', (event) => {
   }
 });
 
+listen<{ title: string; message: string }>('error-dialogue', (event) => {
+  console.error(`${event.payload.title}: ${event.payload.message}`);
+  const { title, message } = event.payload;
+  if (title) {
+    showToast(`${title}: ${message}`, 6000);
+  } else {
+    showToast(message, 6000);
+  }
+});
+
 function dropLink(reason: string) {
   connected = false;
   bootloaderHinted = false;

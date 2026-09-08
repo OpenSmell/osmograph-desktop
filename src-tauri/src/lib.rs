@@ -318,7 +318,7 @@ fn connect_serial(
         .timeout(Duration::from_millis(50))
         .open()
         .map_err(|e| {
-            match e.kind() {
+            let msg = match e.kind() {
                 serialport::ErrorKind::Io(std::io::ErrorKind::PermissionDenied) => {
                     "Permission denied. Add your user to the 'dialout' group:\n  sudo usermod -a -G dialout $USER\nThen log out and back in.".to_string()
                 }
@@ -326,7 +326,9 @@ fn connect_serial(
                     format!("Port {} not found. Is the device plugged in and in work mode (not bootloader)?", port)
                 }
                 _ => format!("Failed to open {}: {}", port, e),
-            }
+            };
+            emit_error_dialogue(&app, "Serial connect failed", msg.clone());
+            msg
         })?;
 
     *state.serial_port_name.lock().map_err(|e| e.to_string())? = Some(port.clone());
@@ -2730,6 +2732,22 @@ pub struct BuzzerAlertEvent {
     pub pattern: String,
     pub volume: u8,
     pub frequency_hz: u16,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub struct ErrorDialogueEvent {
+    pub title: String,
+    pub message: String,
+}
+
+fn emit_error_dialogue(app: &tauri::AppHandle, title: impl Into<String>, message: impl Into<String>) {
+    let _ = app.emit(
+        "error-dialogue",
+        ErrorDialogueEvent {
+            title: title.into(),
+            message: message.into(),
+        },
+    );
 }
 
 // === Detection Configuration ===
