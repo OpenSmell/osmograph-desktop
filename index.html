@@ -569,6 +569,22 @@
     .trace-legend .tl-kind { color: var(--text-3); font-weight: 700; }
     .trace-legend .tl-unit { color: var(--text-3); opacity: 0.75; font-size: 8px; }
     .trace-legend .tl-chip:hover .tl-unit { opacity: 1; }
+    .trace-legend .tl-edit {
+      color: var(--text-3); cursor: pointer; opacity: 0; padding: 0 2px;
+      transition: opacity 0.12s ease, color 0.12s ease;
+    }
+    .trace-legend .tl-chip:hover .tl-edit { opacity: 1; }
+    .trace-legend .tl-edit:hover { color: var(--ink); }
+    .trace-legend .tl-chip .tl-edit-input {
+      font-family: var(--font-mono); font-size: 10px;
+      color: var(--text-0); background: var(--bg-1);
+      border: 1px solid var(--border-strong); padding: 0 4px; width: 84px;
+    }
+    .trace-legend .tl-chip .tl-edit-kind {
+      font-family: var(--font-mono); font-size: 10px;
+      color: var(--text-2); background: var(--bg-1);
+      border: 1px solid var(--border); padding: 0 2px;
+    }
     /* Trading-view hover readout (per-channel values under the cursor) */
     .hover-readout {
       display: flex;
@@ -1789,10 +1805,71 @@
       border-radius: 3px;
       border: 1px solid var(--border);
     }
-    .device-card .fleet-kind.recognized {
+.device-card .fleet-kind.recognized {
       color: var(--green);
-      border-color: var(--green);
-      background: var(--green-dim);
+    }
+    .device-card .fleet-kind.unknown {
+      color: var(--text-3);
+    }
+    /* Fleet sensor-health cards: one per channel with score + verdict. */
+    .fleet-health {
+      margin-top: 12px;
+      background: var(--bg-1);
+    }
+    .fleet-health-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+      gap: 8px;
+      padding: 10px 12px 12px;
+    }
+    .health-card {
+      border: 1px solid var(--border);
+      background: var(--bg-0);
+      padding: 8px 10px;
+      min-width: 0;
+    }
+    .health-card .hc-head {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+    }
+    .health-card .hc-name {
+      font-family: var(--font-mono);
+      font-weight: 600;
+      color: var(--text-0);
+      font-size: 11px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .health-card .hc-status {
+      margin-left: auto;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .health-card .hc-score {
+      font-family: var(--font-mono);
+      font-size: 20px;
+      font-weight: 700;
+      line-height: 1.1;
+      margin-top: 4px;
+    }
+    .health-card .hc-reco {
+      font-size: 11px;
+      color: var(--text-2);
+      line-height: 1.4;
+      margin-top: 4px;
+    }
+    .health-card .hc-metrics {
+      display: flex;
+      gap: 10px;
+      margin-top: 6px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      color: var(--text-3);
+      flex-wrap: wrap;
     }
     .device-card .fleet-kind.unknown {
       color: var(--yellow);
@@ -2044,9 +2121,7 @@
     .modal-actions button { padding: 5px 12px; }
 
     /* === Flash modal / drop hint / train shortfall === */
-    .rig-bar { display: flex; align-items: center; gap: 6px; padding: 3px 0 5px; flex-wrap: wrap; }
-    .rg-note { font-size: 10px; color: var(--text-3); }
-    .rg-note.ok { color: var(--green); }
+
     .drop-hint {
       position: absolute; inset: 0; z-index: 20;
       display: flex; align-items: center; justify-content: center;
@@ -2079,6 +2154,25 @@
       box-shadow: 0 6px 24px rgba(0,0,0,.12);
     }
     .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+    /* === Legibility floor (accessibility) ===
+       Small-needle labels/hints share one override so non-developer users on
+       tablet or phone don't have to squint. Dense numeric readouts keep their
+       tighter spacing — the phonics here stay data-first. */
+    .hud-panel-head, .quality-prov, .coord-tag, .section-label,
+    .tab-btn .badge, .trace-legend span, .trace-legend .tl-unit,
+    .hover-readout, .hover-readout .xr-ppm, .plot-tagbar,
+    .plot-tagbar .transport-select, .dock-head, .pheno-cell-head, .pheno-sub,
+    .pheno-chip, .pheno-caption, .pheno-limits, .pheno-limits-link, .dy-label,
+    .health-cell, .sidebar-section h3, .metric .k, .cc-label, .cmp-chip,
+    .compare-labels, .cmp-metrics-table th, thead th, .quality-badge,
+    .lib-analyze, .inspector-section h4, .train-step b, .train-field label,
+    .sch-reg, .device-card .fleet-kind, .preset-chip, .map-gpio, .calib-head,
+    .sensor-lib-table th, .mini-btn, .sensor-slot .s-name,
+    .burnin-display .bd-label, .ps-hint {
+      font-size: 10px;
+    }
+    .form-row .hint { font-size: 11px; }
   </style>
 </head>
 <body>
@@ -2184,10 +2278,7 @@
               <button id="liveClear" class="transport-btn trans-nav" title="Clear the displayed window">⟲</button>
             </div>
             <div id="hoverReadout" class="hover-readout" style="display:none"></div>
-            <div class="rig-bar">
-              <span class="sys-tag" title="Channel count is auto-detected from the connected device's stream — no manual selection.">RIG</span>
-              <span id="rigNote" class="rg-note">Connect a device — its channels are auto-detected from the stream.</span>
-            </div>
+
             <div class="phase-hud" id="phaseHud" style="display:none">
               <div class="phase-hud-head">
                 <span id="phasePhase" style="font-weight:bold;font-size:11px;text-transform:uppercase;letter-spacing:1px"></span>
@@ -2514,6 +2605,17 @@
             <button id="fleetScan">Scan Network</button>
           </div>
           <div class="fleet-grid hud-panel" id="fleetGrid"></div>
+          <div class="fleet-health hud-panel">
+            <div class="hud-panel-head">
+              <span class="hp-num">HK</span>
+              <span>Connected Device — Sensor Health</span>
+              <span class="hp-fill"></span>
+              <span class="coord-tag" id="fleetHealthStamp">no stream yet</span>
+            </div>
+            <div class="fleet-health-grid" id="fleetHealthGrid">
+              <div style="font-size:11px;color:var(--text-3);padding:8px">Connect a device and stream data to see each sensor's live health assessment.</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -2961,6 +3063,30 @@ Confidence: 97.3%</div>
                 <button id="dataSubmitCommons">Submit Labeled Data to Vetting</button>
               </div>
               <p class="hint" style="margin-top:6px">Submitting sends the current labeled data through automated quality checks into the Data Hub review queue below.</p>
+            </div>
+
+            <div class="card" style="border-color:var(--border)">
+              <h3>Reset &amp; Forget</h3>
+              <p class="hint" style="margin-bottom:8px">
+                Wipe this app clean — recordings, saved settings, or both. Nothing leaves the machine;
+                exported data stays exported. This cannot be undone, so confirm below.
+              </p>
+              <div class="form-row">
+                <label>Scope</label>
+                <select id="resetScope">
+                  <option value="recordings" selected>Recordings (library CSV sessions)</option>
+                  <option value="settings">Settings (presets, names, calibration &amp; profile)</option>
+                  <option value="all">Everything (recordings + settings)</option>
+                </select>
+              </div>
+              <div class="form-row" style="margin-top:6px">
+                <label>Type RESET to confirm</label>
+                <input type="text" id="resetConfirm" placeholder="RESET" autocomplete="off" spellcheck="false" style="flex:1;min-width:0;font-family:var(--font-mono)" />
+              </div>
+              <div class="form-row" style="margin-top:6px">
+                <button id="resetDo" disabled>Reset &amp; Forget</button>
+                <span class="hint" id="resetStatus" style="align-self:center"></span>
+              </div>
             </div>
 
             <div class="card">

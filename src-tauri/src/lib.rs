@@ -2158,6 +2158,35 @@ fn rename_session(state: State<AppState>, file_id: String, new_name: String) -> 
     Ok(())
 }
 
+/// Delete every recorded session from disk and reset the library index.
+/// Used by the "Reset & Forget" flow so a user can wipe the local library
+/// without hunting individual files.
+#[tauri::command]
+fn clear_recordings(state: State<AppState>) -> Result<usize, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let removed = clear_recordings_files(&dir, &mut index);
+    state
+        .csv_summaries
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clear();
+    Ok(removed)
+}
+
+/// Testable core of `clear_recordings`: drop every indexed record, delete its
+/// on-disk CSV, and persist the emptied index.
+fn clear_recordings_files(dir: &std::path::Path, index: &mut crate::data::SessionIndex) -> usize {
+    let mut removed = 0usize;
+    for record in std::mem::take(&mut index.records) {
+        if std::fs::remove_file(&record.csv_path).is_ok() {
+            removed += 1;
+        }
+    }
+    let _ = index.save(dir);
+    removed
+}
+
 fn current_preset_name(state: &State<'_, AppState>) -> String {
     match *state.channel_count.lock().unwrap_or_else(|e| e.into_inner()) {
         3 => "3-sensor",
@@ -2380,26 +2409,73 @@ fn get_sensor_health(state: State<AppState>) -> Result<Vec<SensorHealthInfo>, St
     if readings.is_empty() { return Ok(vec![]); }
 
     let n_channels = readings[0].len().min(8);
+    // Health is assessed over a rolling ~30 s window (up to 300 @ 10 Hz) so the
+    // verdict reflects the *recent* behaviour of the sensor, not hours-old data.
+    let tail = readings.len().min(300);
+    let start = readings.len() - tail;
     let mut health = Vec::new();
 
     for ch in 0..n_channels {
-        let values: Vec<f64> = readings.iter().filter_map(|r| r.get(ch).copied()).collect();
+        let values: Vec<f64> = readings[start..].iter().filter_map(|r| r.get(ch).copied()).collect();
         if values.is_empty() { continue; }
-        let mean = values.iter().sum::<f64>() / values.len() as f64;
-        let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / values.len() as f64;
-        let std_dev = variance.sqrt();
-        let cv = if mean > 0.0 { std_dev / mean } else { 0.0 };
-        let health_score = if cv < 0.1 { 1.0 } else if cv < 0.2 { 0.7 } else if cv < 0.3 { 0.4 } else { 0.1 };
-        health.push(SensorHealthInfo {
-            channel: ch,
-            health_score,
-            mean,
-            std: std_dev,
-            cv,
-            status: if health_score > 0.7 { "OK".into() } else if health_score > 0.4 { "WARNING".into() } else { "CRITICAL".into() },
-        });
+        health.push(assess_channel_health(ch, &values));
     }
     Ok(health)
+}
+
+/// Per-channel health assessment from a rolling window of live readings.
+/// Combines coefficient-of-variation stability (baseline), a first-difference
+/// noise floor, and half-window drift rate, plus explicit stuck-at-zero
+/// detection — a perfectly flat trace is NOT healthy, it is unresponsive.
+fn assess_channel_health(channel: usize, values: &[f64]) -> SensorHealthInfo {
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let std = (values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n).sqrt();
+    let cv = if mean.abs() > 1e-9 { std / mean.abs() } else { 0.0 };
+
+    // Noise floor: RMS of successive differences (temporal resolution).
+    let noise_floor = if values.len() > 1 {
+        (values.windows(2).map(|w| (w[1] - w[0]).powi(2)).sum::<f64>() / (values.len() - 1) as f64).sqrt()
+    } else { 0.0 };
+
+    // Drift rate: relative change between the first and second halves.
+    let half = values.len() / 2;
+    let drift_rate = if half > 0 {
+        let first: f64 = values[..half].iter().sum::<f64>() / half as f64;
+        let second: f64 = values[half..].iter().sum::<f64>() / (values.len() - half) as f64;
+        if first.abs() > 1e-10 { (second - first).abs() / first.abs() } else { 0.0 }
+    } else { 0.0 };
+
+    // Anything with zero variance is stuck/unresponsive, whatever its level.
+    let stuck = std <= 1e-9;
+    let (health_score, status, recommendation) = if stuck {
+        (0.0, "FAILED".to_string(),
+         "No signal change — sensor unresponsive. Check wiring, power and the MQ heater.".to_string())
+    } else if cv >= 0.3 || drift_rate > 0.15 {
+        (0.1, "CRITICAL".to_string(),
+         format!("High drift ({:.0}%) or noise — recalibrate, or replace the sensor.", drift_rate * 100.0))
+    } else if cv >= 0.2 || drift_rate > 0.08 {
+        (0.4, "WARNING".to_string(),
+         format!("Drift rising ({:.0}%) — recalibrate the baseline soon.", drift_rate * 100.0))
+    } else if cv >= 0.1 {
+        (0.7, "WARNING".to_string(),
+         "Elevated noise floor — monitor, baseline may need a refresh.".to_string())
+    } else {
+        (1.0, "OK".to_string(), "Operating normally.".to_string())
+    };
+
+    SensorHealthInfo {
+        channel,
+        health_score,
+        mean,
+        std,
+        cv,
+        noise_floor,
+        drift_rate,
+        stuck,
+        status,
+        recommendation,
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -2409,7 +2485,11 @@ pub struct SensorHealthInfo {
     pub mean: f64,
     pub std: f64,
     pub cv: f64,
+    pub noise_floor: f64,
+    pub drift_rate: f64,
+    pub stuck: bool,
     pub status: String,
+    pub recommendation: String,
 }
 
 // === Data Export ===
@@ -3153,6 +3233,7 @@ pub fn run() {    env_logger::init();
             get_session_index,
             remove_session,
             rename_session,
+            clear_recordings,
             analyze_recording,
             export_session_copy,
             export_session_osmell,
@@ -3204,7 +3285,8 @@ pub fn run() {    env_logger::init();
 
 #[cfg(test)]
 mod tests {
-    use super::{avr_pins_for, board_fqbn, board_label, board_pio_env, channels_for, classify_vid_pid, sensor_pins_for};
+    use super::{avr_pins_for, board_fqbn, board_label, board_pio_env, channels_for, classify_vid_pid, clear_recordings_files, assess_channel_health, sensor_pins_for};
+    use crate::data::{SessionIndex, SessionRecord};
 
     #[test]
     fn preset_channel_counts_match_frontend_presets() {
@@ -3214,6 +3296,64 @@ mod tests {
         assert_eq!(channels_for("4-sensor-safety"), 4);
         assert_eq!(channels_for("6-sensor-full"), 6);
         assert_eq!(channels_for("8-sensor-max"), 8);
+    }
+
+    #[test]
+    fn sensor_health_detects_stuck_unresponsive_channel() {
+        // A perfectly flat trace means "no signal": FAILED, not a healthy 1.0.
+        let flat = assess_channel_health(0, &vec![1000.0; 120]);
+        assert!(flat.stuck, "flat trace must be flagged as stuck");
+        assert_eq!(flat.status, "FAILED");
+        assert!(flat.health_score < 0.1);
+        assert!(flat.recommendation.to_lowercase().contains("unresponsive"));
+
+        // A gentle noisy-but-stable baseline around a mean is healthy.
+        let mut noisy = Vec::new();
+        for i in 0..120 {
+            let v = 1000.0 + (i % 5) as f64;
+            noisy.push(v);
+        }
+        let ok = assess_channel_health(1, &noisy);
+        assert_eq!(ok.status, "OK");
+        assert!(!ok.stuck);
+
+        // Rapidly rising readings (sensor response / strong drift) earn a warning.
+        let mut ramping = Vec::new();
+        for i in 0..120 {
+            ramping.push(1000.0 + i as f64 * 4.0);
+        }
+        let warn = assess_channel_health(2, &ramping);
+        assert_eq!(warn.status, "CRITICAL");
+        assert!(warn.drift_rate > 0.15);
+    }
+
+    #[test]
+    fn clear_recordings_removes_files_and_index() {
+        let tmp = std::env::temp_dir().join(format!("osm-tst-clear-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let csv = tmp.join("20260101_000000_000000_garlic.csv");
+        std::fs::write(&csv, "timestamp,VOC,CO\n0,1000,20\n").unwrap();
+        let mut index = SessionIndex::default();
+        index.upsert(SessionRecord {
+            file_id: "20260101_000000_000000".to_string(),
+            substance: "garlic".to_string(),
+            label: "garlic".to_string(),
+            csv_path: csv.to_string_lossy().to_string(),
+            timestamp: 0.0,
+            duration_sec: 1.0,
+            sensor_count: 2,
+            preset_name: String::new(),
+            notes: String::new(),
+            opensmell_result: None,
+            quality_report: None,
+            quality: 0.0,
+        });
+        let removed = clear_recordings_files(&tmp, &mut index);
+        assert_eq!(removed, 1, "one indexed recording should be removed");
+        assert!(index.records.is_empty(), "index must be emptied");
+        assert!(!csv.exists(), "on-disk CSV must be deleted");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

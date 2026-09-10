@@ -831,19 +831,78 @@ function buildLegend() {
   el.innerHTML = chNames.map((name, i) => {
     const k = kindOf(i);
     const meta = KIND_META[k];
-    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) — hover to isolate, click the eye to toggle"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span>${name}<span class="tl-unit">${meta.unit}</span></span>`;
+    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span>${name}<span class="tl-unit">${meta.unit}</span><span class="tl-edit" title="Rename this channel / set its sensor kind">✎</span></span>`;
   }).join('');
   updatePlotScaleNote();
   el.querySelectorAll<HTMLElement>('.tl-chip').forEach((chip) => {
-    chip.addEventListener('mouseenter', () => { hoverSeries = parseInt(chip.dataset.ch || '-1', 10); });
+    const c = parseInt(chip.dataset.ch || '-1', 10);
+    chip.addEventListener('mouseenter', () => { hoverSeries = c; });
     chip.addEventListener('mouseleave', () => { hoverSeries = -1; });
     chip.addEventListener('click', (e) => {
-      const c = parseInt(chip.dataset.ch || '-1', 10);
+      if ((e.target as HTMLElement).closest('.tl-edit')) return;
       if (c < 0) return;
       if (hiddenChannels.has(c)) hiddenChannels.delete(c); else hiddenChannels.add(c);
       syncLegendState(chip, c);
     });
+    const edit = chip.querySelector('.tl-edit');
+    if (edit) edit.addEventListener('click', (e) => { e.stopPropagation(); editChannelInline(chip, c); });
   });
+}
+
+// Inline channel rename + sensor-kind picker on the live legend (✎). Commits
+// the name and kind into the shared hardware profile so Settings, calibration
+// and export all agree; re-derives the legend through applyCustomNames().
+function editChannelInline(chip: HTMLElement, c: number) {
+  const old = chNames[c] || `CH${c + 1}`;
+  const k = kindOf(c);
+  const options = (Object.keys(KIND_META) as ChannelKind[])
+    .map(kind => `<option value="${kind}" ${kind === k ? 'selected' : ''}>${KIND_META[kind].tag} · ${KIND_META[kind].unit}</option>`)
+    .join('');
+  chip.innerHTML = `<input class="tl-edit-input" type="text" value="${esc(old)}" data-ch="${c}" aria-label="Channel name" /><select class="tl-edit-kind" data-ch="${c}" aria-label="Sensor kind">${options}</select>`;
+  const nameIn = chip.querySelector('.tl-edit-input') as HTMLInputElement;
+  const kindSel = chip.querySelector('.tl-edit-kind') as HTMLSelectElement;
+  nameIn.focus();
+  nameIn.select();
+  let done = false;
+  const commit = () => {
+    if (done) return;
+    done = true;
+    const nm = nameIn.value.trim() || old;
+    // Keep every channel's name: build the full list from what's displayed,
+    // then swap this one, so a single-legend edit never blanks the others.
+    const list = chNames.slice();
+    while (list.length <= c) list.push(`CH${list.length + 1}`);
+    list[c] = nm;
+    hardwareProfile.customChannelNames = list;
+    persistHardwareProfile();
+    channelKinds[c] = kindSel.value as ChannelKind;
+    const nameInput = document.getElementById('channelNamesInput') as HTMLInputElement | null;
+    if (nameInput) nameInput.value = list.join(', ');
+    applyCustomNames();
+    traceDirty = true;
+  };
+  const cancel = () => { if (done) return; done = true; buildLegend(); };
+  nameIn.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  kindSel.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    else if (e.key === 'Enter') { e.preventDefault(); commit(); }
+  });
+  // Clicking the kind dropdown opens focus on it AFTER the name input is no
+  // longer focused — don't commit the old kind on that blur; the select's own
+  // change/blur commits instead. Abstracting to a short timer keeps clicks
+  // inside the chip from closing the editor underneath the pointer.
+  const safeCommit = () => { if (done) return; commit(); };
+  nameIn.addEventListener('blur', () => {
+    if (document.activeElement === kindSel) return;
+    window.setTimeout(safeCommit, 30);
+  });
+  kindSel.addEventListener('change', commit);
+  kindSel.addEventListener('blur', () => { window.setTimeout(safeCommit, 30); });
 }
 function syncLegendState(chip: HTMLElement, c: number) {
   chip.classList.toggle('tl-off', hiddenChannels.has(c));
@@ -1113,7 +1172,6 @@ async function toggleConnection() {
 
   autoChannels = 0;
   bootFlashShown = false;
-  updateRigNote();
 
   if (mode === 'wifi') {
     const addr = (document.getElementById('wifiAddr') as HTMLInputElement).value.trim();
@@ -1201,12 +1259,26 @@ async function toggleConnection() {
 
 // === Labeling ===
 // === Sensor Health ===
+interface SensorHealthInfoApi {
+  channel: number;
+  health_score: number;
+  mean: number;
+  std: number;
+  cv: number;
+  noise_floor: number;
+  drift_rate: number;
+  stuck: boolean;
+  status: string;
+  recommendation: string;
+}
+
 async function updateSensorHealth() {
   try {
-    const health = await invoke<Array<{ channel: number; health_score: number; status: string; mean: number }>>('get_sensor_health');
+    const health = await invoke<SensorHealthInfoApi[]>('get_sensor_health');
     const el = document.getElementById('sensorHealthList')!;
     if (health.length === 0) {
       el.innerHTML = '<div style="font-size:10px;color:var(--text-3)">No data yet</div>';
+      renderFleetHealth([]);
       return;
     }
     el.innerHTML = '<div class="health-grid">' + health.map((h, i) => {
@@ -1217,7 +1289,46 @@ async function updateSensorHealth() {
         <span class="hd-mean">${h.mean.toFixed(0)}</span>
       </div>`;
     }).join('') + '</div>';
+    renderFleetHealth(health);
   } catch {}
+}
+
+// Rich per-channel health cards in the Fleet tab: score, verdict, noise floor,
+// drift rate and an actionable recommendation — grounded in the same rolling
+// signal the sidebar summary uses.
+function renderFleetHealth(health: SensorHealthInfoApi[]) {
+  const grid = document.getElementById('fleetHealthGrid')!;
+  const stamp = document.getElementById('fleetHealthStamp')!;
+  if (!grid || !stamp) return;
+  if (health.length === 0) {
+    grid.innerHTML = '<div style="font-size:11px;color:var(--text-3);padding:8px">Connect a device and stream data to see each sensor\'s live health assessment.</div>';
+    stamp.textContent = 'no stream yet';
+    return;
+  }
+  const worst = health.reduce((a, b) => (b.health_score < a ? b.health_score : a), 1);
+  stamp.textContent = `${health.length} sensor(s) · worst ${(worst * 100).toFixed(0)}%`;
+  stamp.style.color = worst < 0.4 ? 'var(--red)' : worst < 0.8 ? 'var(--yellow)' : 'var(--green)';
+  grid.innerHTML = health.map((h, i) => {
+    const name = esc(chNames[i % chNames.length] || `CH${i + 1}`);
+    const statusColor = h.status === 'OK' ? 'var(--green)' : h.status === 'WARNING' ? 'var(--yellow)' : 'var(--red)';
+    const score = (h.health_score * 100).toFixed(0);
+    const noise = h.noise_floor.toExponential(1);
+    const drift = `${(h.drift_rate * 100).toFixed(1)}%`;
+    const reco = esc(h.recommendation);
+    return `<div class="health-card" style="border-color:${statusColor}66">
+      <div class="hc-head">
+        <span class="hc-name" title="${name} — channel ${h.channel + 1}">${name}</span>
+        <span class="hc-status" style="color:${statusColor}">${esc(h.status)}</span>
+      </div>
+      <div class="hc-score" style="color:${statusColor}">${score}</div>
+      <div class="hc-reco">${reco}</div>
+      <div class="hc-metrics">
+        <span title="Temporal resolution of the signal">noise ${noise}</span>
+        <span title="Relative change across the window">drift ${drift}</span>
+        <span title="Baseline level">mean ${h.mean.toFixed(0)}</span>
+      </div>
+    </div>`;
+  }).join('');
 }
 
 // === Quality ===
@@ -2065,7 +2176,6 @@ function setChannelCount(n: number, names?: string[]) {
     if (sc && sc.value !== '0') sc.value = '0';
     const pc = document.getElementById('plotChCount');
     if (pc) pc.textContent = 'auto';
-    updateRigNote();
     updateRailCoord();
     refreshCalibrationViews();
     return;
@@ -2087,7 +2197,6 @@ function setChannelCount(n: number, names?: string[]) {
   if (sc && sc.value !== String(next)) sc.value = String(next);
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(next);
-  updateRigNote();
   updateRailCoord();
   refreshCalibrationViews();
 }
@@ -2104,29 +2213,12 @@ function applyDetectedChannels(n: number, source?: string) {
   else channelCount = count;
   // If the user has custom channel names for this count, apply them now.
   applyCustomNames();
-  updateRigNote();
   const cm = document.getElementById('connMsg');
   if (cm && wasConnected) {
     cm.textContent = `${count}-channel device detected (auto)`;
     cm.style.color = 'var(--text-3)';
   }
   console.log(`[osmograph] auto-detected ${count} channels (${source || 'stream'})`);
-}
-
-function defaultRigNote(): string {
-  return 'Connect a device — its channels are auto-detected from the stream.';
-}
-
-function updateRigNote() {
-  const note = document.getElementById('rigNote');
-  if (!note) return;
-  if (autoChannels > 0) {
-    note.textContent = `Auto-detected: ${autoChannels} channel${autoChannels === 1 ? '' : 's'} from the device — plot adapted.`;
-    note.classList.add('ok');
-  } else {
-    note.textContent = defaultRigNote();
-    note.classList.remove('ok');
-  }
 }
 
 function updateRailCoord() {
@@ -2416,7 +2508,6 @@ function onPresetChange(preset: string) {
   buildLegend();
   const pc = document.getElementById('plotChCount');
   if (pc) pc.textContent = String(channelCount);
-  updateRigNote();
   updateRailCoord();
   refreshCalibrationViews();
   const detail = document.getElementById('presetDetail');
@@ -3223,6 +3314,69 @@ document.getElementById('dataSubmitCommons')!.addEventListener('click', async ()
     await refreshHub();
   } catch (e) {
     await flashStatus('libStatus', `Submit failed: ${e}`, 'var(--red)');
+  }
+});
+
+// === Reset & Forget (System -> Data) ===
+const resetScopeEl = document.getElementById('resetScope') as HTMLSelectElement | null;
+const resetConfirmEl = document.getElementById('resetConfirm') as HTMLInputElement | null;
+const resetDoEl = document.getElementById('resetDo') as HTMLButtonElement | null;
+const resetStatusEl = document.getElementById('resetStatus');
+
+function updateResetDoState() {
+  if (resetDoEl && resetConfirmEl) {
+    resetDoEl.disabled = resetConfirmEl.value.trim().toUpperCase() !== 'RESET';
+  }
+}
+resetConfirmEl?.addEventListener('input', updateResetDoState);
+resetScopeEl?.addEventListener('change', () => { if (resetConfirmEl) resetConfirmEl.value = ''; updateResetDoState(); });
+
+async function resetSettings() {
+  const keys = [CP_KEY, LAST_CONN_KEY, PERIPH_KEY, HW_KEY, CALIB_KEY];
+  keys.forEach(k => localStorage.removeItem(k));
+  customPresets = [];
+  calibrationPerChannel = [];
+  if (peripheralState) Object.keys(peripheralState).forEach(k => { (peripheralState as unknown as Record<string, unknown>)[k] = false; });
+  try { persistPeripheralState(); } catch { /* ignore */ }
+}
+
+resetDoEl?.addEventListener('click', async () => {
+  if (!resetDoEl || resetDoEl.disabled) return;
+  if (!resetConfirmEl || resetConfirmEl.value.trim().toUpperCase() !== 'RESET') return;
+  resetDoEl.disabled = true;
+  const scope = resetScopeEl?.value || 'recordings';
+  if (resetStatusEl) resetStatusEl.textContent = '';
+  try {
+    let removed = 0;
+    if (scope === 'recordings' || scope === 'all') {
+      removed = await invoke<number>('clear_recordings');
+    }
+    if (scope === 'settings' || scope === 'all') {
+      await resetSettings();
+    }
+    sessions = [];
+    selectedSession = -1;
+    compareFiles = [];
+    renderLibrary();
+    loadCustomPresets();
+    loadHardwareProfile();
+    renderHardwareProfile();
+    loadCalibration();
+    renderEnvReadout(null);
+    if (resetConfirmEl) resetConfirmEl.value = '';
+    updateResetDoState();
+    const what = scope === 'all' ? 'Everything' : scope === 'settings' ? 'Settings' : 'Recordings';
+    if (resetStatusEl) {
+      resetStatusEl.textContent = `${what} reset — ${removed} recording(s) removed.`;
+      resetStatusEl.style.color = 'var(--green)';
+    }
+  } catch (e) {
+    if (resetStatusEl) {
+      resetStatusEl.textContent = `Reset failed: ${e}`;
+      resetStatusEl.style.color = 'var(--red)';
+    }
+  } finally {
+    resetDoEl.disabled = false;
   }
 });
 
@@ -4532,7 +4686,6 @@ function dropLink(reason: string) {
   channelKinds = [];
   renderEnvReadout(null);
   bootFlashShown = false;
-  updateRigNote();
   document.getElementById('bootBanner')?.classList.remove('show');
   document.getElementById('connectBtn')!.textContent = 'Connect';
   document.getElementById('statusDot')!.className = 'status-dot';
