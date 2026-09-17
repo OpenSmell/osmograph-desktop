@@ -153,13 +153,40 @@ let sessionStart: number | null = null;
 let sampleCount = 0;
 let lastSampleTime = 0;
 let lastDataAt = 0; // wall-clock of the last successfully-ingested reading (stall watchdog)
+let gotLiveData = false; // any valid reading genuinely ingested this link
 let bootloaderHinted = false; // device answered in bootloader during the current link session
 let bootFlashShown = false;   // the Flash modal was already auto-offered during this bootloader stall
+// Firmware `collectBaseline()` runs ~30 s silent (300 samples @ 100 ms) after
+// boot; stall past 35 s before ever suggesting the board is stuck unflashed.
+const BOOT_STALL_MS = 35000;
 let autoChannels = 0;         // channel count auto-detected from the live device stream (0 = none yet)
 let activePreset = '6-sensor-full';
 // Board type per serial port, from the last port refresh, so flashing can pick
 // the right firmware/toolchain: 'esp32' | 'arduino_uno' | '' (unknown).
 const portBoardMap = new Map<string, string>();
+// Raw USB kind per port ('osmograph-e-nose' | 'arduino_uno' | 'ch340' |
+// 'unknown-usb' | ...) so the UI can explain *why* flashing is held up.
+const portKindMap = new Map<string, string>();
+
+// Plain-language description of a raw USB kind (used in port labels and in the
+// "board not identified" fences so a held-up flash explains itself).
+function kindLabel(kind: string): string {
+  if (kind === 'osmograph-e-nose' || kind === 'esp32') return 'ESP32 e-nose';
+  if (kind === 'arduino_uno') return 'Arduino Uno';
+  if (kind === 'raspberry_pi_pico') return 'Raspberry Pi Pico';
+  if (kind === 'ch340') return 'CH340 adapter — could be an ESP32 OR an Arduino Nano';
+  if (kind && kind !== 'unknown-usb') return kind.replace(/_/g, ' ');
+  return 'USB-serial (unrecognised)';
+}
+
+// Board a port resolves to for flashing/erasing: an explicit manual override
+// wins; otherwise only a definitive VID:PID detection counts. Never falls back
+// to a guessed ESP32 — an unconfirmed (or CH340-ambiguous) target returns ''
+// so the caller must ask the user to pick the board first.
+function resolvedBoard(port: string, manual: string): string {
+  if (manual === 'esp32' || manual === 'arduino_uno') return manual;
+  return port ? portBoardMap.get(port) || '' : '';
+}
 let chNames: string[] = PRESETS['6-sensor-full'].sensors;
 // Fixed-size rolling buffers: push is O(1) regardless of window length (no
 // array `shift` memmove on every sample). Reads mirror the array surface the
@@ -1007,6 +1034,7 @@ async function ingestReading(values: number[]) {
   }
   lastSampleTime = now;
   lastDataAt = now;
+  gotLiveData = true;
   if (bootloaderHinted) {
     // Real data is flowing again — clear the bootloader diagnosis.
     bootloaderHinted = false;
@@ -1035,17 +1063,23 @@ async function refreshPorts() {
     const cur = sel.value;
     sel.innerHTML = '<option value="">Select port...</option>';
     portBoardMap.clear();
+    portKindMap.clear();
     for (const p of ports) {
       const opt = document.createElement('option');
       opt.value = p.name;
       const kind = p.kind;
-      // Map the raw kind to a board key that flash_firmware understands.
+      portKindMap.set(p.name, kind);
+      // Map the raw kind to a board key that flash_firmware understands. Only
+      // a definitive VID:PID resolves automatically; ambiguous/unknown adapters
+      // (CH340, unrecognised USB) resolve to '' so flashing asks the user to
+      // confirm the board instead of guessing ESP32.
       const board = (kind === 'osmograph-e-nose' || kind === 'esp32') ? 'esp32' :
         kind === 'arduino_uno' ? 'arduino_uno' : '';
       if (board) portBoardMap.set(p.name, board);
       const boardLabel = kind === 'osmograph-e-nose' ? 'ESP32 e-nose' :
         kind === 'arduino_uno' ? 'Arduino Uno' :
-        kind && kind !== 'unknown-usb' ? kind.replace(/_/g, ' ') : 'USB-SERIAL';
+        kind === 'ch340' ? 'CH340 — board? confirm in Firmware' :
+        kind && kind !== 'unknown-usb' ? kind.replace(/_/g, ' ') : 'USB-SERIAL (unrecognised)';
       const desc = p.description || p.manufacturer || '';
       opt.textContent = `${p.name} · ${boardLabel}${desc ? ' — ' + desc : ''}`;
       if (p.name === cur) opt.selected = true;
@@ -1131,12 +1165,16 @@ function updatePlotLinkState() {
   el.textContent = stalled ? '● NO DATA' : '● LIVE LINK';
   el.classList.toggle('stall', stalled);
   el.classList.toggle('on', !stalled);
-  // Only surface the bootloader diagnosis once we've actually lost data — a
-  // working device also emits a bootloader hint during its first lines, so on
-  // a normal connect this banner must never flash. The modal is offered once.
+  // Bootloader diagnosis must never fire on a healthy board: EVERY ESP32
+  // reset prints the ROM banner ("boot mode:..." — a keyword hit) and the
+  // flashed firmware then stays silent for ~30 s collecting its baseline.
+  // So only offer the re-flash path when a bootloader keyword matched AND no
+  // valid reading has ever arrived this link AND the silence outlasts the
+  // baseline window (BOOT_STALL_MS covers it with margin).
+  const blSuspected = bootloaderHinted && !gotLiveData && Date.now() - lastDataAt > BOOT_STALL_MS;
   const banner = document.getElementById('bootBanner');
-  if (banner) banner.classList.toggle('show', stalled && bootloaderHinted);
-  if (stalled && bootloaderHinted && !bootFlashShown) {
+  if (banner) banner.classList.toggle('show', blSuspected);
+  if (blSuspected && !bootFlashShown) {
     bootFlashShown = true;
     openFlashModal();
   }
@@ -1172,6 +1210,7 @@ async function toggleConnection() {
 
   autoChannels = 0;
   bootFlashShown = false;
+  gotLiveData = false;
 
   if (mode === 'wifi') {
     const addr = (document.getElementById('wifiAddr') as HTMLInputElement).value.trim();
@@ -2343,11 +2382,14 @@ function updatePreflight() {
 function boardDisplay(board: string): string {
   if (board === 'esp32') return 'ESP32';
   if (board === 'arduino_uno') return 'ARDUINO UNO';
+  if (board === 'ch340') return 'CH340 — CONFIRM BOARD';
   return board ? board.replace(/_/g, ' ').toUpperCase() : '—';
 }
 
 function activeBoard(): string {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
+  const manual = (document.getElementById('fwBoard') as HTMLSelectElement)?.value || '';
+  if (manual === 'esp32' || manual === 'arduino_uno') return manual;
   return port ? portBoardMap.get(port) || '' : '';
 }
 
@@ -2360,7 +2402,11 @@ function updateFwBoardLabel() {
 }
 
 function maxChannelsForBoard(board: string): number {
-  return board === 'arduino_uno' ? 6 : 12;
+  if (board === 'esp32') return 12;
+  if (board === 'arduino_uno') return 6;
+  // Unknown / CH340-ambiguous: cap at 6 until the board is confirmed, so the
+  // 8-sensor rig can't be flashed onto an Arduino by accident.
+  return 6;
 }
 
 function renderRigSchematic() {
@@ -4242,12 +4288,21 @@ async function refreshPlugins() {
 }
 
 document.getElementById('sysRefreshPorts')!.addEventListener('click', refreshPorts);
+// A manual board pick in the Firmware panel updates the board label immediately.
+document.getElementById('fwBoard')?.addEventListener('change', updateFwBoardLabel);
 document.getElementById('flashBtn')!.addEventListener('click', async () => {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   if (!port) return;
   const wifiSsid = (document.getElementById('fwSsid') as HTMLInputElement).value.trim();
   const wifiPassword = (document.getElementById('fwPass') as HTMLInputElement).value;
-  const board = portBoardMap.get(port) || 'esp32';
+  const manual = (document.getElementById('fwBoard') as HTMLSelectElement)?.value || '';
+  const board = resolvedBoard(port, manual);
+  if (!board) {
+    const kind = portKindMap.get(port) || 'unknown';
+    document.getElementById('flashStatus')!.textContent =
+      `Can't tell which board is on ${port} (${kindLabel(kind)}). Pick the board in Firmware → Board, then flash again.`;
+    return;
+  }
   if (board === 'arduino_uno' && presetChannelCount(activePreset) > 6) {
     document.getElementById('flashStatus')!.textContent = 'Arduino UNO has 6 analog inputs — pick a 6-channel (or smaller) rig preset.';
     return;
@@ -4286,8 +4341,9 @@ async function refreshToolchain() {
 document.getElementById('readMacBtn')!.addEventListener('click', async () => {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   if (!port) { document.getElementById('fwMac')!.textContent = 'Select a port first'; return; }
-  const board = portBoardMap.get(port) || '';
-  if (board !== 'esp32') { document.getElementById('fwMac')!.textContent = 'MAC read is ESP32-only — Arduino runs no esptool.'; return; }
+  const manual = (document.getElementById('fwBoard') as HTMLSelectElement)?.value || '';
+  const board = resolvedBoard(port, manual);
+  if (board !== 'esp32') { document.getElementById('fwMac')!.textContent = 'MAC read is ESP32-only — pick ESP32 in Firmware → Board first.'; return; }
   document.getElementById('fwMac')!.textContent = 'Reading…';
   try {
     const mac = await invoke<string>('read_mac', { port });
@@ -4300,8 +4356,14 @@ document.getElementById('readMacBtn')!.addEventListener('click', async () => {
 document.getElementById('eraseBtn')!.addEventListener('click', async () => {
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   if (!port) { document.getElementById('flashStatus')!.textContent = 'Select a port first'; return; }
-  const board = portBoardMap.get(port) || '';
-  if (board !== 'esp32') { document.getElementById('flashStatus')!.textContent = 'Erase is ESP32-only — Arduino runs no esptool.'; return; }
+  const manual = (document.getElementById('fwBoard') as HTMLSelectElement)?.value || '';
+  const board = resolvedBoard(port, manual);
+  if (board !== 'esp32') {
+    const kind = portKindMap.get(port) || 'unknown';
+    document.getElementById('flashStatus')!.textContent =
+      `Erase is blocked: this port isn't confirmed as an ESP32 (${kindLabel(kind)}). Erasing wipes the whole chip — pick ESP32 in Firmware → Board only if you're certain.`;
+    return;
+  }
   const ok = confirm('Erase the entire flash on ' + port + '? This is irreversible.');
   if (!ok) return;
   document.getElementById('flashStatus')!.textContent = 'Erasing…';
@@ -4335,7 +4397,9 @@ function renderFmWiring() {
     : PRESETS[preset]?.sensors) || [];
   const port = (document.getElementById('fmPort') as HTMLSelectElement).value;
   const activePort = (document.getElementById('portSelect') as HTMLSelectElement).value;
-  const board = portBoardMap.get(port || activePort) || 'esp32';
+  const manual = (document.getElementById('fmBoard') as HTMLSelectElement)?.value || '';
+  const auto = portBoardMap.get(port || activePort) || '';
+  const board = manual || auto;
   const isAvr = board === 'arduino_uno';
   const pins = isAvr
     ? Array.from({ length: Math.min(count, 6) }, (_, i) => `A${i}`)
@@ -4346,6 +4410,11 @@ function renderFmWiring() {
   }
   const names = Array.from({ length: Math.min(count, pins.length) }, (_, i) => sensors[i] || `CH${i + 1}`);
   const pinLabel = isAvr ? 'ANALOG' : 'GPIO';
+  if (!board) {
+    const kind = portKindMap.get(port || activePort) || 'unknown';
+    el.innerHTML = `<b>BOARD · CONFIRM</b> · ${kindLabel(kind)}. Pick ESP32 or Arduino Uno above to unlock flashing.<br><span style="opacity:.75">Preview shown on ESP32 pinout — not yet safe to flash.</span>`;
+    return;
+  }
   el.innerHTML = `<b>BOARD · ${boardDisplay(board)}</b> · <b>WIRING</b> · ${pins.length} CH → ${pinLabel} ${pins.join('/')}<br><span style="opacity:.75">${names.join(' · ')}</span>`;
 }
 
@@ -4362,7 +4431,9 @@ function populateFmPresets() {
   const prev = sel.value || (activePreset === 'auto' ? '6-sensor-full' : activePreset);
   const fmPort = (document.getElementById('fmPort') as HTMLSelectElement).value;
   const activePort = (document.getElementById('portSelect') as HTMLSelectElement).value;
-  const board = portBoardMap.get(fmPort || activePort) || 'esp32';
+  const manual = (document.getElementById('fmBoard') as HTMLSelectElement)?.value || '';
+  const auto = portBoardMap.get(fmPort || activePort) || '';
+  const board = manual || auto;
   const max = maxChannelsForBoard(board);
   const builtIns = Object.keys(PRESETS)
     .filter(id => PRESETS[id].sensors.length <= max)
@@ -4380,6 +4451,10 @@ function openFlashModal() {
   const modal = document.getElementById('flashModal');
   if (!modal) return;
   resetFmState();
+  // Re-detect the board on every open: a manual pick from a previous session
+  // must not silently survive — the user should confirm the target each time.
+  const fmBoard = document.getElementById('fmBoard') as HTMLSelectElement | null;
+  if (fmBoard) fmBoard.value = '';
   populateFmPresets();
   populateFmPort().then(() => {
     // Port-not-required nicety: if we already know which board we're talking to
@@ -4506,6 +4581,12 @@ document.getElementById('fmPort')?.addEventListener('change', () => {
   populateFmPresets();
   renderFmWiring();
 });
+// Choosing the board in the dialog re-filters the rig presets (an 8-sensor rig
+// is only valid on an ESP32) and re-renders the live wiring preview.
+document.getElementById('fmBoard')?.addEventListener('change', () => {
+  populateFmPresets();
+  renderFmWiring();
+});
 document.getElementById('fmSsid')?.addEventListener('input', () => {
   const t = document.getElementById('fwSsid') as HTMLInputElement | null;
   if (t) t.value = (document.getElementById('fmSsid') as HTMLInputElement).value;
@@ -4531,9 +4612,24 @@ document.getElementById('fmFlash')?.addEventListener('click', async () => {
   const preset = (document.getElementById('fmPreset') as HTMLSelectElement).value;
   const wifiSsid = (document.getElementById('fmSsid') as HTMLInputElement).value.trim();
   const wifiPassword = (document.getElementById('fmPass') as HTMLInputElement).value;
-  const board = portBoardMap.get(port) || 'esp32';
+  const manual = (document.getElementById('fmBoard') as HTMLSelectElement)?.value || '';
+  const board = resolvedBoard(port, manual);
   const status = document.getElementById('fmStatus') as HTMLDivElement;
   if (!port) { status.textContent = 'Pick a port first.'; status.style.color = 'var(--yellow)'; return; }
+  // Never flash to a board we haven't identified: an ambiguous CH340 adapter
+  // or unrecognised USB could be an Arduino Nano just as easily as an ESP32,
+  // and wrong firmware can whack a bootloader. Require an explicit pick.
+  if (!board) {
+    const kind = (portKindMap.get(port) || 'unknown');
+    status.textContent = `Can't tell which board is on ${port} (${kindLabel(kind)}). Pick ESP32 or Arduino Uno in the Board menu above.`;
+    status.style.color = 'var(--red)';
+    return;
+  }
+  if (board === 'arduino_uno' && presetChannelCount(preset) > 6) {
+    status.textContent = 'Arduino (Uno/Nano) has 6 analog inputs — pick a 6-channel or smaller rig preset.';
+    status.style.color = 'var(--red)';
+    return;
+  }
   resetFmState();
   setFmBusy(true);
   status.textContent = 'Building & flashing… this can take ~30 s.';

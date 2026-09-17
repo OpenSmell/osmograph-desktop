@@ -253,11 +253,24 @@ impl CsvRecorder {
 
         let safe_label = sanitize_label(&self.label);
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S").to_string();
-        let filename = format!("{}_{}.csv", timestamp, safe_label);
-        let path = self.save_dir.join(&filename);
+        // Second-resolution timestamps can collide (stop → restart in the same
+        // second with the same label). Never truncate an existing recording:
+        // step to a `_2`, `_3`, ... suffix instead of overwriting.
+        let mut path = self.save_dir.join(format!("{}_{}.csv", timestamp, safe_label));
+        let mut n = 2;
+        while path.exists() {
+            path = self.save_dir.join(format!("{}_{}_{}.csv", timestamp, n, safe_label));
+            n += 1;
+        }
 
         fs::create_dir_all(&self.save_dir).map_err(|e| e.to_string())?;
-        let file = fs::File::create(&path).map_err(|e| e.to_string())?;
+        // create_new (not File::create) so the same-second restart — and any
+        // cross-process race — can never clobber an existing recording.
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| e.to_string())?;
 
         let header = self.header_row();
         self.file = Some(file);

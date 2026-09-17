@@ -2988,6 +2988,19 @@ Confidence: 97.3%</div>
                 <span id="fwPreset" style="color:var(--text-1);font-family:var(--font-mono);font-size:11px">6-Sensor Full</span>
               </div>
               <div class="form-row">
+                <label>Board</label>
+                <select id="fwBoard">
+                  <option value="">Auto (detect)</option>
+                  <option value="esp32">ESP32</option>
+                  <option value="arduino_uno">Arduino Uno</option>
+                </select>
+              </div>
+              <p style="font-size:10px;color:var(--text-3);line-height:1.4;margin-top:-2px">
+                Auto works for boards with a definitive USB signature. CH340
+                adapters are ambiguous (ESP32 dev board <i>or</i> Arduino Nano)
+                — pick the board here to unlock flashing and erase.
+              </p>
+              <div class="form-row">
                 <label>WiFi SSID</label>
                 <input type="text" id="fwSsid" value="" placeholder="leave empty for SoftAP mode" autocomplete="off" />
               </div>
@@ -3263,6 +3276,13 @@ Confidence: 97.3%</div>
             <option value="3-sensor-food">3-Sensor Food</option>
             <option value="4-sensor-safety">4-Sensor Safety</option>
             <option value="8-sensor-max">8-Sensor Max</option>
+          </select>
+        </label>
+        <label>Board
+          <select id="fmBoard" style="background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);border-radius:var(--radius-sm);font-size:12px;padding:5px 7px;width:100%">
+            <option value="">Auto (detect)</option>
+            <option value="esp32">ESP32</option>
+            <option value="arduino_uno">Arduino Uno</option>
           </select>
         </label>
       </div>

@@ -350,7 +350,6 @@ fn connect_serial(
         let protocol = OsmProtocol::new(MAX_CHANNELS);
         let mut validator = SampleValidator::new();
         let mut detector = ChannelDetector::default();
-        let mut bootloader_newlines = 0usize;
         let mut buffer: Vec<u8> = Vec::with_capacity(1024);
         let mut chunk = [0u8; 512];
 
@@ -378,14 +377,15 @@ fn connect_serial(
             let mut handled = 0usize;
             while let Some(rel) = buffer[handled..].iter().position(|&b| b == b'\n') {
                 let end = handled + rel + 1;
-                // Python counts newlines since connect; <5 => still bootloader output.
-                bootloader_newlines += buffer[handled..end]
-                    .iter()
-                    .filter(|&&b| b == b'\n')
-                    .count();
-                if bootloader_newlines < 5 {
-                    let _ = app_handle.emit("bootloader-detected", String::new());
-                }
+                // NOTE: no system on connect-newline count here. Healthy boards
+                // print the ROM banner ("boot mode:..."), match bootloader
+                // keywords, then fall silent for ~30 s collecting their
+                // baseline — a newline-count heuristic would fire the
+                // bootloader diagnosis on every healthy connect. Only the
+                // keyword match inside `handle_reader_line` (is_bootloader_line)
+                // emits `bootloader-detected`, and the frontend additionally
+                // requires a stall well past the baseline window with no valid
+                // data received before it offers the re-flash path.
                 let line = String::from_utf8_lossy(&buffer[handled..end]);
                 handle_reader_line(
                     &line,
@@ -508,16 +508,29 @@ fn board_label(board_type: &str) -> &'static str {
         "esp32" => "ESP32",
         "arduino_uno" => "Arduino Uno",
         "raspberry_pi_pico" => "Raspberry Pi Pico",
+        "ch340" => "CH340 USB Adapter (board unknown)",
         _ => "Unknown Board",
     }
 }
 
 /// Classify a USB serial port by VID:PID (parity with `board/detector.py::VID_PID_MAP`).
+///
+/// Returns the *board* only where the VID:PID is definitive:
+/// - CP2102 / CP2105 → ESP32 dev boards.
+/// - 0x303A native USB → ESP32-S2/S3.
+/// - 0x2341 → genuine Arduino Uno/Nano.
+/// - 0x2E8A → Raspberry Pi Pico.
+///
+/// CH340 (0x1A86:0x7523) is deliberately ambiguous: it bridges BOTH ESP32 dev
+/// boards and Arduino Nano clones, which are electrically incompatible. Calling
+/// it "esp32" risks flashing ESP32 firmware at an AVR or erasing a Nano's
+/// bootloader. It is returned as `"ch340"` so the UI forces an explicit board
+/// confirmation before any flash/erase is allowed.
 fn classify_vid_pid(vid: u16, pid: u16) -> String {
     match (vid, pid) {
         (0x10C4, 0xEA60) => "esp32".to_string(), // CP2102
-        (0x1A86, 0x7523) => "esp32".to_string(), // CH340
         (0x10C4, 0xEA70) => "esp32".to_string(), // CP2105
+        (0x1A86, 0x7523) => "ch340".to_string(), // CH340 — ESP32 dev board OR Arduino Nano clone
         (0x2E8A, 0x0005) => "raspberry_pi_pico".to_string(),
         (0x2341, 0x0043) => "arduino_uno".to_string(),
         (0x2341, 0x0001) => "arduino_uno".to_string(),
@@ -723,12 +736,41 @@ fn run_upload(last: Result<std::process::Output, std::io::Error>, tool: &str, po
     }
 }
 
+/// Create a NEW file at `path` with `contents`, failing (never following a
+/// symlink) if anything already exists there. Used for the firmware build
+/// scratch so a shared /tmp directory can't redirect the write to a victim
+/// file via a pre-seeded symlink.
+fn write_new(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| format!("Failed to create {}: {}", path.display(), e))
+        .and_then(|mut f| {
+            f.write_all(contents.as_bytes())
+                .map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+        })
+}
+
+/// Only ever hand esptool a real ESP32-family chip string; anything else is a
+/// caller bug that should fail loudly instead of guessing a chip.
+fn validate_esp_chip(chip: &str) -> Result<String, String> {
+    const ESP32_CHIPS: [&str; 7] =
+        ["esp32", "esp32s2", "esp32s3", "esp32c3", "esp32c6", "esp32h2", "esp32p4"];
+    if ESP32_CHIPS.contains(&chip) {
+        Ok(chip.to_string())
+    } else {
+        Err(format!("Unsupported ESP chip '{chip}'. Choose one of: {}", ESP32_CHIPS.join(", ")))
+    }
+}
+
 /// Generate, compile (if possible), and flash the OpenSmell firmware.
 ///
 /// Supports ESP32 (WiFi + TCP OSM + mDNS) and AVR (Arduino Uno/Nano, serial
 /// only). Uses PlatformIO if available, else Arduino CLI. Empty
 /// `wifi_ssid`/`wifi_password` produce an ESP32 that boots into SoftAP mode.
-/// `board` is one of `esp32` / `arduino_uno` (defaults to `esp32`).
+/// `board` must be `esp32` or `arduino_uno`; it is never guessed from context.
 #[tauri::command]
 fn flash_firmware(
     port: String,
@@ -739,12 +781,47 @@ fn flash_firmware(
     wifi_password: String,
     board: Option<String>,
 ) -> Result<String, String> {
-    let board = board.unwrap_or_else(|| "esp32".to_string());
+    // No defaulting: a missing board (older build, hand-invoked call, devtools
+    // mutation) must fail loudly instead of guessing ESP32 and flashing ESP32
+    // firmware at a CH340-bridged Arduino nano clone.
+    let board = board
+        .ok_or_else(|| "Board not specified — pick ESP32 or Arduino Uno before flashing.".to_string())?;
+    if board != "esp32" && board != "arduino_uno" {
+        return Err(format!(
+            "Board '{board}' isn't a supported flash target. Choose ESP32 or Arduino Uno."
+        ));
+    }
     let is_avr = board == "arduino_uno";
+
+    // Reject out-of-range channel requests before any pin array silently caps
+    // them: ESP32 supports 12 analog CSVs, AVR 6 (A0-A5). Never flash firmware
+    // whose sensor count can contradict what the user asked for.
+    let max_channels = if is_avr { 6 } else { 12 };
+    let requested_n = if !sensor_pins.is_empty() {
+        sensor_pins.len()
+    } else if n_channels > 0 {
+        n_channels
+    } else {
+        channels_for(&preset)
+    };
+    if requested_n > max_channels {
+        return Err(format!(
+            "Requested {requested_n} channels exceeds the {max_channels} analog inputs available on {board}. Pick a smaller rig preset."
+        ));
+    }
 
     // An explicit pin list wins (custom presets). Otherwise derive a board
     // pinout from the requested channel count; the preset name nudges a default.
     let (n_channels, sensor_pins) = if !sensor_pins.is_empty() {
+        if is_avr {
+            for &p in &sensor_pins {
+                if !(100..=105).contains(&p) {
+                    return Err(format!(
+                        "Invalid Arduino pin code {p}: only the 6 analog inputs A0..A5 are supported on AVR."
+                    ));
+                }
+            }
+        }
         (n_channels.max(1), sensor_pins)
     } else {
         let n = if n_channels > 0 { n_channels } else { channels_for(&preset) };
@@ -770,7 +847,13 @@ fn flash_firmware(
         }
     };
 
-    let temp_dir = std::env::temp_dir().join("osmograph_firmware");
+    // Per-run, freshly-created scratch dir. A predictable shared path (e.g.
+    // /tmp/osmograph_firmware) is writable by other local users who could
+    // pre-seed it with symlinks; `fs::write` follows symlinks and would
+    // overwrite an arbitrary victim file. PID-scoping plus create_new writes
+    // (write_new) make the build site both private and symlink-safe.
+    let temp_dir = std::env::temp_dir().join(format!("osmograph_firmware_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
     let _ = std::fs::create_dir_all(&temp_dir);
 
     // Pick the firmware source + note the toolchain requirements up front.
@@ -797,16 +880,13 @@ fn flash_firmware(
     let pio_board = if is_avr { "arduino_uno" } else { "esp32" };
     let pio_dir = temp_dir.join("pio");
     let _ = std::fs::create_dir_all(pio_dir.join("src"));
-    std::fs::write(pio_dir.join("platformio.ini"), board_pio_env(pio_board))
-        .map_err(|e| format!("Failed to write platformio.ini: {}", e))?;
-    std::fs::write(pio_dir.join("src").join("main.cpp"), &sketch)
-        .map_err(|e| format!("Failed to write main.cpp: {}", e))?;
+    write_new(&pio_dir.join("platformio.ini"), &board_pio_env(pio_board))?;
+    write_new(&pio_dir.join("src").join("main.cpp"), &sketch)?;
 
     // Arduino CLI project layout (sketch must live in a folder with its own name)
     let ino_dir = temp_dir.join("osmograph_firmware");
     let _ = std::fs::create_dir_all(&ino_dir);
-    std::fs::write(ino_dir.join("osmograph_firmware.ino"), &sketch)
-        .map_err(|e| format!("Failed to write .ino: {}", e))?;
+    write_new(&ino_dir.join("osmograph_firmware.ino"), &sketch)?;
 
     let fqbn = board_fqbn(pio_board);
     let board_name = if is_avr { "Arduino Uno" } else { "ESP32" };
@@ -879,7 +959,7 @@ fn erase_flash(port: String, chip: Option<String>) -> Result<String, String> {
     if !esptool_available() {
         return Err("esptool not found. Install with: pip install esptool".to_string());
     }
-    let chip = chip.unwrap_or_else(|| "esp32".to_string());
+    let chip = validate_esp_chip(&chip.unwrap_or_else(|| "esp32".to_string()))?;
     match run_esptool(&["--chip", &chip, "--port", &port, "erase_flash"])? {
         (true, _) => Ok(format!("Flash erased on {}", port)),
         (false, out) => Err(format!("Erase failed: {}", out)),
@@ -892,7 +972,7 @@ fn read_mac(port: String, chip: Option<String>) -> Result<String, String> {
     if !esptool_available() {
         return Err("esptool not found. Install with: pip install esptool".to_string());
     }
-    let chip = chip.unwrap_or_else(|| "esp32".to_string());
+    let chip = validate_esp_chip(&chip.unwrap_or_else(|| "esp32".to_string()))?;
     let (ok, out) = run_esptool(&["--chip", &chip, "--port", &port, "read_mac"])?;
     if !ok {
         return Err(format!("read_mac failed: {}", out));
@@ -1012,7 +1092,7 @@ fn label_sample(state: State<AppState>, reading: Vec<f64>, is_anomaly: bool, not
     }
     {
         let mut fail_safe = state.fail_safe.lock().map_err(|e| e.to_string())?;
-        fail_safe.update_feedback(&reading, is_anomaly, &note).map_err(|e| e.to_string())?;
+        fail_safe.update_feedback(is_anomaly, &note).map_err(|e| e.to_string())?;
     }
     let mut labeling = state.labeling.lock().map_err(|e| e.to_string())?;
     Ok(labeling.label_sample(&reading, is_anomaly, &note, 1.0))
@@ -3376,10 +3456,16 @@ mod tests {
     #[test]
     fn classify_known_usb_bridges() {
         assert_eq!(classify_vid_pid(0x10C4, 0xEA60), "esp32"); // CP2102
-        assert_eq!(classify_vid_pid(0x1A86, 0x7523), "esp32"); // CH340
         assert_eq!(classify_vid_pid(0x10C4, 0xEA70), "esp32"); // CP2105
         assert_eq!(classify_vid_pid(0x303A, 0x0002), "esp32"); // ESP32-S2/S3
         assert_eq!(classify_vid_pid(0x303A, 0x1001), "esp32"); // ESP32-S3
+    }
+
+    #[test]
+    fn ch340_is_ambiguous_not_esp32() {
+        // CH340 bridges ESP32 dev boards AND Arduino Nano clones — a VID:PID
+        // alone can't tell them apart, so it must NOT auto-resolve to "esp32".
+        assert_eq!(classify_vid_pid(0x1A86, 0x7523), "ch340");
     }
 
     #[test]
