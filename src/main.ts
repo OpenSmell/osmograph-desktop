@@ -9,9 +9,8 @@ const LIVE_WINDOW_DEFAULT = 800; // default trailing-sample window; reset-zoom t
 // readable on the warm paper canvas without going rainbow. The first 8 entries
 // are the hand-tuned anchor hues; anything beyond is generated on the fly so
 // every channel (up to 64) gets its own distinct color.
-const PALETTE_ANCHORS
+const PALETTE_ANCHORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 let lastAnomalyKey = '';  // anomaly-card state key: only re-stamp DOM when this CHANGES
- = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 
 // Golden-angle hue stepper keeps generated colors maximally separated so
 // high channel counts never land on visually identical traces.
@@ -988,7 +987,7 @@ async function ingestReading(values: number[]) {
     // composite state actually CHANGES, not every ~10Hz tick. This kills the
     // flicker/glitch from re-assigning className + textContent each frame where
     // nothing moved (which re-triggers CSS transitions on a static card).
-    const stateKey = `${result.warning_warming ? 1 : 0}:${result.is_anomaly ? 1 : 0}:${result.alert_level}`;
+    const stateKey = `${result.warming_up ? 1 : 0}:${result.is_anomaly ? 1 : 0}:${result.alert_level}`;
     if (stateKey !== lastAnomalyKey) {
       lastAnomalyKey = stateKey;
       const card = document.getElementById('anomalyCard')!;
@@ -1028,6 +1027,7 @@ async function ingestReading(values: number[]) {
       } else {
         statusDot.className = connected ? 'status-dot ok' : 'status-dot';
       }
+    }
     }
   } catch (err) {
     console.error('Detection error:', err);
