@@ -4,6 +4,7 @@ mod live;
 mod burnin;
 mod plugins;
 mod phenotype;
+mod updates;
 
 use data::{
     count_numeric_fields, parse_osm_line, recordings_dir, now_secs, CsvRecorder, SessionIndex,
@@ -53,6 +54,10 @@ pub struct AppState {
     pub buzzer_config: Arc<Mutex<BuzzerConfig>>,
     pub detection_config: Arc<Mutex<opensmell::DetectionConfig>>,
     pub last_alert_level: Arc<Mutex<u8>>,
+    /// Wall-clock (epoch seconds) of the last reading fed to the detectors, so
+    /// the dt-aware fail-safe path scores with the *real* inter-sample gap
+    /// instead of a nominal sample period.
+    pub last_sample_time: Arc<Mutex<Option<f64>>>,
     pub fleet: Arc<Mutex<Vec<FleetDeviceState>>>,
     pub last_channels: Arc<Mutex<Vec<f64>>>,
     pub live_classifier: Arc<Mutex<opensmell::LiveClassifier>>,
@@ -87,6 +92,7 @@ impl Default for AppState {
             buzzer_config: Arc::new(Mutex::new(BuzzerConfig::default())),
             detection_config: Arc::new(Mutex::new(opensmell::DetectionConfig::default())),
             last_alert_level: Arc::new(Mutex::new(0)),
+            last_sample_time: Arc::new(Mutex::new(None)),
             fleet: Arc::new(Mutex::new(Vec::new())),
             last_channels: Arc::new(Mutex::new(Vec::new())),
             live_classifier: Arc::new(Mutex::new(opensmell::LiveClassifier::new())),
@@ -284,6 +290,11 @@ fn handle_reader_line(
         Ok(OsmMessage::Env { temperature, humidity }) => {
             let _ = app.emit("serial-env", SerialEnvEvent { temperature, humidity });
         }
+        Ok(OsmMessage::Event { label, sample_index, t_ms }) => {
+            // A boundary precedes the sample it annotates, so the frontend can
+            // attach it to the next data event rather than interpolating.
+            let _ = app.emit("serial-phase-event", SerialPhaseEvent { label, sample_index, t_ms });
+        }
         Ok(OsmMessage::Ping) => {}
         Ok(OsmMessage::Unknown(_)) => {
             if let Some(channels) = parse_osm_line(line, expected) {
@@ -456,6 +467,13 @@ struct SerialKindsEvent {
 struct SerialEnvEvent {
     temperature: f64,
     humidity: f64,
+}
+
+#[derive(Clone, Serialize)]
+struct SerialPhaseEvent {
+    label: String,
+    sample_index: i64,
+    t_ms: Option<i64>,
 }
 
 #[tauri::command]
@@ -987,6 +1005,24 @@ fn read_mac(port: String, chip: Option<String>) -> Result<String, String> {
 
 // === Detection ===
 
+/// Advance the wall-clock gate and return the inter-sample gap `dt_s` elapsed
+/// since the previous reading. The first reading has no predecessor, so a fixed
+/// reference period is returned and `last_sample_time` becomes defined — this
+/// makes the dt-aware detectors cadence-correct on a real stream while keeping
+/// callers (and the first sample) well-defined.
+fn advance_sample_gate(
+    last_sample_time: &mut Option<f64>,
+    reference_dt_s: f64,
+) -> f64 {
+    let now = now_secs();
+    let dt_s = match *last_sample_time {
+        Some(last) if now > last => (now - last).min(60.0),
+        _ => reference_dt_s,
+    };
+    *last_sample_time = Some(now);
+    dt_s.max(1e-4)
+}
+
 #[tauri::command]
 fn ingest_reading(state: State<AppState>, reading: Vec<f64>) -> Result<DetectionResult, String> {
     {
@@ -1044,7 +1080,13 @@ fn ingest_reading_with_failsafe(
     }
 
     let mut fail_safe = state.fail_safe.lock().map_err(|e| e.to_string())?;
-    let result = fail_safe.detect(&reading).map_err(|e| e.to_string())?;
+    // Score with the real wall-clock gap so a jittery/irregular serial stream
+    // (or a demo replayed at a different rate) is treated at its true cadence.
+    let dt_s = advance_sample_gate(
+        &mut *state.last_sample_time.lock().map_err(|e| e.to_string())?,
+        fail_safe.sample_period_s(),
+    );
+    let result = fail_safe.detect_with_dt(&reading, dt_s).map_err(|e| e.to_string())?;
 
     // Escalation emits a buzzer-alert event (level 1 warning / 2 critical /
     // 3 emergency) carrying the operator's programmed pattern, volume and
@@ -3358,6 +3400,8 @@ pub fn run() {    env_logger::init();
             live::unload_live_classifier,
             live::get_live_classification,
             phenotype::compute_phenotype,
+            updates::check_for_updates,
+            updates::open_release_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

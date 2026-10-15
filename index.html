@@ -1523,6 +1523,35 @@
       border-left-color: var(--green);
       background: var(--bg-2);
     }
+    /* === Updates === */
+    .update-policy { display: flex; flex-direction: column; gap: 4px; }
+    .update-policy label {
+      display: flex; align-items: center; gap: 8px;
+      font-size: 11px; color: var(--text-2); cursor: pointer;
+      min-width: 0;
+    }
+    .update-policy input[type="radio"] {
+      flex: 0 0 auto; max-width: none; width: auto;
+      accent-color: var(--green); cursor: pointer; margin: 0;
+    }
+    .update-spinner {
+      width: 12px; height: 12px; flex: 0 0 auto;
+      border: 2px solid var(--border-strong);
+      border-top-color: var(--green);
+      border-radius: 50%;
+      animation: updateSpin 0.8s linear infinite;
+    }
+    @keyframes updateSpin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) {
+      .update-spinner { animation: none; opacity: 0.6; }
+    }
+    .update-ok { color: var(--green); }
+    .update-avail { color: var(--text-0); font-weight: 600; }
+    .update-notes {
+      margin-top: 6px; padding: 8px; background: var(--bg-1);
+      border: 1px solid var(--border); font-size: 10px; color: var(--text-2);
+      white-space: pre-wrap; max-height: 160px; overflow: auto;
+    }
     .sys-panel {
       display: none;
       padding: 16px;
@@ -2633,6 +2662,7 @@
             <div class="sys-nav-item" data-sys="burnin">Burn-In</div>
             <div class="sys-nav-item" data-sys="data">Data Storage</div>
             <div class="sys-nav-item" data-sys="plugins">Plugins</div>
+            <div class="sys-nav-item" data-sys="updates">Updates</div>
             <div class="sys-nav-item" data-sys="about">About</div>
           </div>
 
@@ -3140,6 +3170,25 @@ Confidence: 97.3%</div>
             <div class="card">
               <p>Drop model files or plugin scripts into the plugins folder. Discovered plugins appear below.</p>
               <div id="pluginList" style="margin-top:8px;font-size:11px;color:var(--text-3)">No plugins loaded</div>
+            </div>
+          </div>
+
+          <!-- Updates Panel -->
+          <div class="sys-panel" id="sys-updates">
+            <h2>Updates</h2>
+            <div class="card">
+              <p class="hint">Checking fetches a small release listing from GitHub — a few hundred bytes, and nothing is downloaded until you choose to update.</p>
+              <div class="update-policy" id="updatePolicy">
+                <label><input type="radio" name="updPol" value="never" /> Never check</label>
+                <label><input type="radio" name="updPol" value="manual" /> Manual only</label>
+                <label><input type="radio" name="updPol" value="on-launch" /> On launch</label>
+                <label><input type="radio" name="updPol" value="daily" checked /> Daily</label>
+              </div>
+              <div class="form-row" style="margin-top:10px">
+                <button id="updateCheckBtn">Check now</button>
+                <span id="updateStatus" style="font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px"></span>
+              </div>
+              <div id="updateNotes" class="update-notes" style="display:none"></div>
             </div>
           </div>
 

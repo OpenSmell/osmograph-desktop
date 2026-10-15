@@ -6301,3 +6301,106 @@ async function fitWindowToScreen() {
   } catch { /* not granted in this build — keep the configured window */ }
 }
 fitWindowToScreen();
+
+// === Updates ===
+// Policy is localStorage-persisted like every other setting. The Rust backend
+// enforces the actual check cadence and ETag caching; this just wires the UI.
+const UPD_POLICY_KEY = 'osmograph.updatePolicy';
+
+function loadUpdatePolicy(): string {
+  try { return localStorage.getItem(UPD_POLICY_KEY) || 'daily'; } catch { return 'daily'; }
+}
+function saveUpdatePolicy(v: string) {
+  try { localStorage.setItem(UPD_POLICY_KEY, v); } catch { /* ignore */ }
+}
+
+type UpdateCheckResult = {
+  available: boolean;
+  latest_version: string;
+  current_version: string;
+  release_notes: string;
+  download_url: string;
+  published_at: string;
+  policy: string;
+  last_checked: number | null;
+  checked: boolean;
+};
+
+function renderUpdateStatus(msg: string, cls?: string) {
+  const el = document.getElementById('updateStatus')!;
+  el.textContent = msg;
+  el.className = cls || '';
+}
+
+function renderUpdateNotes(notes: string, url: string) {
+  const el = document.getElementById('updateNotes')!;
+  if (!notes && !url) { el.style.display = 'none'; return; }
+  el.textContent = notes || '';
+  el.style.display = 'block';
+}
+
+async function runUpdateCheck(force: boolean) {
+  const btn = document.getElementById('updateCheckBtn') as HTMLButtonElement;
+  btn.disabled = true;
+  renderUpdateStatus('Checking…', '');
+  // Insert the spinner via a DOM node so prefers-reduced-motion CSS applies.
+  const spinner = document.createElement('span');
+  spinner.className = 'update-spinner';
+  document.getElementById('updateStatus')!.prepend(spinner);
+  try {
+    const policy = (document.querySelector('input[name="updPol"]:checked') as HTMLInputElement)?.value || 'daily';
+    const res = await invoke<UpdateCheckResult>('check_for_updates', { policy, force });
+    if (res.available) {
+      renderUpdateStatus(`Update available: v${res.latest_version}`, 'update-avail');
+      renderUpdateNotes(res.release_notes, res.download_url);
+      // Wire the release-page open once, so repeated checks don't stack handlers.
+      const openBtn = document.getElementById('updateOpenBtn') ||
+        (() => {
+          const b = document.createElement('button');
+          b.id = 'updateOpenBtn';
+          b.textContent = 'Open download page';
+          b.addEventListener('click', () => invoke('open_release_page', { url: res.download_url }));
+          document.getElementById('updateStatus')!.after(b);
+          return b;
+        })();
+      (openBtn as HTMLButtonElement).onclick = () => invoke('open_release_page', { url: res.download_url });
+    } else {
+      renderUpdateStatus('Up to date', 'update-ok');
+      renderUpdateNotes('', '');
+    }
+  } catch (e) {
+    // Offline or rate-limited: non-alarming, the user can retry.
+    renderUpdateStatus('Could not check (offline?)', '');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// Restore persisted policy onto the radios.
+(function initUpdatePolicy() {
+  const saved = loadUpdatePolicy();
+  const radio = document.querySelector(`input[name="updPol"][value="${saved}"]`) as HTMLInputElement | null;
+  if (radio) radio.checked = true;
+})();
+
+document.getElementById('updatePolicy')!.addEventListener('change', (e) => {
+  const v = (e.target as HTMLInputElement).value;
+  saveUpdatePolicy(v);
+});
+
+document.getElementById('updateCheckBtn')!.addEventListener('click', () => runUpdateCheck(true));
+
+// Silent on-launch check, gated by the persisted policy and last-check time.
+// The backend enforces the 24h cooldown, so this fires on every launch and the
+// decision happens server-side — one code path for both auto and manual.
+(async () => {
+  const policy = loadUpdatePolicy();
+  if (policy === 'never' || policy === 'manual') return;
+  try {
+    const res = await invoke<UpdateCheckResult>('check_for_updates', { policy, force: false });
+    if (res.available) {
+      renderUpdateStatus(`Update available: v${res.latest_version}`, 'update-avail');
+      renderUpdateNotes(res.release_notes, res.download_url);
+    }
+  } catch { /* silent: launch checks must never block or alarm */ }
+})();
