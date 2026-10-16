@@ -147,6 +147,22 @@ pub fn download_extension(filename: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// Bundled sample recording: a real SmellNet cinnamon excerpt (180 rows, header
+/// + 6 MOX channels + env columns; source: `DeweiFeng/smell-net`, research use —
+/// attribution is shown in-app on load), embedded at compile time so a user with
+/// no hardware and no network can still explore the app in minutes. Written into
+/// `recordings_dir/hf_downloads` and imported through the normal CSV path.
+pub const SAMPLE_FILENAME: &str = "sample_cinnamon.csv";
+const SAMPLE_CSV: &str = include_str!("../../sample_data/sample_cinnamon.csv");
+
+pub fn write_sample_dataset(recordings_dir: &Path) -> Result<std::path::PathBuf, String> {
+    let dest_dir = recordings_dir.join("hf_downloads");
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(SAMPLE_FILENAME);
+    fs::write(&dest, SAMPLE_CSV).map_err(|e| e.to_string())?;
+    Ok(dest)
+}
+
 // ---------------------------------------------------------------------------
 // HF upload (write token required)
 // ---------------------------------------------------------------------------
@@ -371,6 +387,18 @@ mod tests {
         let rec_dir = std::env::temp_dir().join("osm_hub_dl_test");
         assert!(hf_download_file(&rec_dir, "opensmell/opensmell-datasets", "../etc/passwd").is_err());
         assert!(hf_download_file(&rec_dir, "opensmell/opensmell-datasets", "a/b.csv").is_err());
+    }
+
+    #[test]
+    fn sample_dataset_is_importable() {
+        let rec_dir = std::env::temp_dir().join("osm_hub_sample_test");
+        let _ = fs::remove_dir_all(&rec_dir);
+        let dest = write_sample_dataset(&rec_dir).expect("sample writes");
+        assert!(dest.is_file());
+        let (rows, sensor_count, _) = csv_summary_for(&dest);
+        assert!(rows >= 100, "rows={}", rows);
+        assert!(sensor_count >= 6, "sensors={}", sensor_count);
+        let _ = fs::remove_dir_all(&rec_dir);
     }
 
     #[test]

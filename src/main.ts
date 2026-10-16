@@ -3156,6 +3156,17 @@ async function reloadLibrary() {
   renderLibrary();
 }
 
+// First run: an empty library gets the bundled sample automatically, so a user
+// with no hardware sees a real recording within a minute of first boot.
+async function ensureSampleOnEmptyLibrary() {
+  try {
+    if (sessions.length > 0) return;
+    const msg = await invoke<string>('load_sample_dataset');
+    await reloadLibrary();
+    await flashStatus('hubStatus', msg, 'var(--green)');
+  } catch { /* sample is best-effort; the hub stays usable without it */ }
+}
+
 // Recover recordings that were interrupted before save (a crash left a
 // `.journal` behind). Offered once on boot, then the recovered `.osmell` files
 // are indexed into the library. Never blocks — a failure just logs.
@@ -3584,6 +3595,21 @@ document.getElementById('hfList')!.addEventListener('click', async () => {
     });
   } catch (e) {
     filesEl.textContent = `List failed: ${e}`;
+  }
+});
+
+// === One-click sample dataset (5-minute first run, no hardware/network) ===
+document.getElementById('hfSample')!.addEventListener('click', async () => {
+  const btn = document.getElementById('hfSample') as HTMLButtonElement | null;
+  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
+  try {
+    const msg = await invoke<string>('load_sample_dataset');
+    await flashStatus('hubStatus', msg, 'var(--green)');
+    await reloadLibrary();
+  } catch (e) {
+    await flashStatus('hubStatus', `Sample load failed: ${e}`, 'var(--red)');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Load sample'; }
   }
 });
 
@@ -6275,12 +6301,12 @@ updateBuzzerPreviews();
 updateOledPreview();
 renderFleet();
 refreshToolchain();
-reloadLibrary();
 refreshTrainLibrary();
 renderLiveState();
 refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
+reloadLibrary().then(ensureSampleOnEmptyLibrary);
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
 checkRecoveredSessions();
 

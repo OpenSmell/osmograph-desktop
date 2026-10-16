@@ -3172,6 +3172,20 @@ fn hf_download(
     }
 }
 
+/// One-click sample dataset: writes the bundled recording and imports it into
+/// the library. No hardware, no network, no token — the 5-minute first run.
+#[tauri::command]
+fn load_sample_dataset(state: State<'_, AppState>) -> Result<String, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest = data::hub::write_sample_dataset(&dir)?;
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let rec = data::hub::import_external_csv(&dir, &mut index, &dest)?;
+    Ok(format!(
+        "Sample '{}' is in your library (file_id {}; SmellNet excerpt, DeweiFeng/smell-net, research use). No hardware needed — explore it.",
+        rec.substance, rec.file_id
+    ))
+}
+
 #[tauri::command]
 fn hf_set_token(token: String) -> Result<String, String> {
     data::hub::set_hf_token(&token)?;
@@ -3381,6 +3395,7 @@ pub fn run() {    env_logger::init();
             hub_import_csv,
             hf_list,
             hf_download,
+            load_sample_dataset,
             hf_set_token,
             hf_has_token,
             hf_clear_token,

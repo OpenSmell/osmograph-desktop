@@ -3143,11 +3143,12 @@ Confidence: 97.3%</div>
 
             <div class="card">
               <h3>Community Sync — Hugging Face</h3>
-              <p class="hint" style="margin-bottom:8px">Share and pull anonymised OpenSmell sessions via a public HF dataset. Downloads are read-only (no token).</p>
+              <p class="hint" style="margin-bottom:8px">Share and pull anonymised OpenSmell sessions via a public HF dataset. Downloads are read-only (no token). No hardware? Load sample drops a bundled recording straight into your library.</p>
               <div class="form-row">
                 <label>Dataset</label>
                 <input type="text" id="hfRepo" value="" placeholder="opensmell/opensmell-datasets" style="flex:1" />
                 <button id="hfList">List</button>
+                <button id="hfSample" title="Load a bundled sample recording — no hardware or network needed">Load sample</button>
               </div>
               <div class="form-row">
                 <label>Write Token</label>
