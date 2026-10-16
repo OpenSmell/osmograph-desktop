@@ -18,7 +18,7 @@ jobs:
       - name: Checkout opensmell-rs
         uses: actions/checkout@v4
         with:
-          repository: praisejamesx/opensmell-rs
+          repository: OpenSmell/opensmell-rs
           ref: master
           path: opensmell-rs
 
