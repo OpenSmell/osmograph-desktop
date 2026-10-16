@@ -99,20 +99,46 @@ jobs:
         shell: bash
         working-directory: osmograph-desktop
         run: |
+          set -e
           BUNDLE_DIR="src-tauri/target/release/bundle"
           ART="$GITHUB_WORKSPACE/dist-artifacts"
           mkdir -p "$ART"
+
+          alias_one() {
+            local f
+            f=$(ls $1 2>/dev/null | head -n1 || true)
+            if [ -n "$f" ]; then
+              cp "$f" "$ART/$2"
+            fi
+          }
+
           if [ "${{ matrix.os }}" = "windows" ]; then
-            cp -r "$BUNDLE_DIR/nsis"/*.exe "$ART/" 2>/dev/null || true
-            cp -r "$BUNDLE_DIR/msi"/*.msi "$ART/" 2>/dev/null || true
+            cp "$BUNDLE_DIR"/nsis/*.exe "$ART/" 2>/dev/null || true
+            cp "$BUNDLE_DIR"/msi/*.msi "$ART/" 2>/dev/null || true
+            alias_one "$BUNDLE_DIR/nsis/*setup*.exe" "Osmograph-setup.exe"
+            alias_one "$BUNDLE_DIR/nsis/*.exe" "Osmograph-setup.exe"
+            alias_one "$BUNDLE_DIR/msi/*.msi" "Osmograph.msi"
           elif [ "${{ matrix.os }}" = "linux" ]; then
-            cp -r "$BUNDLE_DIR/deb"/*.deb "$ART/" 2>/dev/null || true
-            cp -r "$BUNDLE_DIR/appimage"/*.AppImage "$ART/" 2>/dev/null || true
-            cp -r "$BUNDLE_DIR/rpm"/*.rpm "$ART/" 2>/dev/null || true
+            cp "$BUNDLE_DIR"/deb/*.deb "$ART/" 2>/dev/null || true
+            cp "$BUNDLE_DIR"/appimage/*.AppImage "$ART/" 2>/dev/null || true
+            cp "$BUNDLE_DIR"/rpm/*.rpm "$ART/" 2>/dev/null || true
+            alias_one "$BUNDLE_DIR/deb/*.deb" "Osmograph-linux-amd64.deb"
+            alias_one "$BUNDLE_DIR/appimage/*.AppImage" "Osmograph-linux-x86_64.AppImage"
+            alias_one "$BUNDLE_DIR/rpm/*.rpm" "Osmograph-linux-x86_64.rpm"
           elif [ "${{ matrix.os }}" = "macos" ]; then
-            cp -r "$BUNDLE_DIR/macos"/*.app "$ART/" 2>/dev/null || true
-            cp -r "$BUNDLE_DIR/dmg"/*.dmg "$ART/" 2>/dev/null || true
+            cp "$BUNDLE_DIR"/dmg/*.dmg "$ART/" 2>/dev/null || true
+            alias_one "$BUNDLE_DIR/dmg/*.dmg" "Osmograph-macos-aarch64.dmg"
           fi
+
+          (
+            cd "$ART"
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum -- * > SHA256SUMS.txt 2>/dev/null || true
+            else
+              shasum -a 256 * > SHA256SUMS.txt 2>/dev/null || true
+            fi
+          )
+
           ls -la "$ART/"
 
       - name: Upload build artifacts

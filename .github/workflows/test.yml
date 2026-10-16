@@ -1,0 +1,64 @@
+name: Test
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout osmograph-desktop
+        uses: actions/checkout@v4
+        with:
+          path: osmograph-desktop
+
+      - name: Checkout opensmell-rs
+        uses: actions/checkout@v4
+        with:
+          repository: praisejamesx/opensmell-rs
+          ref: master
+          path: opensmell-rs
+
+      - name: Checkout data-commons
+        uses: actions/checkout@v4
+        with:
+          repository: praisejamesx/data-commons
+          ref: main
+          path: data-commons
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libudev-dev \
+            patchelf
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install frontend dependencies
+        working-directory: osmograph-desktop
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: osmograph-desktop
+        run: npm run build
+
+      - name: Run Rust tests (lib)
+        working-directory: osmograph-desktop
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
