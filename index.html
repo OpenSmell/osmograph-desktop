@@ -479,6 +479,10 @@
     .tab-panel.active { display: flex; }
 
     /* === Dashboard Tab === */
+    .sample-card{display:flex;align-items:center;gap:12px;margin:10px 14px 0;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--green);border-radius:8px}
+    .sample-card-text{flex:1;min-width:0}
+    .sample-card-title{font-weight:700;font-size:13px}
+    .sample-card-sub{color:var(--text-3);font-size:12px;margin-top:2px}
     /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
     #panel-dashboard.tab-panel { flex-direction: column; }
     /* The library tab stacks the session-library grid and the replay strip vertically. */
@@ -2351,6 +2355,14 @@
     <div class="content">
       <!-- ===== DASHBOARD ===== -->
       <div class="tab-panel active" id="panel-dashboard">
+        <div id="sampleCard" class="sample-card">
+          <div class="sample-card-text">
+            <div class="sample-card-title">No hardware yet?</div>
+            <div class="sample-card-sub">Load a sample session to see live traces, quality scoring and analysis — no device needed.</div>
+          </div>
+          <button id="loadSampleSession" class="green">Load a sample session</button>
+          <button id="sampleDismiss" class="dock-toggle" title="Dismiss">✕</button>
+        </div>
         <div class="boot-banner" id="bootBanner">
           <span style="color:var(--yellow);font-weight:700">⚠ BOOTLOADER</span>
           <span>This device is answering in bootloader mode — it will not stream data until it is flashed. Firmware may be missing or corrupt.</span>

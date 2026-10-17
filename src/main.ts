@@ -462,6 +462,32 @@ document.querySelectorAll('.sys-nav-item').forEach(item => {
   });
 });
 
+// === First-run: one-click sample session ===
+const loadSampleBtn = document.getElementById('loadSampleSession') as HTMLButtonElement | null;
+loadSampleBtn?.addEventListener('click', async () => {
+  const prev = loadSampleBtn.textContent || 'Load a sample session';
+  loadSampleBtn.disabled = true;
+  loadSampleBtn.textContent = 'Loading…';
+  try {
+    const rec = await invoke<{ file_id: string }>('load_sample_session');
+    await invoke('analyze_recording', { fileId: rec.file_id });
+    await reloadLibrary();
+    (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+    const card = document.getElementById('sampleCard');
+    if (card) card.style.display = 'none';
+  } catch (e) {
+    loadSampleBtn.textContent = `Failed: ${e}`;
+    setTimeout(() => { loadSampleBtn.textContent = prev; }, 2500);
+  } finally {
+    loadSampleBtn.disabled = false;
+    if (loadSampleBtn.textContent === 'Loading…') loadSampleBtn.textContent = prev;
+  }
+});
+document.getElementById('sampleDismiss')?.addEventListener('click', () => {
+  const card = document.getElementById('sampleCard');
+  if (card) card.style.display = 'none';
+});
+
 // === Canvas: Traces ===
 const tracesCanvas = document.getElementById('traces') as HTMLCanvasElement;
 const tracesCtx = tracesCanvas.getContext('2d')!;

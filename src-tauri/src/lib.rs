@@ -2152,6 +2152,34 @@ fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<Sessio
     Ok(imported)
 }
 
+/// Bundled demo session in the native `timestamp_ms,CH1..CH6` format. Synthetic
+/// but deterministic, so a user with no hardware can see traces, quality scoring
+/// and analysis immediately after first run.
+const SAMPLE_SESSION_CSV: &str = include_str!("../sample_data/sample_session.csv");
+
+/// One-click first-run win: drop the bundled sample session into the library and
+/// index it. Mirrors the importer so the sample behaves like any other session.
+#[tauri::command]
+fn load_sample_session(state: State<AppState>) -> Result<SessionRecord, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let now = chrono::Local::now();
+    let dest = dir.join(format!("{}_sample_session.csv", now.format("%Y%m%d_%H%M%S")));
+    std::fs::write(&dest, SAMPLE_SESSION_CSV).map_err(|e| e.to_string())?;
+    let rf = {
+        let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+        recording_from_path(&dest, &mut cache)
+            .ok_or_else(|| "Sample session could not be read".to_string())?
+    };
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let mut record = build_record_from_file(&rf);
+    record.substance = "sample".to_string();
+    record.label = "Sample".to_string();
+    index.upsert(record.clone());
+    let _ = index.save(&dir);
+    Ok(record)
+}
+
 fn matches_file_ext(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -3353,6 +3381,7 @@ pub fn run() {    env_logger::init();
             list_recordings,
             import_recordings,
             import_paths,
+            load_sample_session,
             get_session_index,
             remove_session,
             rename_session,
