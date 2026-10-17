@@ -2701,7 +2701,35 @@ fn save_png_data_url(path: String, data_url: String) -> Result<String, String> {
     Ok(format!("Saved image to {}", path))
 }
 
+/// Opt-in, anonymous, aggregate-only telemetry (see private/ANALYTICS.md). The
+/// frontend only calls this after the user consents. Sends counts only — never
+/// readings, file names, device IDs or anything identifying. Best-effort: any
+/// failure is swallowed so telemetry can never affect the app.
+const TELEMETRY_ENDPOINT: &str = "https://www.opensmell.xyz/api/t";
+
+#[tauri::command]
+fn telemetry_send(event: String, props: Option<serde_json::Value>) -> Result<(), String> {
+    let body = serde_json::json!({
+        "event": event,
+        "props": props.unwrap_or(serde_json::Value::Null),
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+    })
+    .to_string();
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(std::time::Duration::from_secs(5)))
+        .build()
+        .into();
+    let _ = agent
+        .post(TELEMETRY_ENDPOINT)
+        .header("Content-Type", "application/json")
+        .send(body);
+    Ok(())
+}
+
 // === Fleet Management ===
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FleetSensorState {
     pub name: String,
@@ -3399,6 +3427,7 @@ pub fn run() {    env_logger::init();
             import_paths,
             load_sample_session,
             save_png_data_url,
+            telemetry_send,
             get_session_index,
             remove_session,
             rename_session,

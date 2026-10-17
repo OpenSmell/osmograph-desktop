@@ -494,6 +494,7 @@
     .wslide p{color:var(--text-2);font-size:13px;margin:0}
     .wizard-actions{display:flex;align-items:center;gap:8px;margin-top:16px}
     .wizard-fill{flex:1}
+    .wizard-consent{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:12px;color:var(--text-3)}
     /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
     #panel-dashboard.tab-panel { flex-direction: column; }
     /* The library tab stacks the session-library grid and the replay strip vertically. */
@@ -2815,6 +2816,7 @@
             <div class="sys-nav-item" data-sys="recipes">Recipes</div>
             <div class="sys-nav-item" data-sys="plugins">Plugins</div>
             <div class="sys-nav-item" data-sys="updates">Updates</div>
+            <div class="sys-nav-item" data-sys="privacy">Privacy</div>
             <div class="sys-nav-item" data-sys="about">About</div>
           </div>
 
@@ -3383,6 +3385,19 @@ Confidence: 97.3%</div>
             </div>
           </div>
 
+          <div class="sys-panel" id="sys-privacy">
+            <h2>Privacy &amp; Telemetry</h2>
+            <div class="card">
+              <h3>Anonymous usage stats</h3>
+              <p class="hint">Off by default. When on, Osmograph sends aggregate counts only — never sensor readings, file names, device serials, or anything identifying.</p>
+              <div class="form-row">
+                <label>Send anonymous usage stats</label>
+                <input type="checkbox" id="telemetryToggle">
+              </div>
+              <p class="hint" style="margin-top:8px">Sent: event name, app version, OS and CPU architecture. Never sent: readings, file/dataset names, device IDs, IP as an identifier, or emails.</p>
+            </div>
+          </div>
+
           <div class="sys-panel" id="sys-about">
             <h2>About Osmograph</h2>
             <div class="card">
@@ -3590,7 +3605,7 @@ Confidence: 97.3%</div>
       <div class="wizard-body">
         <div class="wslide active"><h2>Welcome to Osmograph</h2><p>Turn smells into data you can trust — and share. No lab required.</p></div>
         <div class="wslide"><h2>1 · Connect a device — or try a sample</h2><p>Plug in an ESP32 e-nose over USB, or click <strong>Load a sample session</strong> on the Dashboard to explore with no hardware at all.</p></div>
-        <div class="wslide"><h2>2 · Watch, score and share</h2><p>Live traces, a quality score you can defend, and a fingerprint you can export as PNG.</p></div>
+        <div class="wslide"><h2>2 · Watch, score and share</h2><p>Live traces, a quality score you can defend, and a fingerprint you can export as PNG.</p><label class="wizard-consent"><input type="checkbox" id="wizardTelemetry"> Send anonymous usage stats (no data, no PII)</label></div>
       </div>
       <div class="wizard-actions">
         <button id="wizardSkip" class="mini">Skip</button>

@@ -462,6 +462,27 @@ document.querySelectorAll('.sys-nav-item').forEach(item => {
   });
 });
 
+// === Privacy-first, opt-in telemetry (see private/ANALYTICS.md) ===
+const TELEMETRY_KEY = 'osmograph.telemetry.v1';
+function telemetryEnabled(): boolean {
+  try { return localStorage.getItem(TELEMETRY_KEY) === '1'; } catch { return false; }
+}
+function setTelemetry(on: boolean) {
+  try { localStorage.setItem(TELEMETRY_KEY, on ? '1' : '0'); } catch { /* ignore */ }
+}
+async function trackDesktop(event: string, props?: Record<string, unknown>) {
+  if (!telemetryEnabled()) return;
+  try { await invoke('telemetry_send', { event, props: props ?? null }); } catch { /* never surface */ }
+}
+const telemetryToggle = document.getElementById('telemetryToggle') as HTMLInputElement | null;
+if (telemetryToggle) {
+  telemetryToggle.checked = telemetryEnabled();
+  telemetryToggle.addEventListener('change', () => {
+    setTelemetry(telemetryToggle.checked);
+    if (telemetryToggle.checked) void trackDesktop('first_run');
+  });
+}
+
 // === First-run: one-click sample session ===
 const loadSampleBtn = document.getElementById('loadSampleSession') as HTMLButtonElement | null;
 loadSampleBtn?.addEventListener('click', async () => {
@@ -473,6 +494,7 @@ loadSampleBtn?.addEventListener('click', async () => {
     await invoke('analyze_recording', { fileId: rec.file_id });
     await reloadLibrary();
     (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+    void trackDesktop('sample_loaded');
     const card = document.getElementById('sampleCard');
     if (card) card.style.display = 'none';
   } catch (e) {
@@ -530,7 +552,10 @@ document.getElementById('exportFingerprintPng')?.addEventListener('click', () =>
   };
   const close = () => {
     wiz.style.display = 'none';
+    const consent = document.getElementById('wizardTelemetry') as HTMLInputElement | null;
+    setTelemetry(!!(consent && consent.checked));
     try { localStorage.setItem(KEY, '1'); } catch { /* ignore */ }
+    if (consent && consent.checked) void trackDesktop('first_run');
   };
   document.getElementById('wizardSkip')?.addEventListener('click', close);
   next.addEventListener('click', () => {
