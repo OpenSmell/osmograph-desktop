@@ -3583,7 +3583,9 @@ mod tests {
         }
         drop(file);
         let report = super::analyze_session_file(path.to_str().unwrap()).unwrap();
-        assert_eq!(report.total, Some(40.0));
+        // 38.0 reflects the R0 window contract (clamp(floor(0.15*N), 5, 30)),
+        // resolved in opensmell-rs 88c62cd and cross-validated against Python/JS.
+        assert_eq!(report.total, Some(38.0));
         assert_eq!(report.badge, "Poor");
         assert_eq!(report.flags.used_default_adc_max, true);
         assert_eq!(report.flags.used_median_sampling_rate, true);

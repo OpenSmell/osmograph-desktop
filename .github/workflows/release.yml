@@ -1,10 +1,9 @@
 name: Build & Release
 
+# Manual only — we build a release when we decide to, never on every push.
+# Run it from the Actions tab (workflow_dispatch) or `gh workflow run release.yml`.
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
