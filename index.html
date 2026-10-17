@@ -483,6 +483,17 @@
     .sample-card-text{flex:1;min-width:0}
     .sample-card-title{font-weight:700;font-size:13px}
     .sample-card-sub{color:var(--text-3);font-size:12px;margin-top:2px}
+    .wizard{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)}
+    .wizard-card{width:440px;max-width:92vw;border:1px solid var(--border);border-radius:12px;background:var(--bg,#0f1115);padding:18px}
+    .wizard-dots{display:flex;gap:6px;margin-bottom:10px}
+    .wdot{width:6px;height:6px;border-radius:50%;background:var(--border)}
+    .wdot.active{background:var(--green)}
+    .wslide{display:none}
+    .wslide.active{display:block}
+    .wslide h2{font-size:16px;margin:0 0 6px}
+    .wslide p{color:var(--text-2);font-size:13px;margin:0}
+    .wizard-actions{display:flex;align-items:center;gap:8px;margin-top:16px}
+    .wizard-fill{flex:1}
     /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
     #panel-dashboard.tab-panel { flex-direction: column; }
     /* The library tab stacks the session-library grid and the replay strip vertically. */
@@ -2398,6 +2409,7 @@
               <span class="plot-readout" id="plotEnv"></span>
               <span class="plot-readout" id="plotScaleNote" style="display:none"></span>
               <button id="liveClear" class="transport-btn trans-nav" title="Clear the displayed window">⟲</button>
+              <button id="exportTracesPng" class="transport-btn trans-nav" title="Export the visible traces as a PNG image">PNG</button>
             </div>
             <div id="hoverReadout" class="hover-readout" style="display:none"></div>
 
@@ -2450,7 +2462,7 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell grow" id="phenoBound">
-                    <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span></div>
+                    <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span><button id="exportFingerprintPng" class="mini" style="float:right" title="Export this fingerprint as a PNG image">PNG</button></div>
                     <canvas id="fingerprint"></canvas>
                   </div>
                 </div>
@@ -3569,6 +3581,25 @@ Confidence: 97.3%</div>
       }
     }, 8000);
   </script>
+
+  <div id="wizard" class="wizard" style="display:none">
+    <div class="wizard-card">
+      <div class="wizard-dots">
+        <span class="wdot active"></span><span class="wdot"></span><span class="wdot"></span>
+      </div>
+      <div class="wizard-body">
+        <div class="wslide active"><h2>Welcome to Osmograph</h2><p>Turn smells into data you can trust — and share. No lab required.</p></div>
+        <div class="wslide"><h2>1 · Connect a device — or try a sample</h2><p>Plug in an ESP32 e-nose over USB, or click <strong>Load a sample session</strong> on the Dashboard to explore with no hardware at all.</p></div>
+        <div class="wslide"><h2>2 · Watch, score and share</h2><p>Live traces, a quality score you can defend, and a fingerprint you can export as PNG.</p></div>
+      </div>
+      <div class="wizard-actions">
+        <button id="wizardSkip" class="mini">Skip</button>
+        <span class="wizard-fill"></span>
+        <button id="wizardBack" class="mini" style="display:none">Back</button>
+        <button id="wizardNext" class="green">Next</button>
+      </div>
+    </div>
+  </div>
 
   <script type="module" src="/src/main.ts"></script>
 </body>

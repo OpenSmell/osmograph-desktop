@@ -2684,8 +2684,24 @@ fn save_session_csv(
     Ok(format!("Saved {} readings to {}", readings.len(), output_path))
 }
 
-// === Fleet Management ===
+/// Write an image (as a `data:image/png;base64,...` URL produced by a canvas
+/// `toDataURL`) to a user-chosen path. Powers the "Export PNG" actions so
+/// fingerprints, traces and compare views can be shared without a screenshot.
+#[tauri::command]
+fn save_png_data_url(path: String, data_url: String) -> Result<String, String> {
+    use base64::Engine as _;
+    let b64 = data_url
+        .split_once(',')
+        .map(|(_, d)| d)
+        .unwrap_or(&data_url);
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("Invalid image data: {}", e))?;
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(format!("Saved image to {}", path))
+}
 
+// === Fleet Management ===
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FleetSensorState {
     pub name: String,
@@ -3382,6 +3398,7 @@ pub fn run() {    env_logger::init();
             import_recordings,
             import_paths,
             load_sample_session,
+            save_png_data_url,
             get_session_index,
             remove_session,
             rename_session,

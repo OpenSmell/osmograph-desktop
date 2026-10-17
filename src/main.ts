@@ -488,6 +488,60 @@ document.getElementById('sampleDismiss')?.addEventListener('click', () => {
   if (card) card.style.display = 'none';
 });
 
+// === PNG export: share artifacts without a screenshot ===
+async function exportCanvasPng(canvas: HTMLCanvasElement | null, defaultName: string) {
+  if (!canvas || !canvas.width || !canvas.height) return;
+  const { save } = await import('@tauri-apps/plugin-dialog');
+  const path = await save({
+    defaultPath: defaultName,
+    filters: [{ name: 'PNG image', extensions: ['png'] }],
+  });
+  if (!path) return;
+  const out = document.createElement('canvas');
+  out.width = canvas.width;
+  out.height = canvas.height;
+  const ctx = out.getContext('2d')!;
+  ctx.fillStyle = '#0f1115';
+  ctx.fillRect(0, 0, out.width, out.height);
+  ctx.drawImage(canvas, 0, 0);
+  await invoke<string>('save_png_data_url', { path, dataUrl: out.toDataURL('image/png') });
+}
+document.getElementById('exportTracesPng')?.addEventListener('click', () =>
+  exportCanvasPng(document.getElementById('traces') as HTMLCanvasElement, 'osmograph-traces.png'));
+document.getElementById('exportFingerprintPng')?.addEventListener('click', () =>
+  exportCanvasPng(document.getElementById('fingerprint') as HTMLCanvasElement, 'osmograph-fingerprint.png'));
+
+// === First-run wizard (shown once, dismissed forever) ===
+(function initFirstRunWizard() {
+  const KEY = 'osmograph.wizard.seen.v1';
+  const wiz = document.getElementById('wizard');
+  if (!wiz) return;
+  try { if (localStorage.getItem(KEY) === '1') return; } catch { return; }
+  const slides = wiz.querySelectorAll('.wslide');
+  const dots = wiz.querySelectorAll('.wdot');
+  const back = document.getElementById('wizardBack') as HTMLButtonElement;
+  const next = document.getElementById('wizardNext') as HTMLButtonElement;
+  let step = 0;
+  const draw = () => {
+    slides.forEach((s, i) => s.classList.toggle('active', i === step));
+    dots.forEach((d, i) => d.classList.toggle('active', i === step));
+    back.style.display = step > 0 ? '' : 'none';
+    next.textContent = step === slides.length - 1 ? 'Get started' : 'Next';
+  };
+  const close = () => {
+    wiz.style.display = 'none';
+    try { localStorage.setItem(KEY, '1'); } catch { /* ignore */ }
+  };
+  document.getElementById('wizardSkip')?.addEventListener('click', close);
+  next.addEventListener('click', () => {
+    if (step < slides.length - 1) { step++; draw(); }
+    else { close(); (document.querySelector('.tab-btn[data-tab="dashboard"]') as HTMLElement | null)?.click(); }
+  });
+  back.addEventListener('click', () => { if (step > 0) { step--; draw(); } });
+  draw();
+  wiz.style.display = 'flex';
+})();
+
 // === Canvas: Traces ===
 const tracesCanvas = document.getElementById('traces') as HTMLCanvasElement;
 const tracesCtx = tracesCanvas.getContext('2d')!;
