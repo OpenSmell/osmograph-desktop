@@ -439,6 +439,19 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
   });
 });
 
+// Sources tab sub-views: Sessions | Datasets
+document.querySelectorAll('.src-subnav-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.src-subnav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.src-view').forEach(v => v.classList.remove('active'));
+    btn.classList.add('active');
+    const src = (btn as HTMLElement).dataset.src!;
+    document.getElementById(`src-${src}`)?.classList.add('active');
+    if (src === 'datasets') renderDatasetCatalog();
+    else if (src === 'changelog') renderChangeLog();
+  });
+});
+
 document.querySelectorAll('.sys-nav-item').forEach(item => {
   item.addEventListener('click', () => {
     document.querySelectorAll('.sys-nav-item').forEach(i => i.classList.remove('active'));

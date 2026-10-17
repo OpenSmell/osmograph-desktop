@@ -1106,6 +1106,20 @@
       min-height: 0;
       overscroll-behavior: contain;
     }
+    /* === Sources tab: Sessions | Datasets sub-views === */
+    #panel-library.tab-panel { flex-direction: column; }
+    .src-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    .src-subnav { display: flex; gap: 4px; padding: 10px 14px 0; }
+    .src-subnav-btn {
+      padding: 5px 12px; font-size: 11px; letter-spacing: .5px; text-transform: uppercase;
+      color: var(--text-3); background: var(--bg-1); border: 1px solid var(--border); cursor: pointer;
+    }
+    .src-subnav-btn.active { color: var(--green); border-color: var(--green); }
+    .src-view { display: none; flex: 1; min-height: 0; }
+    .src-view.active { display: flex; flex-direction: column; }
+    .src-pane { padding: 16px; overflow-y: auto; flex: 1; }
+    .src-pane h2 { font-size: 16px; font-weight: 600; color: var(--text-0); margin-bottom: 12px; }
+
     /* === Compare Tab === */
     .compare {
       display: flex;
@@ -2326,7 +2340,7 @@
     <!-- Tab Bar -->
     <nav class="tabbar">
       <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-      <button class="tab-btn" data-tab="library">Library</button>
+      <button class="tab-btn" data-tab="library">Sources</button>
       <button class="tab-btn" data-tab="compare">Compare</button>
       <button class="tab-btn" data-tab="train">Train</button>
       <button class="tab-btn" data-tab="fleet">Fleet <span class="badge" id="fleetBadge" style="display:none">0</span></button>
@@ -2451,11 +2465,7 @@
               </div>
             </div>
 
-            <!-- Change Log — what changed, when, for how long (works with one device, no labels) -->
-            <div class="sidebar-section">
-              <h3>Change Log</h3>
-              <div id="changeLog" class="change-log"><div class="cl-empty">No changes recorded yet.</div></div>
-            </div>
+            <!-- Change Log moved to the Sources tab (src-changelog) so it isn't buried in the rail. -->
 
             <!-- Live Classifier -->
             <div class="sidebar-section">
@@ -2477,6 +2487,13 @@
       </div>
 
       <div class="tab-panel" id="panel-library">
+        <div class="src-wrap">
+          <div class="src-subnav">
+            <button class="src-subnav-btn active" data-src="sessions">Sessions</button>
+            <button class="src-subnav-btn" data-src="datasets">Datasets</button>
+            <button class="src-subnav-btn" data-src="changelog">Change Log</button>
+          </div>
+          <div class="src-view active" id="src-sessions">
         <div class="library">
           <div class="library-main hud-panel" id="libMain">
             <div class="hud-panel-head">
@@ -2575,6 +2592,44 @@
             Replays a recorded session offline. Intended for inspection only — it does not feed the live detector or classifier.
           </div>
         </div>
+          </div><!-- /src-sessions -->
+
+          <!-- Datasets Catalog — explore real public smell data (no hardware needed).
+               We LINK to the original source and show its license; we only rehost what
+               is clearly permissive. Honesty over hype (see private/DATA_AND_LICENSING.md). -->
+          <div class="src-view" id="src-datasets">
+            <div class="src-pane">
+              <h2>Datasets</h2>
+              <div class="card">
+                <p class="hint" style="margin-bottom:8px">
+                  Real public smell / gas-sensor datasets, across sensor types. We link to the
+                  original source and show its license up front — we only rehost what is clearly
+                  permissive. <b>Always credit the source.</b>
+                </p>
+                <div class="form-row">
+                  <input type="text" id="dsFilter" placeholder="Filter by name, sensor, license…" style="flex:1" />
+                  <select id="dsCommercial">
+                    <option value="all">All licenses</option>
+                    <option value="yes">Commercial OK</option>
+                    <option value="check">Check license</option>
+                    <option value="no">Link only</option>
+                    <option value="api">API</option>
+                  </select>
+                </div>
+              </div>
+              <div id="datasetCatalog" class="dataset-catalog">Loading…</div>
+            </div>
+          </div><!-- /src-datasets -->
+
+          <!-- Change Log — what changed, when, for how long (works with one device, no labels) -->
+          <div class="src-view" id="src-changelog">
+            <div class="src-pane">
+              <h2>Change Log</h2>
+              <p class="hint" style="margin-bottom:8px">What changed, when, and for how long — recorded from one device, no labels needed.</p>
+              <div id="changeLog" class="change-log"><div class="cl-empty">No changes recorded yet.</div></div>
+            </div>
+          </div><!-- /src-changelog -->
+        </div><!-- /src-wrap -->
       </div>
 
       <!-- ===== COMPARE ===== -->
@@ -2733,7 +2788,6 @@
             <div class="sys-nav-item" data-sys="firmware">Firmware</div>
             <div class="sys-nav-item" data-sys="burnin">Burn-In</div>
             <div class="sys-nav-item" data-sys="data">Data Storage</div>
-            <div class="sys-nav-item" data-sys="datasets">Datasets</div>
             <div class="sys-nav-item" data-sys="recipes">Recipes</div>
             <div class="sys-nav-item" data-sys="plugins">Plugins</div>
             <div class="sys-nav-item" data-sys="updates">Updates</div>
@@ -3236,31 +3290,6 @@ Confidence: 97.3%</div>
                 No files listed. Enter a dataset and click List.
               </div>
             </div>
-          </div>
-
-          <!-- Datasets Catalog — explore real public smell data (no hardware needed).
-               We LINK to the original source and show its license; we only rehost what
-               is clearly permissive. Honesty over hype (see private/DATA_AND_LICENSING.md). -->
-          <div class="sys-panel" id="sys-datasets">
-            <h2>Datasets</h2>
-            <div class="card">
-              <p class="hint" style="margin-bottom:8px">
-                Real public smell / gas-sensor datasets, across sensor types. We link to the
-                original source and show its license up front — we only rehost what is clearly
-                permissive. <b>Always credit the source.</b>
-              </p>
-              <div class="form-row">
-                <input type="text" id="dsFilter" placeholder="Filter by name, sensor, license…" style="flex:1" />
-                <select id="dsCommercial">
-                  <option value="all">All licenses</option>
-                  <option value="yes">Commercial OK</option>
-                  <option value="check">Check license</option>
-                  <option value="no">Link only</option>
-                  <option value="api">API</option>
-                </select>
-              </div>
-            </div>
-            <div id="datasetCatalog" class="dataset-catalog">Loading…</div>
           </div>
 
           <!-- Recipes — the smell-native unit of work: source → ordered transforms → result.
