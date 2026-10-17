@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Osmograph — Real-time MOX Monitoring",
+        "title": "Osmograph — the software for smell",
         "width": 1360,
         "height": 740,
         "minWidth": 960,

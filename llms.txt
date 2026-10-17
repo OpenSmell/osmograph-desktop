@@ -1,0 +1,17 @@
+# Osmograph
+
+> Open desktop software for digital smell: flash firmware, record gas-sensor traces
+> from supported e-nose hardware, build drift-corrected change detectors, and manage a
+> fleet — no code required.
+
+## Docs
+- [README](./README.md): what Osmograph is and how to run it.
+- [NOTICE](./NOTICE.md): third-party dataset attribution and link-vs-rehost policy.
+- [AGENTS.md](./AGENTS.md): build/test commands and conventions for agents.
+
+## Authoring Vials (extensions)
+- [Vial manifest schema](https://opensmell.org/schema/vial.schema.json)
+- `noses create <name>` → `noses test` → `noses lint` → `noses publish`
+
+## Optional
+- [CHANGELOG](./CHANGELOG.md)

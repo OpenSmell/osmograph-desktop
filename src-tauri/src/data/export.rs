@@ -127,6 +127,14 @@ pub fn export_session_osmell(
     };
     let recorded_at = Some(rec.timestamp * 1000.0);
 
+    // Provenance (SMELL_OPERATIONS.md §3.N): bind the bundle to its content so a
+    // derived/edited file can be detected, and record the software + licence.
+    let content_hash = crate::recipe::content_hash(csv.as_bytes());
+    let created_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
     let manifest = json!({
         "osmell": {"formatVersion": "1.0.0"},
         "sensor": {
@@ -143,6 +151,13 @@ pub fn export_session_osmell(
             "durationMs": (parsed.time.last().copied().unwrap_or(0.0) * 1000.0).clamp(0.0, f64::MAX),
         },
         "software": {"recorder": "Osmograph"},
+        "provenance": {
+            "source": {"kind": "session", "id": label, "license": "unspecified", "originUrl": "", "credit": ""},
+            "recipe": null,
+            "software": {"name": "Osmograph", "version": env!("CARGO_PKG_VERSION")},
+            "createdMs": created_ms,
+            "contentHash": content_hash,
+        },
         "recording": {
             "protocol": "before-during-after",
             "phases": {
@@ -246,6 +261,48 @@ mod tests {
         let bundle = super::super::osmell_read::read_osmell(&out).unwrap();
         assert_eq!(bundle.channels.len(), 2);
         assert_eq!(bundle.channels[0].1.len(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn osmell_bundle_carries_provenance() {
+        let dir = std::env::temp_dir().join("osm_export_prov");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("session_a.csv");
+        write_csv(&src, "timestamp_ms,VOC,CO\n0,1000.0,20.0\n100,1100.0,25.0\n");
+
+        let mut idx = SessionIndex::default();
+        idx.upsert(super::super::SessionRecord {
+            file_id: "a".into(),
+            substance: "coffee".into(),
+            label: "coffee".into(),
+            timestamp: 1_000.0,
+            duration_sec: 1.0,
+            sensor_count: 2,
+            quality: 80.0,
+            csv_path: src.to_string_lossy().to_string(),
+            opensmell_result: None,
+            quality_report: None,
+            preset_name: String::new(),
+            notes: String::new(),
+        });
+
+        let out = dir.join("out/session_a.osmell");
+        export_session_osmell(&idx, "a", &out).unwrap();
+
+        // Read manifest.json straight out of the zip and check provenance.
+        let file = std::fs::File::open(&out).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let mut manifest = String::new();
+        {
+            use std::io::Read;
+            zip.by_name("manifest.json").unwrap().read_to_string(&mut manifest).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        assert_eq!(v["provenance"]["software"]["name"], "Osmograph");
+        assert!(v["provenance"]["contentHash"].as_str().unwrap().starts_with("fnv1a64:"));
+        assert_eq!(v["provenance"]["source"]["kind"], "session");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

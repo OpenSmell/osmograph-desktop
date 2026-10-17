@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { DATASET_CATALOG, type DatasetCommercial } from './datasets';
 
 // === Constants ===
 const MAX_TRACE = 800;
@@ -11,6 +12,46 @@ const LIVE_WINDOW_DEFAULT = 800; // default trailing-sample window; reset-zoom t
 // every channel (up to 64) gets its own distinct color.
 const PALETTE_ANCHORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 let lastAnomalyKey = '';  // anomaly-card state key: only re-stamp DOM when this CHANGES
+
+// === Change Log (single-unit, label-free) ===
+// The live detector flags deviations from a learned baseline with no labels —
+// the one thing a lone device can honestly do. We turn those transient flags
+// into a record: what changed, when, for how long, how many channels moved.
+interface ChangeEvent { start: number; end: number; peak: number; channels: number[]; alert: string; }
+let changeLog: ChangeEvent[] = [];
+let openChange: { start: number; peak: number; channels: Set<number>; alert: string } | null = null;
+const CHANGE_LOG_KEY = 'osmograph.changeLog';
+function loadChangeLog() {
+  try { changeLog = JSON.parse(localStorage.getItem(CHANGE_LOG_KEY) || '[]'); } catch { changeLog = []; }
+}
+function saveChangeLog() {
+  try { localStorage.setItem(CHANGE_LOG_KEY, JSON.stringify(changeLog.slice(0, 50))); } catch { /* ignore */ }
+}
+function clFmtTime(ts: number): string {
+  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+function clFmtDur(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+function renderChangeLog() {
+  const el = document.getElementById('changeLog');
+  if (!el) return;
+  const rows: string[] = [];
+  if (openChange) {
+    rows.push(`<div class="cl-row cl-open"><span class="cl-time">${clFmtTime(openChange.start)}</span>` +
+      `<span class="cl-badge">ongoing</span>` +
+      `<span class="cl-meta">peak ${openChange.peak.toFixed(1)} · ${openChange.channels.size} ch</span></div>`);
+  }
+  for (const ev of changeLog) {
+    rows.push(`<div class="cl-row"><span class="cl-time">${clFmtTime(ev.start)}</span>` +
+      `<span class="cl-badge${ev.alert === 'critical' ? ' crit' : ''}">${ev.alert}</span>` +
+      `<span class="cl-meta">${clFmtDur(ev.end - ev.start)} · ${ev.channels.length} ch · peak ${ev.peak.toFixed(1)}</span></div>`);
+  }
+  el.innerHTML = rows.length ? rows.join('') : '<div class="cl-empty">No changes recorded yet.</div>';
+}
 
 // Golden-angle hue stepper keeps generated colors maximally separated so
 // high channel counts never land on visually identical traces.
@@ -1028,6 +1069,28 @@ async function ingestReading(values: number[]) {
         statusDot.className = connected ? 'status-dot ok' : 'status-dot';
       }
     }
+    }
+
+    // Log change events: open one when a deviation starts, close it when the
+    // array returns to baseline. This is the single-unit value of the detector.
+    if (!result.warming_up) {
+      const ts = Date.now();
+      if (result.is_anomaly) {
+        if (!openChange) {
+          openChange = { start: ts, peak: result.raw_score, channels: new Set(result.triggered_channels), alert: result.alert_name };
+          renderChangeLog();
+        } else {
+          openChange.peak = Math.max(openChange.peak, result.raw_score);
+          result.triggered_channels.forEach((c) => openChange!.channels.add(c));
+          openChange.alert = result.alert_name;
+        }
+      } else if (openChange) {
+        changeLog.unshift({ start: openChange.start, end: ts, peak: openChange.peak, channels: [...openChange.channels], alert: openChange.alert });
+        if (changeLog.length > 50) changeLog.length = 50;
+        saveChangeLog();
+        openChange = null;
+        renderChangeLog();
+      }
     }
   } catch (err) {
     console.error('Detection error:', err);
@@ -3156,17 +3219,6 @@ async function reloadLibrary() {
   renderLibrary();
 }
 
-// First run: an empty library gets the bundled sample automatically, so a user
-// with no hardware sees a real recording within a minute of first boot.
-async function ensureSampleOnEmptyLibrary() {
-  try {
-    if (sessions.length > 0) return;
-    const msg = await invoke<string>('load_sample_dataset');
-    await reloadLibrary();
-    await flashStatus('hubStatus', msg, 'var(--green)');
-  } catch { /* sample is best-effort; the hub stays usable without it */ }
-}
-
 // Recover recordings that were interrupted before save (a crash left a
 // `.journal` behind). Offered once on boot, then the recovered `.osmell` files
 // are indexed into the library. Never blocks — a failure just logs.
@@ -3595,21 +3647,6 @@ document.getElementById('hfList')!.addEventListener('click', async () => {
     });
   } catch (e) {
     filesEl.textContent = `List failed: ${e}`;
-  }
-});
-
-// === One-click sample dataset (5-minute first run, no hardware/network) ===
-document.getElementById('hfSample')!.addEventListener('click', async () => {
-  const btn = document.getElementById('hfSample') as HTMLButtonElement | null;
-  if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
-  try {
-    const msg = await invoke<string>('load_sample_dataset');
-    await flashStatus('hubStatus', msg, 'var(--green)');
-    await reloadLibrary();
-  } catch (e) {
-    await flashStatus('hubStatus', `Sample load failed: ${e}`, 'var(--red)');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = 'Load sample'; }
   }
 });
 
@@ -4319,6 +4356,246 @@ async function refreshPlugins() {
   } catch {
     document.getElementById('pluginList')!.textContent = 'Plugin discovery failed';
   }
+}
+
+// === Datasets catalog (the first slice of "Sources") ===
+// Renders DATASET_CATALOG (src/datasets.ts) with a license badge and LEGAL-SAFE
+// actions only: open the original source in the browser, or copy the attribution.
+// We deliberately do NOT auto-download restrictive datasets — the user fetches under
+// the source's own terms. This is the honest, "no invented numbers" way to bring real
+// data into the workspace, and it covers multiple sensor types so profiles are shaped
+// by reality (see private/DATA_AND_LICENSING.md).
+function dsBadgeLabel(c: DatasetCommercial): string {
+  return c === 'yes' ? 'commercial ok'
+    : c === 'check' ? 'check license'
+    : c === 'no' ? 'link only'
+    : 'api';
+}
+
+function renderDatasetCatalog() {
+  const el = document.getElementById('datasetCatalog');
+  if (!el) return;
+  const q = (document.getElementById('dsFilter') as HTMLInputElement | null)?.value.trim().toLowerCase() || '';
+  const filt = (document.getElementById('dsCommercial') as HTMLSelectElement | null)?.value || 'all';
+  const rows = DATASET_CATALOG.filter((d) =>
+    (filt === 'all' || d.commercial === filt) &&
+    (!q || `${d.name} ${d.sensors} ${d.license} ${d.note}`.toLowerCase().includes(q)));
+  if (!rows.length) {
+    el.innerHTML = '<div class="hint" style="grid-column:1/-1">No datasets match.</div>';
+    return;
+  }
+  el.innerHTML = rows.map((d) => `
+    <div class="ds-card">
+      <div class="ds-card-head">
+        <span class="ds-card-name">${esc(d.name)}</span>
+        <span class="ds-badge ${d.commercial}">${dsBadgeLabel(d.commercial)}</span>
+      </div>
+      <div class="ds-meta">${esc(d.sensors)} · ${esc(d.size)}</div>
+      <div class="ds-meta">License: ${esc(d.license)}</div>
+      <div class="ds-note">${esc(d.note)}</div>
+      <div class="ds-meta">Credit: ${esc(d.credit)}</div>
+      <div class="ds-actions">
+        <button class="mini-btn ds-open" data-url="${esc(d.url)}">Open source</button>
+        <button class="mini-btn ds-cite" data-name="${esc(d.name)}" data-credit="${esc(d.credit)}" data-url="${esc(d.url)}">Copy credit</button>
+      </div>
+    </div>`).join('');
+}
+
+function initDatasetCatalog() {
+  renderDatasetCatalog();
+  document.getElementById('dsFilter')?.addEventListener('input', renderDatasetCatalog);
+  document.getElementById('dsCommercial')?.addEventListener('change', renderDatasetCatalog);
+  const el = document.getElementById('datasetCatalog');
+  if (!el) return;
+  // Delegated: buttons are re-rendered on every filter change.
+  el.addEventListener('click', async (ev) => {
+    const btn = (ev.target as HTMLElement).closest('button');
+    if (!btn) return;
+    if (btn.classList.contains('ds-open')) {
+      await invoke('open_release_page', { url: btn.dataset.url });
+    } else if (btn.classList.contains('ds-cite')) {
+      const text = `Dataset: ${btn.dataset.name}\nCredit: ${btn.dataset.credit}\nSource: ${btn.dataset.url}`;
+      try {
+        await navigator.clipboard.writeText(text);
+        const orig = btn.textContent;
+        btn.textContent = 'Copied ✓';
+        setTimeout(() => { btn.textContent = orig; }, 1200);
+      } catch { /* clipboard may be unavailable; stay silent */ }
+    }
+  });
+}
+
+// === Recipes (source → transforms → result) ===
+// The smell-native unit of work. Backed by the Rust `recipe` module: saved recipes
+// live under <config>/Osmograph/recipes, are validated server-side, and every step
+// is a named op from the catalog (no invented numbers — see SMELL_OPERATIONS.md).
+interface RecipeStep { op: string; channel?: number | null; params: Record<string, number>; }
+interface Recipe { id: string; name: string; version: string; source: string; steps: RecipeStep[]; notes: string; }
+interface OpInfo { op: string; intent: string; status: string; }
+
+let recipeOpsCache: OpInfo[] = [];
+let currentEditingId: string | null = null;
+
+function recipeSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'recipe';
+}
+
+function recipeStepRow(op = '', channel: number | string = '', params = ''): string {
+  const opts = recipeOpsCache
+    .map((o) => `<option value="${esc(o.op)}"${o.op === op ? ' selected' : ''}>${esc(o.op)}</option>`)
+    .join('');
+  return `<div class="rec-step">
+    <select class="stepOp">${opts}</select>
+    <input class="stepChannel" type="number" min="0" placeholder="ch" value="${channel}" />
+    <input class="stepParams" placeholder="k=v,k=v" value="${esc(params)}" />
+    <button class="mini-btn stepDel" type="button">&times;</button>
+  </div>`;
+}
+
+function renderRecipeList(list: Recipe[]) {
+  const el = document.getElementById('recipeList');
+  if (!el) return;
+  el.classList.add('recipe-list');
+  if (!list.length) {
+    el.innerHTML = '<div class="hint">No saved recipes yet — create one above.</div>';
+    return;
+  }
+  el.innerHTML = list
+    .map(
+      (r) => `<div class="recipe-card">
+      <div class="recipe-card-main">
+        <div class="recipe-card-name">${esc(r.name)}</div>
+        <div class="recipe-card-meta">${esc(r.source)} · v${esc(r.version)} · ${r.steps.length} step(s)</div>
+        <div class="recipe-steps">${r.steps.map((s) => `<span class="recipe-tag">${esc(s.op)}</span>`).join('')}</div>
+      </div>
+      <button class="mini-btn recEdit" data-id="${esc(r.id)}">Edit</button>
+      <button class="mini-btn recDel" data-id="${esc(r.id)}">Delete</button>
+    </div>`
+    )
+    .join('');
+}
+
+function renderRecipeOps(ops: OpInfo[]) {
+  const el = document.getElementById('recipeOps');
+  if (!el) return;
+  el.innerHTML = ops
+    .map(
+      (o) => `<div class="op-row"><span class="op-name">${esc(o.op)}</span><span class="op-intent">${esc(o.intent)}</span><span class="op-status ${esc(o.status)}">${esc(o.status)}</span></div>`
+    )
+    .join('');
+}
+
+async function refreshRecipes() {
+  try {
+    const [list, ops] = await Promise.all([
+      invoke<Recipe[]>('recipe_list'),
+      recipeOpsCache.length ? Promise.resolve(recipeOpsCache) : invoke<OpInfo[]>('recipe_ops'),
+    ]);
+    recipeOpsCache = ops;
+    renderRecipeList(list);
+    renderRecipeOps(ops);
+  } catch {
+    const el = document.getElementById('recipeList');
+    if (el) el.textContent = 'Recipe load failed';
+  }
+}
+
+function openRecipeEditor(r?: Recipe) {
+  document.getElementById('recipeEditor')!.style.display = 'block';
+  (document.getElementById('recName') as HTMLInputElement).value = r?.name || '';
+  (document.getElementById('recSource') as HTMLInputElement).value = r?.source || '';
+  (document.getElementById('recVersion') as HTMLInputElement).value = r?.version || '1.0.0';
+  const steps = document.getElementById('recSteps')!;
+  steps.innerHTML = '';
+  if (r && r.steps.length) {
+    r.steps.forEach((s) =>
+      steps.insertAdjacentHTML(
+        'beforeend',
+        recipeStepRow(s.op, s.channel ?? '', Object.entries(s.params || {}).map(([k, v]) => `${k}=${v}`).join(','))
+      )
+    );
+  } else {
+    steps.insertAdjacentHTML('beforeend', recipeStepRow());
+  }
+  currentEditingId = r?.id || null;
+  const msg = document.getElementById('recMsg')!;
+  msg.style.color = 'var(--text-3)';
+  msg.textContent = r ? `Editing ${r.id}` : 'New recipe';
+}
+
+function collectRecipe(): Recipe {
+  const name = (document.getElementById('recName') as HTMLInputElement).value.trim();
+  const source = (document.getElementById('recSource') as HTMLInputElement).value.trim();
+  const version = (document.getElementById('recVersion') as HTMLInputElement).value.trim() || '1.0.0';
+  const steps: RecipeStep[] = [];
+  document.querySelectorAll('#recSteps .rec-step').forEach((row) => {
+    const op = (row.querySelector('.stepOp') as HTMLSelectElement).value;
+    const chRaw = (row.querySelector('.stepChannel') as HTMLInputElement).value.trim();
+    const params: Record<string, number> = {};
+    (row.querySelector('.stepParams') as HTMLInputElement)
+      .value.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .forEach((pair) => {
+        const [k, v] = pair.split('=').map((s) => s.trim());
+        const n = Number(v);
+        if (k && v !== undefined && !Number.isNaN(n)) params[k] = n;
+      });
+    steps.push({ op, channel: chRaw === '' ? null : Number(chRaw), params });
+  });
+  return { id: currentEditingId || recipeSlug(name), name, version, source, steps, notes: '' };
+}
+
+async function saveRecipe() {
+  const msg = document.getElementById('recMsg')!;
+  const recipe = collectRecipe();
+  try {
+    await invoke('recipe_save', { recipe });
+    msg.style.color = 'var(--green)';
+    msg.textContent = `Saved ${recipe.id}.`;
+    document.getElementById('recipeEditor')!.style.display = 'none';
+    currentEditingId = null;
+    await refreshRecipes();
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = String(e);
+  }
+}
+
+function initRecipes() {
+  refreshRecipes();
+  document.getElementById('recipeNew')?.addEventListener('click', () => openRecipeEditor());
+  document.getElementById('recipeRefresh')?.addEventListener('click', refreshRecipes);
+  document.getElementById('recAddStep')?.addEventListener('click', () =>
+    document.getElementById('recSteps')!.insertAdjacentHTML('beforeend', recipeStepRow())
+  );
+  document.getElementById('recSave')?.addEventListener('click', saveRecipe);
+  document.getElementById('recCancel')?.addEventListener('click', () => {
+    document.getElementById('recipeEditor')!.style.display = 'none';
+    currentEditingId = null;
+  });
+
+  document.getElementById('recSteps')!.addEventListener('click', (ev) => {
+    const btn = (ev.target as HTMLElement).closest('.stepDel');
+    if (btn) (btn.closest('.rec-step') as HTMLElement)?.remove();
+  });
+
+  document.getElementById('recipeList')!.addEventListener('click', async (ev) => {
+    const btn = (ev.target as HTMLElement).closest('button');
+    if (!btn) return;
+    const id = btn.getAttribute('data-id') || '';
+    if (btn.classList.contains('recEdit')) {
+      try {
+        const r = await invoke<Recipe>('recipe_load', { id });
+        openRecipeEditor(r);
+      } catch { /* ignore */ }
+    } else if (btn.classList.contains('recDel')) {
+      try {
+        await invoke('recipe_delete', { id });
+        await refreshRecipes();
+      } catch { /* ignore */ }
+    }
+  });
 }
 
 document.getElementById('sysRefreshPorts')!.addEventListener('click', refreshPorts);
@@ -5619,7 +5896,7 @@ function renderPhenotype(p: PhenotypeReport) {
   const tag = document.getElementById('phenoA1Tag');
   if (tag) {
     tag.style.color = a1Color;
-    tag.textContent = p.has_data ? `A1 · ${p.a1.valence}` : 'A1 —';
+    tag.textContent = p.has_data ? `Direction · ${p.a1.valence}` : 'Direction —';
   }
 
   if (!p.has_data) {
@@ -6303,10 +6580,14 @@ renderFleet();
 refreshToolchain();
 refreshTrainLibrary();
 renderLiveState();
+loadChangeLog();
+renderChangeLog();
+initDatasetCatalog();
+initRecipes();
 refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
-reloadLibrary().then(ensureSampleOnEmptyLibrary);
+reloadLibrary();
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
 checkRecoveredSessions();
 

@@ -4,6 +4,11 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Never watch the Rust build tree: 100k+ files would exhaust the
+    // inotify watcher budget (ENOSPC) and crash the dev server.
+    watch: {
+      ignored: ['**/src-tauri/target/**'],
+    },
   },
   // Prevent vite from obscuring Rust errors
   clearScreen: false,

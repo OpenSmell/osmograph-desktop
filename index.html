@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" type="image/png" href="/favicon.png" />
-  <title>Osmograph — Fleet MOX Monitoring</title>
+  <title>Osmograph — the software for smell</title>
   <style>
     /* Bundled opensmell-web fonts (Geist / Geist Mono) */
     @font-face { font-family: "Geist"; src: url("/fonts/geist-latin.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
@@ -1045,6 +1045,16 @@
     .anomaly-card.critical { border-left-color: var(--red); background: var(--red-dim); }
     .anomaly-card .label { font-size: 12px; font-weight: 600; }
     .anomaly-card .sub { font-size: 10px; color: var(--text-2); margin-top: 2px; }
+    /* Change log — timestamped record of baseline deviations (single-unit value). */
+    .change-log { display: flex; flex-direction: column; gap: 4px; max-height: 150px; overflow-y: auto; }
+    .cl-row { display: flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 10px; color: var(--text-2); }
+    .cl-row.cl-open { color: var(--yellow); }
+    .cl-time { color: var(--text-3); }
+    .cl-badge { font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; padding: 0 4px; border-radius: 2px; background: var(--bg-3); color: var(--text-2); }
+    .cl-badge.crit { background: var(--red-dim); color: var(--red); }
+    .cl-row.cl-open .cl-badge { background: var(--yellow-dim); color: var(--yellow); }
+    .cl-meta { margin-left: auto; color: var(--text-3); }
+    .cl-empty { font-size: 10px; color: var(--text-3); }
 
     /* Buzzer alert frame flash — pink for alarms, red for emergency. */
     body.alert-flash::after {
@@ -1228,6 +1238,63 @@
     .cmp-metrics-table tr.cmp-best td { color: var(--green); font-weight: 700; }
     .cmp-recover-hi { color: var(--green); }
     .cmp-recover-lo { color: var(--red); }
+
+    /* === Datasets Catalog === */
+    .dataset-catalog {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 10px;
+      margin-top: 10px;
+    }
+    .ds-card {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      padding: 12px;
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+    }
+    .ds-card-head { display: flex; align-items: baseline; gap: 8px; }
+    .ds-card-name { font-size: 13px; font-weight: 700; color: var(--text-0); }
+    .ds-badge {
+      margin-left: auto;
+      padding: 2px 7px;
+      font-family: var(--font-mono);
+      font-size: 9px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      border-radius: 10px;
+      background: var(--bg-3);
+    }
+    .ds-badge.yes { color: var(--green); }
+    .ds-badge.check { color: var(--yellow); }
+    .ds-badge.no { color: var(--red); }
+    .ds-badge.api { color: var(--cyan); }
+    .ds-meta { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); }
+    .ds-note { font-size: 11px; line-height: 1.45; color: var(--text-2); }
+    .ds-actions { display: flex; gap: 6px; margin-top: auto; padding-top: 6px; }
+
+    /* === Recipes === */
+    .recipe-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+    .recipe-card { display: flex; align-items: center; gap: 10px; padding: 10px 12px; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--radius); }
+    .recipe-card-main { flex: 1; min-width: 0; }
+    .recipe-card-name { font-size: 13px; font-weight: 700; color: var(--text-0); }
+    .recipe-card-meta { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); }
+    .recipe-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .recipe-tag { font-family: var(--font-mono); font-size: 9px; padding: 1px 6px; border-radius: 8px; background: var(--bg-3); color: var(--text-2); }
+    .rec-step { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
+    .rec-step select { flex: 1; }
+    .rec-step input { width: 72px; }
+    .op-catalog { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
+    .op-row { display: flex; gap: 8px; align-items: baseline; font-size: 11px; padding: 2px 0; border-bottom: 1px solid var(--border); }
+    .op-name { font-family: var(--font-mono); color: var(--text-1); min-width: 150px; }
+    .op-intent { flex: 1; color: var(--text-3); }
+    .op-status { font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; }
+    .op-status.core { color: var(--green); }
+    .op-status.next { color: var(--yellow); }
+    .op-status.research { color: var(--red); }
     .library-main {
       display: flex;
       flex-direction: column;
@@ -2325,15 +2392,15 @@
             <div class="dock" id="underDock">
               <div class="dock-head">
                 <span>SYS.PHENO</span>
-                <span>measured response-type strip</span>
-                <span class="dy-label" id="phenoA1Tag">A1 —</span>
+                <span>measured response</span>
+                <span class="dy-label" id="phenoA1Tag">Direction —</span>
                 <span class="dock-fill"></span>
-                <button id="dockToggle" class="dock-toggle" title="Collapse / expand the measured phenotype strip">—</button>
+                <button id="dockToggle" class="dock-toggle" title="Collapse / expand the measured response strip">—</button>
               </div>
               <div class="dock-body" id="phenoDockBody">
                 <div class="pheno-strip" id="phenoStrip">
                   <div class="pheno-cell" id="phenoA1">
-                    <div class="pheno-cell-head">A1 · Redox</div>
+                    <div class="pheno-cell-head">Response direction</div>
                     <div class="pheno-direction" id="phenoA1Dir">
                       <span class="pheno-tri" id="phenoA1Tri">·</span>
                       <span class="pheno-val" id="phenoA1Val">—</span>
@@ -2343,7 +2410,7 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell grow" id="phenoA3">
-                    <div class="pheno-cell-head">A3 · Response type</div>
+                    <div class="pheno-cell-head">Response type</div>
                     <div class="pheno-val" id="phenoA3Val">no reference</div>
                     <div class="pheno-sub" id="phenoA3Sub">—</div>
                     <div class="pheno-bars"><canvas id="phenoBars"></canvas></div>
@@ -2351,12 +2418,12 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell" id="phenoA2">
-                   <div class="pheno-cell-head">A2 · Kinetics</div>
-                   <div class="pheno-val" id="phenoA2Val">—</div>
+                    <div class="pheno-cell-head">Kinetics</div>
+                    <div class="pheno-val" id="phenoA2Val">—</div>
                     <div class="pheno-sub" id="phenoA2Sub">—</div>
                   </div>
                   <div class="pheno-sep"></div>
-<div class="pheno-cell grow" id="phenoBound">
+                  <div class="pheno-cell grow" id="phenoBound">
                     <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span></div>
                     <canvas id="fingerprint"></canvas>
                   </div>
@@ -2364,7 +2431,6 @@
               </div>
             </div>
           </div>
-          <aside class="sidebar">
           <aside class="sidebar">
             <div class="rail-head">
               <span class="section-label">Live Telemetry</span>
@@ -2383,6 +2449,12 @@
                 <div class="metric"><div class="k">Triggered CH</div><div class="v" id="mCh">0/6</div></div>
                 <div class="metric"><div class="k">Alert Level</div><div class="v" id="mAlert">0</div></div>
               </div>
+            </div>
+
+            <!-- Change Log — what changed, when, for how long (works with one device, no labels) -->
+            <div class="sidebar-section">
+              <h3>Change Log</h3>
+              <div id="changeLog" class="change-log"><div class="cl-empty">No changes recorded yet.</div></div>
             </div>
 
             <!-- Live Classifier -->
@@ -2661,6 +2733,8 @@
             <div class="sys-nav-item" data-sys="firmware">Firmware</div>
             <div class="sys-nav-item" data-sys="burnin">Burn-In</div>
             <div class="sys-nav-item" data-sys="data">Data Storage</div>
+            <div class="sys-nav-item" data-sys="datasets">Datasets</div>
+            <div class="sys-nav-item" data-sys="recipes">Recipes</div>
             <div class="sys-nav-item" data-sys="plugins">Plugins</div>
             <div class="sys-nav-item" data-sys="updates">Updates</div>
             <div class="sys-nav-item" data-sys="about">About</div>
@@ -3143,12 +3217,11 @@ Confidence: 97.3%</div>
 
             <div class="card">
               <h3>Community Sync — Hugging Face</h3>
-              <p class="hint" style="margin-bottom:8px">Share and pull anonymised OpenSmell sessions via a public HF dataset. Downloads are read-only (no token). No hardware? Load sample drops a bundled recording straight into your library.</p>
+              <p class="hint" style="margin-bottom:8px">Share and pull anonymised OpenSmell sessions via a public HF dataset. Downloads are read-only (no token).</p>
               <div class="form-row">
                 <label>Dataset</label>
                 <input type="text" id="hfRepo" value="" placeholder="opensmell/opensmell-datasets" style="flex:1" />
                 <button id="hfList">List</button>
-                <button id="hfSample" title="Load a bundled sample recording — no hardware or network needed">Load sample</button>
               </div>
               <div class="form-row">
                 <label>Write Token</label>
@@ -3162,6 +3235,70 @@ Confidence: 97.3%</div>
               <div id="hfFiles" style="margin-top:8px;font-size:11px;color:var(--text-3)">
                 No files listed. Enter a dataset and click List.
               </div>
+            </div>
+          </div>
+
+          <!-- Datasets Catalog — explore real public smell data (no hardware needed).
+               We LINK to the original source and show its license; we only rehost what
+               is clearly permissive. Honesty over hype (see private/DATA_AND_LICENSING.md). -->
+          <div class="sys-panel" id="sys-datasets">
+            <h2>Datasets</h2>
+            <div class="card">
+              <p class="hint" style="margin-bottom:8px">
+                Real public smell / gas-sensor datasets, across sensor types. We link to the
+                original source and show its license up front — we only rehost what is clearly
+                permissive. <b>Always credit the source.</b>
+              </p>
+              <div class="form-row">
+                <input type="text" id="dsFilter" placeholder="Filter by name, sensor, license…" style="flex:1" />
+                <select id="dsCommercial">
+                  <option value="all">All licenses</option>
+                  <option value="yes">Commercial OK</option>
+                  <option value="check">Check license</option>
+                  <option value="no">Link only</option>
+                  <option value="api">API</option>
+                </select>
+              </div>
+            </div>
+            <div id="datasetCatalog" class="dataset-catalog">Loading…</div>
+          </div>
+
+          <!-- Recipes — the smell-native unit of work: source → ordered transforms → result.
+               Recipes are saved, re-runnable and versioned; every step is a named transform
+               so no derived number is invented (see private/SMELL_OPERATIONS.md). -->
+          <div class="sys-panel" id="sys-recipes">
+            <h2>Recipes</h2>
+            <div class="card">
+              <p class="hint" style="margin-bottom:8px">
+                A recipe is <b>source → ordered transforms → result</b>. Saved recipes are
+                re-runnable and versioned, and carry provenance. Every step is a named,
+                reproducible transform — no invented numbers.
+              </p>
+              <div class="form-row">
+                <button id="recipeNew" class="mini-btn">New recipe</button>
+                <button id="recipeRefresh" class="mini-btn">Refresh</button>
+              </div>
+            </div>
+
+            <div id="recipeEditor" class="card" style="display:none">
+              <div class="form-row"><label style="width:70px">Name</label><input id="recName" placeholder="Fermentation Monitor" style="flex:1" /></div>
+              <div class="form-row"><label style="width:70px">Source</label><input id="recSource" placeholder="live | osmell:&lt;id&gt; | dataset:&lt;id&gt;" style="flex:1" /></div>
+              <div class="form-row"><label style="width:70px">Version</label><input id="recVersion" value="1.0.0" style="width:100px" /></div>
+              <div id="recSteps" style="margin:6px 0"></div>
+              <div class="form-row">
+                <button id="recAddStep" class="mini-btn">+ Step</button>
+                <button id="recSave" class="mini-btn">Save</button>
+                <button id="recCancel" class="mini-btn">Cancel</button>
+              </div>
+              <div id="recMsg" class="hint" style="min-height:14px"></div>
+            </div>
+
+            <div id="recipeList" class="recipe-list">Loading…</div>
+
+            <div class="card">
+              <h3 style="margin-bottom:6px">Op catalog</h3>
+              <p class="hint" style="margin-bottom:8px">The v1 transform set. <b>core</b> ships now; <b>next</b>/<b>research</b> are planned.</p>
+              <div id="recipeOps" class="op-catalog">Loading…</div>
             </div>
           </div>
 
@@ -3196,7 +3333,7 @@ Confidence: 97.3%</div>
           <div class="sys-panel" id="sys-about">
             <h2>About Osmograph</h2>
             <div class="card">
-              <p class="hint">Osmograph is the software for smell — monitor, record and study what your e-nose rig senses, the way an editor is the software for video or a DAW for audio. It reads MOX (and, via the typed serial contract, MEMS) scent arrays live, learns your baseline, flags anomalies — and never invents a number it can&rsquo;t back up.</p>
+              <p class="hint">Osmograph is the software for smell. Connect your gas-sensor rig — or open a recording — and monitor, record and study what it senses. Everything stays on your device.</p>
             </div>
             <div class="card">
               <h3>Links</h3>
