@@ -4523,6 +4523,25 @@ function initDatasetCatalog() {
   renderDatasetCatalog();
   document.getElementById('dsFilter')?.addEventListener('input', renderDatasetCatalog);
   document.getElementById('dsCommercial')?.addEventListener('change', renderDatasetCatalog);
+  document.getElementById('dsImport')?.addEventListener('click', async () => {
+    try {
+      const { open } = await import('@tauri-apps/plugin-dialog');
+      const picked = await open({
+        multiple: true,
+        directory: false,
+        filters: [{ name: 'CSV', extensions: ['csv'] }],
+      });
+      if (!picked) return;
+      const list = Array.isArray(picked) ? picked : [picked];
+      if (!list.length) return;
+      await invoke('import_paths', { paths: list });
+      await reloadLibrary();
+      void trackDesktop('session_imported', { source_kind: 'file' });
+      (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+    } catch (e) {
+      console.error('Dataset import failed:', e);
+    }
+  });
   const el = document.getElementById('datasetCatalog');
   if (!el) return;
   // Delegated: buttons are re-rendered on every filter change.
