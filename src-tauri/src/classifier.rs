@@ -158,11 +158,33 @@ pub fn train_classifier(
         .map(|r| r.samples.first().map_or(3, |row| row.len().clamp(3, 6)))
         .unwrap_or(3);
 
+    // LORO refits the logistic model once per recording, so the window count
+    // multiplies the entire training job — and the reference stride of 5 turns a
+    // 60 s capture into ~100 heavily-overlapping windows, most of which carry the
+    // same information. Capping each recording at ~30 windows keeps the accuracy
+    // estimate essentially unchanged at a fraction of the cost. Small libraries
+    // keep the fine stride, where window count is the binding constraint.
+    let window_cap = 30usize;
+    let median_len = {
+        let mut lens: Vec<usize> = recordings
+            .iter()
+            .map(|r| r.samples.len())
+            .filter(|&n| n > 0)
+            .collect();
+        lens.sort_unstable();
+        lens.get(lens.len() / 2).copied().unwrap_or(0)
+    };
+    let stride = if median_len > window_size + window_cap {
+        ((median_len - window_size) / window_cap).max(opensmell::TRAIN_STRIDE)
+    } else {
+        opensmell::TRAIN_STRIDE
+    };
+
     let options = TrainOptions {
         window_size,
         n_sensors,
         min_quality: min_quality.clamp(0.0, 1.0),
-        stride: opensmell::TRAIN_STRIDE,
+        stride,
         feature_mode: "framework".to_string(),
         sr: 10.0,
     };

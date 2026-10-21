@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { DATASET_CATALOG, type DatasetCommercial } from './datasets';
+import { DATASET_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
+import * as Vial from './vials';
+import * as Domain from './domainPacks';
+import { GUIDE_SECTIONS, guideSection } from './guide';
 
 // === Constants ===
 const MAX_TRACE = 800;
@@ -298,7 +301,7 @@ let compareFiles: string[] = [];
 const compareSeriesCache = new Map<string, SessionSeries | null>();
 let compareLoaded: (SessionSeries | null)[] = [];
 let activeCompareChannels: string[] = [];
-let compareMode: 'overlay' | 'delta' | 'heatmap' = 'overlay';
+let compareMode: 'overlay' | 'delta' | 'heatmap' | 'trajectory' = 'overlay';
 let compareRefIdx = 0;
 let fleetDevices: FleetDevice[] = [];
 let bleDevices: { name: string; address: string }[] = [];
@@ -423,32 +426,121 @@ interface LiveSnapshot {
   buffer_len: number;
 }
 
-// === Tab Navigation ===
-document.querySelectorAll('.tab-btn').forEach(btn => {
+// === Workspace router ===
+// The app used to expose implementation buckets as top-level tabs. A person
+// thinks in jobs: explore a smell, decide whether two are separable, run a
+// domain protocol, find data, manage the rig. These shells keep the existing
+// panels and handlers intact while presenting that job-level model.
+type WorkspaceKey = 'dashboard' | 'explore' | 'decide' | 'train' | 'vials' | 'data' | 'rig';
+interface SourceViewSpec { workspace: WorkspaceKey; id: string; }
+const SOURCE_VIEWS: Record<string, SourceViewSpec> = {
+  smells: { workspace: 'explore', id: 'src-smells' },
+  check: { workspace: 'decide', id: 'src-check' },
+  compare: { workspace: 'decide', id: 'panel-compare' },
+  vials: { workspace: 'vials', id: 'src-vials' },
+  sessions: { workspace: 'data', id: 'src-sessions' },
+  datasets: { workspace: 'data', id: 'src-datasets' },
+  changelog: { workspace: 'data', id: 'src-changelog' },
+  fleet: { workspace: 'rig', id: 'panel-fleet' },
+  system: { workspace: 'rig', id: 'panel-system' },
+};
+const WORKSPACE_DEFAULT: Record<WorkspaceKey, string> = {
+  dashboard: 'dashboard', explore: 'smells', decide: 'check', train: 'train',
+  vials: 'vials', data: 'sessions', rig: 'fleet',
+};
+const workspaceLastView: Partial<Record<WorkspaceKey, string>> = {};
+
+function installWorkspaceShell(): void {
+  const move = (id: string, parentId: string): void => {
+    const node = document.getElementById(id);
+    const parent = document.getElementById(parentId);
+    if (node && parent) parent.appendChild(node);
+  };
+  move('src-smells', 'panel-explore');
+  move('src-check', 'decideBody');
+  move('panel-compare', 'decideBody');
+  move('src-vials', 'panel-vials');
+  move('src-sessions', 'dataBody');
+  move('src-datasets', 'dataBody');
+  move('src-changelog', 'dataBody');
+  move('panel-fleet', 'rigBody');
+  move('panel-system', 'rigBody');
+  // The three moved panels used to be top-level `.tab-panel`s. Their local
+  // subnav controls visibility now, so make the contract explicit even if the
+  // markup is ever loaded in the old order.
+  for (const id of ['panel-compare', 'panel-fleet', 'panel-system']) {
+    const node = document.getElementById(id);
+    if (!node) continue;
+    node.classList.remove('tab-panel');
+    node.classList.add('workspace-view');
+  }
+}
+
+function activateWorkspace(ws: WorkspaceKey): void {
+  const panel = document.getElementById(`panel-${ws}`);
+  if (!panel) return;
+  document.body.dataset.workspace = ws;
+  document.querySelectorAll<HTMLElement>('.content > .tab-panel').forEach(p => p.classList.remove('active'));
+  panel.classList.add('active');
+  document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(b => b.classList.remove('active'));
+  document.querySelector<HTMLElement>(`.tab-btn[data-tab="${ws}"]`)?.classList.add('active');
+  if (ws === 'dashboard') requestAnimationFrame(() => resizeTraces());
+}
+
+function showWorkspaceView(src: string): void {
+  const spec = SOURCE_VIEWS[src];
+  if (!spec) return;
+  activateWorkspace(spec.workspace);
+  document.querySelectorAll<HTMLElement>('.src-view, .workspace-view').forEach(v => v.classList.remove('active'));
+  document.getElementById(spec.id)?.classList.add('active');
+  document.querySelectorAll<HTMLElement>('.src-subnav-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.src === src);
+  });
+  workspaceLastView[spec.workspace] = src;
+
+  if (src === 'smells') void renderSmellGallery();
+  else if (src === 'check') void renderCheckView(true);
+  else if (src === 'vials') renderVials();
+  else if (src === 'sessions') renderLibrary();
+  else if (src === 'datasets') renderDatasetCatalog();
+  else if (src === 'changelog') renderChangeLog();
+  else if (src === 'compare') requestAnimationFrame(() => updateCompare());
+  else if (src === 'fleet') renderFleet();
+}
+
+function showWorkspaceDefault(ws: WorkspaceKey): void {
+  if (ws === 'dashboard' || ws === 'train') {
+    activateWorkspace(ws);
+    return;
+  }
+  showWorkspaceView(workspaceLastView[ws] || WORKSPACE_DEFAULT[ws]);
+}
+
+installWorkspaceShell();
+
+// Top-level navigation. Legacy aliases (`library`, `compare`, `fleet`, `system`)
+// stay live for saved commands and deep links.
+document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-    btn.classList.add('active');
-    const tab = (btn as HTMLElement).dataset.tab!;
-    document.getElementById(`panel-${tab}`)?.classList.add('active');
-    if (tab === 'dashboard') {
-      requestAnimationFrame(() => resizeTraces());
-    } else if (tab === 'compare') {
-      requestAnimationFrame(() => updateCompare());
+    const tab = btn.dataset.tab!;
+    if (tab === 'library') { showWorkspaceView('smells'); return; }
+    if (tab === 'compare') { showWorkspaceView('compare'); return; }
+    if (tab === 'fleet') { showWorkspaceView('fleet'); return; }
+    if (tab === 'system') { showWorkspaceView('system'); return; }
+    if (tab === 'explore' || tab === 'decide' || tab === 'vials' || tab === 'data' || tab === 'rig') {
+      showWorkspaceDefault(tab as WorkspaceKey);
+      return;
     }
+    activateWorkspace(tab as WorkspaceKey);
   });
 });
 
-// Sources tab sub-views: Sessions | Datasets
-document.querySelectorAll('.src-subnav-btn').forEach(btn => {
+// Local workspace subnavs and their hidden legacy controls all route through
+// the same source-view registry.
+document.querySelectorAll<HTMLElement>('.src-subnav-btn').forEach(btn => {
   btn.addEventListener('click', () => {
-    document.querySelectorAll('.src-subnav-btn').forEach(b => b.classList.remove('active'));
-    document.querySelectorAll('.src-view').forEach(v => v.classList.remove('active'));
-    btn.classList.add('active');
-    const src = (btn as HTMLElement).dataset.src!;
-    document.getElementById(`src-${src}`)?.classList.add('active');
-    if (src === 'datasets') renderDatasetCatalog();
-    else if (src === 'changelog') renderChangeLog();
+    const src = btn.dataset.src;
+    if (src) showWorkspaceView(src);
   });
 });
 
@@ -462,52 +554,23 @@ document.querySelectorAll('.sys-nav-item').forEach(item => {
   });
 });
 
-// === Privacy-first, opt-in telemetry (see private/ANALYTICS.md) ===
-const TELEMETRY_KEY = 'osmograph.telemetry.v1';
-function telemetryEnabled(): boolean {
-  try { return localStorage.getItem(TELEMETRY_KEY) === '1'; } catch { return false; }
-}
-function setTelemetry(on: boolean) {
-  try { localStorage.setItem(TELEMETRY_KEY, on ? '1' : '0'); } catch { /* ignore */ }
-}
-async function trackDesktop(event: string, props?: Record<string, unknown>) {
-  if (!telemetryEnabled()) return;
-  try { await invoke('telemetry_send', { event, props: props ?? null }); } catch { /* never surface */ }
-}
-const telemetryToggle = document.getElementById('telemetryToggle') as HTMLInputElement | null;
-if (telemetryToggle) {
-  telemetryToggle.checked = telemetryEnabled();
-  telemetryToggle.addEventListener('change', () => {
-    setTelemetry(telemetryToggle.checked);
-    if (telemetryToggle.checked) void trackDesktop('first_run');
-  });
-}
-
-// === First-run: one-click sample session ===
-const loadSampleBtn = document.getElementById('loadSampleSession') as HTMLButtonElement | null;
-loadSampleBtn?.addEventListener('click', async () => {
-  const prev = loadSampleBtn.textContent || 'Load a sample session';
-  loadSampleBtn.disabled = true;
-  loadSampleBtn.textContent = 'Loading…';
+// === One-click sample session — lives in Sources → Sessions, no hardware needed ===
+document.getElementById('libSample')?.addEventListener('click', async (ev) => {
+  const btn = ev.currentTarget as HTMLButtonElement;
+  const prev = btn.textContent || 'Load sample';
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
   try {
     const rec = await invoke<{ file_id: string }>('load_sample_session');
     await invoke('analyze_recording', { fileId: rec.file_id });
     await reloadLibrary();
-    (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
-    void trackDesktop('sample_loaded');
-    const card = document.getElementById('sampleCard');
-    if (card) card.style.display = 'none';
   } catch (e) {
-    loadSampleBtn.textContent = `Failed: ${e}`;
-    setTimeout(() => { loadSampleBtn.textContent = prev; }, 2500);
+    btn.textContent = 'Failed';
+    setTimeout(() => { btn.textContent = prev; }, 2500);
   } finally {
-    loadSampleBtn.disabled = false;
-    if (loadSampleBtn.textContent === 'Loading…') loadSampleBtn.textContent = prev;
+    btn.disabled = false;
+    if (btn.textContent === 'Loading…') btn.textContent = prev;
   }
-});
-document.getElementById('sampleDismiss')?.addEventListener('click', () => {
-  const card = document.getElementById('sampleCard');
-  if (card) card.style.display = 'none';
 });
 
 // === PNG export: share artifacts without a screenshot ===
@@ -552,15 +615,12 @@ document.getElementById('exportFingerprintPng')?.addEventListener('click', () =>
   };
   const close = () => {
     wiz.style.display = 'none';
-    const consent = document.getElementById('wizardTelemetry') as HTMLInputElement | null;
-    setTelemetry(!!(consent && consent.checked));
     try { localStorage.setItem(KEY, '1'); } catch { /* ignore */ }
-    if (consent && consent.checked) void trackDesktop('first_run');
   };
   document.getElementById('wizardSkip')?.addEventListener('click', close);
   next.addEventListener('click', () => {
     if (step < slides.length - 1) { step++; draw(); }
-    else { close(); (document.querySelector('.tab-btn[data-tab="dashboard"]') as HTMLElement | null)?.click(); }
+    else { close(); (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click(); }
   });
   back.addEventListener('click', () => { if (step > 0) { step--; draw(); } });
   draw();
@@ -1337,6 +1397,7 @@ function setPlotLink(on: boolean) {
   el.textContent = on ? '● LIVE LINK' : '● NO LINK';
   el.classList.remove('stall');
   el.classList.toggle('on', on);
+  document.getElementById('dashboardEmpty')?.classList.toggle('show', !on);
 }
 
 // Stall watchdog: if we claim to be connected but no reading has arrived for a
@@ -1348,12 +1409,14 @@ function updatePlotLinkState() {
   if (!connected) {
     el.textContent = '● NO LINK';
     el.classList.remove('stall', 'on');
+    document.getElementById('dashboardEmpty')?.classList.add('show');
     return;
   }
   const stalled = Date.now() - lastDataAt > 3000;
   el.textContent = stalled ? '● NO DATA' : '● LIVE LINK';
   el.classList.toggle('stall', stalled);
   el.classList.toggle('on', !stalled);
+  document.getElementById('dashboardEmpty')?.classList.toggle('show', false);
   // Bootloader diagnosis must never fire on a healthy board: EVERY ESP32
   // reset prints the ROM banner ("boot mode:..." — a keyword hit) and the
   // flashed firmware then stays silent for ~30 s collecting its baseline.
@@ -1574,7 +1637,7 @@ function qualityBadge(q: number): { label: string; cls: string } {
 function renderLibrary() {
   const body = document.getElementById('libBody')!;
   if (sessions.length === 0) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="8">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong> to load recordings. They will appear here.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="8">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong>. No hardware? The <strong>Explore</strong> tab loads real datasets on its own.</td></tr>`;
     document.getElementById('libStatus')!.textContent = '0 sessions';
     return;
   }
@@ -1703,6 +1766,7 @@ function inspectSession(s: SessionRecord) {
   if (s.quality_report) {
     renderQualityReport(s.quality_report);
   }
+  void renderRigHealth(s);
 }
 
 // === Quality Report Panel (Python `quality_panel.py` parity) ===
@@ -1775,8 +1839,120 @@ function renderQualityReport(q: QualityReport) {
     </div>`;
 }
 
+// === Rig health — is this array actually sane? ===
+// The same per-channel verdict the live monitor gives, applied to a saved
+// recording, so a rig can be checked after the fact. Reported *before* any
+// interpretation, because every number downstream depends on the array working.
+interface SensorHealthInfo {
+  channel: number;
+  health_score: number;
+  mean: number;
+  std: number;
+  cv: number;
+  noise_floor: number;
+  drift_rate: number;
+  stuck: boolean;
+  status: string;
+  recommendation: string;
+}
+
+const rigHealthCache = new Map<string, { names: string[]; health: SensorHealthInfo[] } | null>();
+
+async function renderRigHealth(s: SessionRecord): Promise<void> {
+  const section = document.getElementById('inspHealthSection');
+  const body = document.getElementById('inspHealthBody');
+  const stamp = document.getElementById('inspHealthStamp');
+  if (!section || !body || !stamp) return;
+  if (!s.file_id) { section.hidden = true; return; }
+  section.hidden = false;
+  stamp.textContent = '';
+  body.innerHTML = '<span style="color:var(--text-3)">Checking channels…</span>';
+  let entry = rigHealthCache.get(s.file_id);
+  if (entry === undefined) {
+    try {
+      const series = await invoke<SessionSeries>('load_session_series', { fileId: s.file_id });
+      const health = await invoke<SensorHealthInfo[]>('assess_recording_health', { fileId: s.file_id });
+      entry = { names: series.channels, health };
+    } catch {
+      entry = null;
+    }
+    rigHealthCache.set(s.file_id, entry);
+  }
+  // A newer selection may have landed while this one was loading.
+  if (selectedSession != null && sessions[selectedSession]?.file_id !== s.file_id) return;
+  if (!entry || !entry.health.length) {
+    body.innerHTML = '<span style="color:var(--text-3)">Could not assess this recording.</span>';
+    return;
+  }
+  const okCount = entry.health.filter(h => h.status === 'OK').length;
+  stamp.textContent = `${okCount}/${entry.health.length} OK`;
+  const names = entry.names;
+  const rows = entry.health.map(h => {
+    const name = names[h.channel] || `CH${h.channel + 1}`;
+    const cls = h.status === 'OK' ? 'ok' : (h.stuck || h.status === 'CRITICAL' ? 'bad' : 'warn');
+    const detail = h.stuck
+      ? 'unresponsive — no signal change'
+      : `${h.status.toLowerCase()} · drift ${(h.drift_rate * 100).toFixed(0)}% · noise ${h.noise_floor.toFixed(1)}`;
+    return `<div class="rig-row"><span class="rig-dot ${cls}"></span><span class="rig-name">${name}</span><span class="rig-detail">${detail}</span></div>`;
+  }).join('');
+  const notOk = entry.health.length - okCount;
+  const note = notOk
+    ? `<div class="rig-note">${notOk} of ${entry.health.length} channels are not OK. Fingerprints, comparisons and classifiers are all weaker while that is true — fix the array before trusting a result.</div>`
+    : `<div class="rig-note">All channels responsive.</div>`;
+  body.innerHTML = rows + note;
+
+  // Mirror the verdict onto the front door: the state of the instrument is not
+  // something a user should have to go looking for.
+  const strip = document.getElementById('smellsRig');
+  if (strip) {
+    if (!notOk) {
+      strip.hidden = true;
+    } else {
+      const label = (h: SensorHealthInfo) => names[h.channel] || `CH${h.channel + 1}`;
+      const down = entry.health.filter(h => h.stuck).map(label);
+      const rest = entry.health.filter(h => !h.stuck && h.status !== 'OK').map(label);
+      const parts: string[] = [];
+      if (down.length) parts.push(`unresponsive: ${down.join(', ')}`);
+      if (rest.length) parts.push(`${rest.join(', ')} unstable`);
+      strip.innerHTML =
+        `<span>Your rig, newest recording — <strong>${okCount}/${entry.health.length} channels OK</strong>` +
+        (parts.length ? ` · ${parts.join(' · ')}` : '') + `</span>` +
+        `<span style="flex:1"></span><button class="mini-btn" id="smellsRigOpen">Details</button>`;
+      strip.hidden = false;
+      document.getElementById('smellsRigOpen')?.addEventListener('click', () => {
+        document.querySelector<HTMLElement>('.src-subnav-btn[data-src="sessions"]')?.click();
+        renderLibrary();
+      });
+    }
+  }
+}
+
+/** Show the newest recording from the user's own rig, so the rig's state is the
+ *  first thing on screen rather than something they have to go looking for. */
+function autoInspectOwnRig(): void {
+  if (selectedSession != null || !sessions.length) return;
+  const idx = sessions.findIndex(s => (s.path || '').includes('Osmograph_Recordings/') && !(s.path || '').includes('/SmellNet/'));
+  // Never dress the bundled starter library up as "your rig". With no own
+  // recording there is nothing to inspect yet; the gallery is the right home.
+  if (idx < 0) return;
+  selectedSession = idx;
+  renderLibrary();
+  inspectSession(sessions[idx]);
+}
+
 // === Compare Panel (Python `viz/compare_panel.py` parity, supersized) ===
-const CHART_COLORS = CH_COLORS;
+// Session colours must be tellable apart at a glance; the channel palette is
+// deliberately all cool tones, which is wrong for overlaying four recordings.
+const CHART_COLORS = [
+  '#0e7490', // deep cyan
+  '#b45309', // amber
+  '#6d28d9', // violet
+  '#15803d', // green
+  '#be123c', // crimson
+  '#1d4ed8', // blue
+  '#a16207', // ochre
+  '#0f766e', // teal
+];
 const COMPARE_R0_SAMPLES = 15;
 
 const compareCanvas = document.getElementById('compareCanvas') as HTMLCanvasElement | null;
@@ -1932,7 +2108,7 @@ function renderCompareLabels() {
     const refTag = delta && i === compareRefIdx ? ' <i style="color:var(--yellow)">(ref)</i>' : '';
     return `<b style="color:${CHART_COLORS[i % CHART_COLORS.length]};">${i + 1}. </b>${name}${refTag}`;
   }).join(' · ');
-  el.innerHTML = parts || '<span style="color:var(--text-3)">Tick sessions in the Library to compare.</span>';
+  el.innerHTML = parts || '<span style="color:var(--text-3)">Tick sessions in Data → Recordings to compare.</span>';
 }
 
 function renderCompareChips() {
@@ -2017,7 +2193,7 @@ function renderCompareMetrics() {
     const auc = p.aucs.reduce((a, b) => a + b, 0);
     const baseCv = p.cvs.length ? Math.max(...p.cvs) : NaN;
     const recover = p.recs.length ? Math.min(...p.recs) : 0;
-    return `<tr data-si="${p.si}" ${'class="' + (p.peak === bestPeak ? 'cmp-best' : '') + '"'} 
+    return `<tr data-si="${p.si}"${p.peak === bestPeak ? ' class="cmp-best"' : ''}>
       <td title="${p.s.label}">${truncateLabel(p.s.label, 22)}</td>
       <td>${p.peak.toFixed(3)}</td>
       <td>${isNaN(t90v) ? '—' : t90v.toFixed(1)}</td>
@@ -2028,8 +2204,103 @@ function renderCompareMetrics() {
   }).join('');
   el.innerHTML = `<table class="cmp-metrics-table">
     <thead><tr><th>Session</th><th>Peak ΔR/R0</th><th>T90 s</th><th>AUC</th><th>Base CV</th><th>Recover</th></tr></thead>
-    <tbody>${rows}</tbody></table>`;
+    <tbody>${rows}</tbody></table><div id="compareVerdict" class="cmp-verdict"></div>`;
   stamp.textContent = `${perSession.length} sessions · ${activeCompareChannels.length} ch`;
+  void renderCompareVerdict();
+}
+
+// A pairwise reading of the two selected traces: are they two runs of one
+// smell (repeatability) or two different smells (separation)? This is the
+// question the numbers above cannot answer on their own.
+let cmpVerdictToken = 0;
+
+function settledFingerprint(s: SessionSeries): { channels: string[]; values: number[] } {
+  return {
+    channels: s.channels,
+    values: s.channels.map((_, ci) => {
+      const norm = cmpNorm(s, ci);
+      if (!norm || !norm.length) return NaN;
+      return meanOf(norm.slice(Math.floor(norm.length * 0.4)));
+    }),
+  };
+}
+
+async function renderCompareVerdict(): Promise<void> {
+  const el = document.getElementById('compareVerdict');
+  if (!el) return;
+  const items = compareLoaded.filter(Boolean) as SessionSeries[];
+  if (items.length !== 2) { el.innerHTML = ''; return; }
+  const token = ++cmpVerdictToken;
+  const [a, b] = items;
+  const fa = settledFingerprint(a), fb = settledFingerprint(b);
+  const shared = fa.channels.filter(c => fb.channels.includes(c));
+  const pairs = shared.map(c => {
+    const va = fa.values[fa.channels.indexOf(c)];
+    const vb = fb.values[fb.channels.indexOf(c)];
+    return { c, va, vb, delta: Math.abs(va - vb) };
+  }).filter(x => Number.isFinite(x.va) && Number.isFinite(x.vb));
+  if (!pairs.length) { el.innerHTML = ''; return; }
+
+  let dot = 0, na = 0, nb = 0;
+  for (const p of pairs) { dot += p.va * p.vb; na += p.va * p.va; nb += p.vb * p.vb; }
+  const cos = na > 0 && nb > 0 ? dot / Math.sqrt(na * nb) : NaN;
+  pairs.sort((x, y) => y.delta - x.delta);
+  const top = pairs.slice(0, 2)
+    .map(p => `${p.c} (${(p.va * 100).toFixed(0)}% vs ${(p.vb * 100).toFixed(0)}%)`)
+    .join(', ');
+
+  const substanceOf = (i: number) => {
+    const rec = sessions.find(x => x.file_id === compareFiles[i]);
+    return (rec?.substance || '').trim();
+  };
+  const subA = substanceOf(0), subB = substanceOf(1);
+  const same = !!subA && subA.toLowerCase() === subB.toLowerCase();
+  const cosText = Number.isFinite(cos) ? `shape cosine ${cos.toFixed(2)}` : 'no shared channels';
+
+  let headline: string;
+  let tone: 'ok' | 'warn' | 'info';
+  if (same) {
+    if (Number.isFinite(cos) && cos >= 0.9) {
+      headline = `Same smell, two runs — the array repeats itself (${cosText}).`;
+      tone = 'ok';
+    } else if (Number.isFinite(cos) && cos >= 0.6) {
+      headline = `Same smell, but the two runs only partly agree (${cosText}). Baseline or exposure conditions drifted.`;
+      tone = 'warn';
+    } else {
+      headline = `Same smell, different response (${cosText}) — this is run-to-run variability, not a new odour.`;
+      tone = 'warn';
+    }
+  } else {
+    headline = Number.isFinite(cos) && cos < 0
+      ? `Different smells with opposite response shapes (${cosText}).`
+      : `Different smells (${cosText}).`;
+    tone = 'info';
+  }
+
+  let across = '';
+  if (!same && subA && subB) {
+    const cardA = smellCards.find(c => c.key === subA.toLowerCase());
+    const cardB = smellCards.find(c => c.key === subB.toLowerCase());
+    if (cardA && cardB) {
+      const [ra, rb] = await Promise.all([smellReplicates(cardA), smellReplicates(cardB)]);
+      if (token !== cmpVerdictToken) return;
+      if (ra && rb && ra.rows.length >= 2 && rb.rows.length >= 2) {
+        const { acc, nEval, pValue } = separationBetween(ra, rb);
+        if (Number.isFinite(acc)) {
+          const right = Math.round(acc * nEval);
+          const caveat = Number.isFinite(pValue) && pValue > 0.05
+            ? ` (label-shuffle p = ${pValue.toFixed(2)} — promising, not established)`
+            : '';
+          across = ` Across all replicates: ${right}/${nEval} left-out recordings separate them${caveat} — see Decide → Compare for the lever.`;
+        }
+      }
+    }
+  }
+
+  el.innerHTML = `
+    <div class="cmp-verdict-head">Pairwise verdict</div>
+    <div class="cmp-verdict-line ${tone}">${headline}</div>
+    <div class="cmp-verdict-sub">Largest difference: ${top}.${across}</div>`;
 }
 
 function drawCompare() {
@@ -2037,6 +2308,7 @@ function drawCompare() {
   const canvas = compareCanvas;
   if (!ctx || !canvas) return;
   if (compareMode === 'heatmap') { drawCompareHeatmap(); return; }
+  if (compareMode === 'trajectory') { drawCompareTrajectory(); return; }
   drawComparePanels();
 }
 
@@ -2095,7 +2367,7 @@ function drawComparePanels() {
 
   if (lanes.length === 0) {
     showEmpty(compareFiles.length === 0
-      ? 'No sessions selected. Tick sessions in the Library to compare them here.'
+      ? 'No sessions selected. Select smells in Explore to compare them here.'
       : 'No overlapping channels in the selected sessions.');
     return;
   }
@@ -2193,7 +2465,7 @@ function drawCompareHeatmap() {
     ctx.fillStyle = '#666';
     ctx.font = '12px -apple-system, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('Tick sessions in the Library to see their similarity.', w / 2, h / 2);
+    ctx.fillText('Select smells in Explore to see their similarity.', w / 2, h / 2);
     return;
   }
   const n = items.length;
@@ -2252,8 +2524,270 @@ function drawCompareHeatmap() {
   }
 }
 
+// A smell is a curve, not a point. This projects each recording's normalised
+// multi-channel path onto its two principal axes, so the *transformation* is
+// visible: does this smell trace a distinct loop, or the same line as another?
+// PCA is only a projection — the advisor's held-out check remains the evidence.
+function drawCompareTrajectory() {
+  const ctx = compareCtx;
+  const canvas = compareCanvas;
+  if (!ctx || !canvas) return;
+  const wrap = document.getElementById('compareWrap')!;
+  const rect = wrap.getBoundingClientRect();
+  canvas.width = Math.max(1, Math.floor(rect.width - 2));
+  canvas.height = Math.max(1, Math.floor(rect.height - 2));
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  ctx.setLineDash([]);
+
+  const empty = (msg: string) => {
+    ctx.fillStyle = '#666';
+    ctx.font = '12px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(msg, w / 2, h / 2);
+  };
+  const items = compareLoaded.filter(Boolean) as SessionSeries[];
+  if (items.length === 0) { empty('Select smells in Explore to see their trajectories.'); return; }
+
+  // A shared channel set is required: PC axes are meaningless across different
+  // array widths or differently named channels.
+  const channels = activeCompareChannels.filter(ch => items.every(s => s.channels.includes(ch)));
+  if (channels.length < 2) {
+    empty('Trajectory needs at least 2 shared channels — select sessions from the same array.');
+    return;
+  }
+
+  const T = 90;
+  const lerp = (xs: number[], ys: number[], at: number): number | null => {
+    let lo = -1, hi = -1;
+    for (let i = 0; i < ys.length; i++) {
+      if (!Number.isFinite(ys[i])) continue;
+      if (xs[i] <= at) lo = i;
+      if (xs[i] >= at && hi < 0) hi = i;
+    }
+    if (lo < 0 && hi < 0) return null;
+    if (lo < 0) return ys[hi];
+    if (hi < 0 || hi === lo) return ys[lo];
+    const span = xs[hi] - xs[lo];
+    const f = span > 0 ? (at - xs[lo]) / span : 0;
+    return ys[lo] + (ys[hi] - ys[lo]) * f;
+  };
+
+  const paths: { s: SessionSeries; si: number; rows: number[][] }[] = [];
+  items.forEach((s, si) => {
+    const norms = channels.map(ch => {
+      const ci = s.channels.indexOf(ch);
+      return ci >= 0 ? cmpNorm(s, ci) : null;
+    });
+    if (norms.some(n => !n)) return;
+    const t0 = s.time[0], t1 = s.time[Math.min(s.time.length, Math.max(...norms.map(n => n!.length))) - 1];
+    if (!(t1 > t0)) return;
+    const rows: number[][] = [];
+    for (let k = 0; k < T; k++) {
+      const at = t0 + (t1 - t0) * (k / (T - 1));
+      const row = norms.map(n => lerp(s.time.slice(0, n!.length), n!.slice(0, n!.length), at));
+      if (row.some(v => v === null)) continue;
+      rows.push(row as number[]);
+    }
+    if (rows.length >= 5) paths.push({ s, si, rows });
+  });
+  if (!paths.length) { empty('No complete multi-channel trajectory in the selected sessions.'); return; }
+
+  const c = channels.length;
+  // Smooth before projecting: sensor noise turns a phase portrait into a
+  // scribble, and the point of this view is the shape, not the jitter.
+  const smoothRows = (rows: number[][], win = 7): number[][] => {
+    const half = Math.floor(win / 2);
+    return rows.map((_, i) => {
+      const from = Math.max(0, i - half), to = Math.min(rows.length - 1, i + half);
+      return rows[0].map((_, j) => {
+        let s = 0, n = 0;
+        for (let k = from; k <= to; k++) { s += rows[k][j]; n++; }
+        return s / n;
+      });
+    });
+  };
+  paths.forEach(p => { p.rows = smoothRows(p.rows); });
+
+  const raw = paths.flatMap(p => p.rows);
+  const mean = new Array(c).fill(0);
+  for (const r of raw) for (let j = 0; j < c; j++) mean[j] += r[j] / raw.length;
+  const scale = new Array(c).fill(0);
+  for (let j = 0; j < c; j++) {
+    let v = 0;
+    for (const r of raw) v += (r[j] - mean[j]) ** 2;
+    scale[j] = Math.sqrt(v / raw.length) || 1;
+  }
+  const z = (r: number[]) => r.map((v, j) => (v - mean[j]) / scale[j]);
+
+  // Compare transformations, not strengths: centre each recording on its own
+  // opening vector and scale it to unit size, so intensity differences do not
+  // masquerade as shape differences.
+  const shaped = paths.map(p => {
+    const zr = p.rows.map(r => z(r));
+    const start = zr[0];
+    const centred = zr.map(r => r.map((v, j) => v - start[j]));
+    let rms = 0;
+    for (const r of centred) for (const v of r) rms += v * v;
+    rms = Math.sqrt(rms / (centred.length * c)) || 1;
+    return centred.map(r => r.map(v => v / rms));
+  });
+  const all = shaped.flat();
+  // PCA needs zero-mean data; per-path centring leaves the pooled mean of the
+  // starts, so remove it. It also puts every path's start on the same point.
+  const pm = new Array(c).fill(0);
+  for (const r of all) for (let j = 0; j < c; j++) pm[j] += r[j] / all.length;
+  const cov: number[][] = Array.from({ length: c }, () => new Array(c).fill(0));
+  for (const r of all) {
+    const zr = r.map((v, j) => v - pm[j]);
+    for (let i = 0; i < c; i++) for (let j = 0; j < c; j++) cov[i][j] += (zr[i] * zr[j]) / all.length;
+  }
+  const power = (m: number[][], start: number[]) => {
+    let v = start.slice();
+    for (let it = 0; it < 100; it++) {
+      const wv = m.map(row => row.reduce((a, x, j) => a + x * v[j], 0));
+      const nv = Math.sqrt(wv.reduce((a, x) => a + x * x, 0)) || 1;
+      v = wv.map(x => x / nv);
+    }
+    const val = v.reduce((a, x, i) => a + x * m[i].reduce((b, y, j) => b + y * v[j], 0), 0);
+    return { v, val };
+  };
+  const e1 = power(cov, Array(c).fill(1 / Math.sqrt(c)));
+  const deflated = cov.map((row, i) => row.map((x, j) => x - e1.val * e1.v[i] * e1.v[j]));
+  const e2 = power(deflated, Array.from({ length: c }, (_, i) => (i === 0 ? 1 : -1)));
+  const degenerate = !(e2.val > 1e-6 * Math.max(e1.val, 1e-12));
+
+  const pts = shaped.map(path => path.map(r => {
+    const zr = r.map((v, j) => v - pm[j]);
+    const x = zr.reduce((a, v, j) => a + v * e1.v[j], 0);
+    const y = degenerate ? 0 : zr.reduce((a, v, j) => a + v * e2.v[j], 0);
+    return [x, y];
+  }));
+
+  const xsAll = pts.flat().map(p => p[0]);
+  const ysAll = degenerate ? [0, 1] : pts.flat().map(p => p[1]);
+  let x0 = Math.min(...xsAll), x1 = Math.max(...xsAll);
+  let y0 = Math.min(...ysAll), y1 = Math.max(...ysAll);
+  if (!(x1 - x0 > 1e-9)) { x0 -= 0.5; x1 += 0.5; }
+  if (!(y1 - y0 > 1e-9)) { y0 -= 0.5; y1 += 0.5; }
+  const padX = (x1 - x0) * 0.08, padY = (y1 - y0) * 0.08;
+  x0 -= padX; x1 += padX; y0 -= padY; y1 += padY;
+
+  const padL = 46, padR = 16, padT = 16, padB = 30;
+  const sx = (v: number) => padL + ((v - x0) / (x1 - x0)) * (w - padL - padR);
+  // When the second component is empty the plot degenerates to a line, so time
+  // becomes the vertical axis instead of a meaningless zero.
+  const sy = (v: number, k: number) => degenerate
+    ? padT + (1 - k / (T - 1)) * (h - padT - padB)
+    : padT + (1 - (v - y0) / (y1 - y0)) * (h - padT - padB);
+
+  // Axes
+  ctx.strokeStyle = 'rgba(8,8,12,0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padL, padT); ctx.lineTo(padL, h - padB); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(padL, h - padB); ctx.lineTo(w - padR, h - padB); ctx.stroke();
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = '9px ui-monospace, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText('PC1 →', w - padR - 40, h - padB + 8);
+  ctx.save();
+  ctx.translate(12, padT + 52);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText(degenerate ? 'time →' : 'PC2 →', 0, 0);
+  ctx.restore();
+
+  paths.forEach((p, pi) => {
+    const colour = CHART_COLORS[p.si % CHART_COLORS.length];
+    const pp = pts[pi];
+    for (let k = 1; k < pp.length; k++) {
+      const a = 0.12 + 0.8 * (k / (pp.length - 1));
+      ctx.strokeStyle = colour;
+      ctx.globalAlpha = a;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      ctx.moveTo(sx(pp[k - 1][0]), sy(pp[k - 1][1], k - 1));
+      ctx.lineTo(sx(pp[k][0]), sy(pp[k][1], k));
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    const [lx, ly] = pp[pp.length - 1];
+    ctx.beginPath();
+    ctx.arc(sx(lx), sy(ly, pp.length - 1), 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = colour; ctx.fill();
+    ctx.fillStyle = colour;
+    ctx.font = '600 10px ui-monospace, monospace';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${p.si + 1}`, sx(lx) + 6, sy(ly, pp.length - 1));
+  });
+
+  // Every path is centred on its own opening vector, so they share one start.
+  const [stx, sty] = pts[0][0];
+  ctx.beginPath();
+  ctx.arc(sx(stx), sy(sty, 0), 4, 0, Math.PI * 2);
+  ctx.strokeStyle = '#3a3630';
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = '9px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText('start', sx(stx) + 7, sy(sty, 0) - 2);
+
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = '9px -apple-system, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(
+    degenerate
+      ? 'Paths are nearly one-dimensional; showing PC1 against time.'
+      : 'Smoothed, centred and size-normalised · filled end labelled.',
+    2, h - 2,
+  );
+}
+
+function renderCompareEmpty(): void {
+  buildSmellCards();
+  const pair = defaultCheckPair();
+  const a = pair ? smellCards.find(c => c.key === pair.ref) : null;
+  const b = pair ? smellCards.find(c => c.key === pair.sample) : null;
+  const btn = document.getElementById('compareEmptyTry') as HTMLButtonElement | null;
+  if (btn) {
+    btn.disabled = !a || !b;
+    btn.textContent = a && b
+      ? `Try ${titleCase(a.substance)} vs ${titleCase(b.substance)} →`
+      : 'Try a starter pair →';
+  }
+}
+
+/** One-click useful path for a no-hardware visitor: compare the same starter
+ *  pair the Explore advisor would suggest, using one representative recording
+ *  from each smell's dominant array. */
+async function tryStarterCompare(): Promise<void> {
+  buildSmellCards();
+  const pair = defaultCheckPair();
+  if (!pair) return;
+  const a = smellCards.find(c => c.key === pair.ref);
+  const b = smellCards.find(c => c.key === pair.sample);
+  if (!a || !b) return;
+  await Promise.all([ensureMean(a), ensureMean(b)]);
+  const ids: string[] = [];
+  for (const card of [a, b]) {
+    const group = card.groupRecords?.length ? card.groupRecords : card.records;
+    for (const rec of group.filter(r => !!r.file_id).slice(0, 3)) {
+      if (rec.file_id && !ids.includes(rec.file_id)) ids.push(rec.file_id);
+    }
+  }
+  if (!ids.length) return;
+  compareFiles = ids;
+  await updateCompare();
+}
+
 async function updateCompare() {
   const countEl = document.getElementById('compareCount')!;
+  const compareRoot = document.querySelector<HTMLElement>('.compare');
+  compareRoot?.classList.toggle('empty', compareFiles.length === 0);
   if (compareFiles.length === 0) {
     compareLoaded = [];
     countEl.textContent = '';
@@ -2263,6 +2797,7 @@ async function updateCompare() {
     compareRefIdx = 0;
     renderCompareRef();
     renderCompareMetrics();
+    renderCompareEmpty();
     drawCompare();
     return;
   }
@@ -2290,7 +2825,14 @@ function renderFleet() {
   const online = fleetDevices.filter(d => d.status === 'online').length;
   summary.textContent = `${fleetDevices.length} device(s) · ${recognized} recognized · ${online} online`;
   if (fleetDevices.length === 0) {
-    grid.innerHTML = '<div style="padding:32px;text-align:center;color:var(--text-3);font-size:12px">No devices found.<br/>Plug in a USB e-nose, or click "Scan Network" to search USB + mDNS.</div>';
+    grid.innerHTML = `<div class="fleet-empty">
+      <b>No device found.</b>
+      <p>Plug in a USB e-nose, or scan the network for mDNS devices. Nothing is required to explore the bundled smells.</p>
+      <div class="fleet-empty-actions">
+        <button class="mini-btn primary" id="fleetEmptyScan" type="button">Scan network</button>
+        <button class="mini-btn" id="fleetEmptySmells" type="button">Explore smells →</button>
+      </div>
+    </div>`;
     document.getElementById('fleetBadge')!.style.display = 'none';
     return;
   }
@@ -2908,6 +3450,35 @@ function updateTrainButton() {
   btn.disabled = !ready;
   btn.title = ready ? 'Train' : 'Select ≥2 recordings for at least 2 different smells';
   document.getElementById('trainStatus')!.textContent = trainSufficiencyText();
+  const starter = document.getElementById('trainStarter') as HTMLButtonElement | null;
+  if (starter) starter.hidden = !sessions.some(s => (s.path || '').includes('/SmellNet/'));
+}
+
+// One-click route to a working model. The no-hardware loop only counts if a new
+// user can watch a real, honestly-scored classifier appear before they own any
+// sensors — so this picks a balanced set from the bundled pack and trains it.
+function selectStarterTrainingSet(maxPerSmell = 3, maxSmells = 4): number {
+  const bySmell = new Map<string, SessionRecord[]>();
+  for (const s of sessions) {
+    if (!s.file_id || !(s.path || '').includes('/SmellNet/')) continue;
+    const key = (s.substance || '').trim().toLowerCase();
+    if (!key) continue;
+    const list = bySmell.get(key) || [];
+    list.push(s);
+    bySmell.set(key, list);
+  }
+  const chosen = [...bySmell.entries()]
+    .filter(([, recs]) => recs.length >= maxPerSmell)
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .slice(0, maxSmells);
+  trainSelected.clear();
+  for (const [, recs] of chosen) {
+    recs.slice()
+      .sort((a, b) => (b.quality || 0) - (a.quality || 0))
+      .slice(0, maxPerSmell)
+      .forEach(r => trainSelected.add(r.file_id!));
+  }
+  return chosen.length;
 }
 
 // Run the full 7-factor quality analysis on any selected recording that only
@@ -2949,7 +3520,7 @@ async function trainClassifier() {
     const inp = document.querySelector(`.train-label[data-fid="${fid}"]`) as HTMLInputElement;
     return inp ? inp.value.trim() : '';
   });
-  log.innerHTML = 'Training…';
+  log.innerHTML = `Training ${fileIds.length} recordings… scoring each one honestly (one model fit per recording) — allow a minute.`;
   try {
     // The min-quality gate is only as honest as the scores it reads. Selected
     // recordings that only carry the provisional heuristic are analyzed with
@@ -3021,7 +3592,14 @@ function renderModelCard(report: TrainingReport) {
     return;
   }
   const pct = (x: number) => (x * 100).toFixed(1) + '%';
+  const chance = report.classes.length ? 1 / report.classes.length : 0;
+  // FDR is a variance ratio with no natural ceiling; "1.13e+27" tells nobody
+  // anything, so clamp it to a readable range.
+  const fdr = (x: number) => (!Number.isFinite(x) ? '∞' : x >= 100 ? '>100' : x.toFixed(2));
   const similarity = parseSimilarityFromJson(report.model_json);
+  const pairs = [...similarity].sort((a, b) => a.fdr_mean - b.fdr_mean);
+  const shown = pairs.slice(0, 5);
+  const rest = pairs.length - shown.length;
   const warnings = (report.warnings || []).map(w => `<div class="train-warn">⚠ ${w}</div>`).join('');
   ins.innerHTML = `
     <h4>Model</h4>
@@ -3032,13 +3610,16 @@ function renderModelCard(report: TrainingReport) {
 
     <h4>Accuracy</h4>
     <div class="train-metric"><span>Out-of-sample (LORO)</span><strong style="color:var(--green)">${pct(report.accuracy)}</strong></div>
-    <div class="train-metric"><span>Mean-fold LORO</span><span>${(report.loro_mean_accuracy * 100).toFixed(1)}%</span></div>
+    <div class="train-metric"><span>Chance</span><span>${pct(chance)}</span></div>
+    <div class="train-metric"><span>Mean-fold LORO</span><span>${pct(report.loro_mean_accuracy)}</span></div>
     <div class="train-metric"><span>In-sample (reference)</span><span style="color:var(--text-3)">${pct(report.in_sample_accuracy)}</span></div>
+    <div class="train-note">Out-of-sample holds out whole recordings the model never saw — that is the number to trust. In-sample only shows it can memorise.</div>
 
-    <h4>Similarity</h4>
-    ${similarity.map(s =>
-      `<div class="train-metric"><span>${s.class_a} ↔ ${s.class_b}</span><span style="color:${s.fdr_mean < 0.25 ? 'var(--yellow)' : 'var(--text-2)'}">cos ${s.cosine.toFixed(2)} · FDR ${s.fdr_mean.toFixed(2)}</span></div>`
+    <h4>Similarity <span style="font-weight:400;color:var(--text-3)">worst first</span></h4>
+    ${shown.map(s =>
+      `<div class="train-metric"><span>${s.class_a} ↔ ${s.class_b}</span><span style="color:${s.fdr_mean < 0.25 ? 'var(--yellow)' : 'var(--text-2)'}">cos ${s.cosine.toFixed(2)} · FDR ${fdr(s.fdr_mean)}</span></div>`
     ).join('') || '<div style="color:var(--text-3)">—</div>'}
+    ${rest > 0 ? `<div class="train-note">${rest} more pair${rest === 1 ? '' : 's'} better separated.</div>` : ''}
 
     ${renderAdequacyVerdict(report, similarity)}
 
@@ -3058,15 +3639,15 @@ function renderAdequacyVerdict(report: TrainingReport, similarity: { class_a: st
   if (lowAcc) {
     parts.push('⚠ Out-of-sample accuracy below 60% — the smells may be too similar, or there may be too few recordings per class.');
   }
-  if (!parts.length) {
-    parts.push('✓ Training set is sufficiently distinct — smells separate cleanly out-of-sample.');
+  let html = parts.length
+    ? parts.map(p => `<div class="train-warn">${p}</div>`).join('')
+    : '<div class="adequacy-ok">✓ Training set is sufficiently distinct — smells separate cleanly out-of-sample.</div>';
+  const perClass = report.classes.map(c => report.recordings_per_class[c] || 0);
+  const minPer = perClass.length ? Math.min(...perClass) : 0;
+  if (!confusing.length && !lowAcc && minPer <= 3) {
+    html += `<div class="train-note">Small sample — ${minPer} recording${minPer === 1 ? '' : 's'} per class. A high LORO can still be chance; confirm with the label-shuffle p-value in Decide → Compare before trusting it.</div>`;
   }
-  return parts.map(p => {
-    if (confusing.length || lowAcc) {
-      return `<div class="train-warn">${p}</div>`;
-    }
-    return `<div class="adequacy-ok">${p}</div>`;
-  }).join('');
+  return html;
 }
 
 function parseSimilarityFromJson(modelJson: string): { class_a: string; class_b: string; cosine: number; fdr_mean: number }[] {
@@ -3152,7 +3733,8 @@ async function reloadClassifiers() {
 async function refreshTrainLibrary() {
   try {
     await invoke('import_recordings');
-    sessions = await invoke<SessionRecord[]>('get_session_index');
+    sessions = mapIndexRecords(await invoke<RawSessionRecord[]>('get_session_index'));
+    renderLibrary();
     renderTrain();
   } catch (e) { console.error('Refresh train library failed:', e); }
 }
@@ -3230,20 +3812,33 @@ document.getElementById('detectBtn')!.addEventListener('click', async () => {
 });
 
 // Compare mode switching + delta reference
+document.getElementById('comparePick')?.addEventListener('click', () => {
+  showWorkspaceView('smells');
+});
+document.getElementById('compareEmptyPick')?.addEventListener('click', () => {
+  showWorkspaceView('smells');
+});
+document.getElementById('compareEmptyTry')?.addEventListener('click', () => {
+  void tryStarterCompare();
+});
 document.querySelectorAll<HTMLElement>('#compareModes .cmp-mode').forEach(btn => {
   btn.addEventListener('click', () => {
-    compareMode = (btn.dataset.mode as 'overlay' | 'delta' | 'heatmap') || 'overlay';
+    compareMode = (btn.dataset.mode as 'overlay' | 'delta' | 'heatmap' | 'trajectory') || 'overlay';
     document.querySelectorAll<HTMLElement>('#compareModes .cmp-mode').forEach(b => b.classList.toggle('active', b === btn));
     const title = document.getElementById('cmpVizTitle')!;
     const foot = document.getElementById('compareFoot')!;
     title.textContent = compareMode === 'heatmap'
       ? 'Similarity — Pearson correlation across sessions'
-      : compareMode === 'delta'
-        ? 'Δ vs ref — each session minus the reference'
-        : 'Overlay — per-channel normalized response';
+      : compareMode === 'trajectory'
+        ? 'Trajectory — the shape of the response'
+        : compareMode === 'delta'
+          ? 'Δ vs ref — each session minus the reference'
+          : 'Overlay — per-channel normalized response';
     foot.textContent = compareMode === 'heatmap'
       ? 'Similarity: Pearson correlation over the shared overlap of the selected channels.'
-      : 'Overlay / Δ: one lane per sensor channel, sessions overlaid (Δ shows each session minus the reference).';
+      : compareMode === 'trajectory'
+        ? 'Trajectory: each path is smoothed, centred on its own opening vector and scaled to its own size, then projected onto two principal axes — so this compares transformation, not strength. Start is shared; filled end is labelled. Descriptive projection; the Explore advisor is the held-out test.'
+        : 'Overlay / Δ: one lane per sensor channel, sessions overlaid (Δ shows each session minus the reference).';
     renderCompareRef();
     renderCompareMetrics();
     drawCompare();
@@ -3299,42 +3894,4588 @@ function fmtLibTime(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+// === Starter library — the app never opens empty ===
+// A curated, real, labelled pack ships alongside the app so a user with no
+// hardware can do real work on the first launch: compare substances, train a
+// model, watch a fingerprint change. Idempotent — imports only when the pack
+// is not already in the library, so a user's own recordings are never touched.
+async function ensureStarterLibrary(): Promise<void> {
+  try {
+    const records = await invoke<Array<{ csv_path: string }>>('get_session_index');
+    if (records.some(r => (r.csv_path || '').includes('/SmellNet/'))) return;
+    // Rust materialises the bundled pack into the recordings directory the first
+    // time it is needed; the frontend only has to import it.
+    const dir = await invoke<string | null>('ensure_starter_library');
+    if (!dir) return;
+    await invoke('import_paths', { paths: [dir] });
+  } catch { /* pack absent, or FS sandboxed — non-fatal */ }
+}
+
+// === Smells gallery — substances as first-class objects ===
+// The library is files; a person is interested in smells. This groups the
+// library by substance and shows what the array actually did when it met each
+// one — the mean baseline-relative response across that substance's recordings.
+interface SmellCardData {
+  /** Case-folded identity used for selection and caching. */
+  key: string;
+  /** Display name, taken from the first recording seen. */
+  substance: string;
+  records: SessionRecord[];
+  channels: string[];
+  values: number[] | null;
+  /** Mean shape per channel over relative time, once loaded. */
+  traces?: number[][];
+  /** The recordings that share the dominant array signature, once loaded. */
+  groupRecords?: SessionRecord[];
+  /** How many of that group were averaged into the mean fingerprint. */
+  usedInMean?: number;
+  meanQuality: number;
+  analyzed: number;
+}
+
+interface MeanResponse {
+  channels: string[];
+  values: number[];
+  /** How many recordings were averaged into the fingerprint. */
+  used: number;
+  /** How many recordings share this channel-for-channel array. */
+  groupSize: number;
+  /** How many usable recordings the card had before the array check. */
+  total: number;
+  /** The recordings that share this array; used for provenance. */
+  records: SessionRecord[];
+}
+
+let smellCards: SmellCardData[] = [];
+const smellSel = new Set<string>();
+const smellFpCache = new Map<string, MeanResponse | null>();
+// In-flight fingerprint loads, so opening a detail while the gallery is still
+// filling does not fetch the same recordings twice.
+const smellFpPending = new Map<string, Promise<MeanResponse | null>>();
+// Bumped whenever the library changes; a load that started before the change
+// must not write its stale result back into the cache.
+let smellCacheGen = 0;
+
+function titleCase(s: string): string {
+  return s.replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/** Mean settled, baseline-relative response per channel, across up to 3 recordings
+ *  from the card's dominant array. A smell can have recordings from more than one
+ *  physical array (an imported dataset plus the user's rig); those must never be
+ *  blended, so pick the largest channel-for-channel group first, then average. */
+async function meanResponseFor(recs: SessionRecord[]): Promise<MeanResponse | null> {
+  const usable = recs.filter(r => !!r.file_id);
+  interface Group { channels: string[]; series: SessionSeries[]; records: SessionRecord[]; }
+  const groups = new Map<string, Group>();
+  for (const r of usable) {
+    const series = await loadCompareSeries(r.file_id!);
+    if (!series || !series.channels.length) continue;
+    const sig = series.channels.join('\u0000');
+    let g = groups.get(sig);
+    if (!g) {
+      g = { channels: series.channels.slice(), series: [], records: [] };
+      groups.set(sig, g);
+    }
+    g.series.push(series);
+    g.records.push(r);
+  }
+  // The dominant array, not whichever recording happened to sort first.
+  const best = [...groups.values()].sort((a, b) => b.series.length - a.series.length)[0];
+  if (!best) return null;
+  // Use every replicate on the dominant array. The verdict already uses all of
+  // them (up to its row cap); making the displayed mean match avoids a card
+  // that describes three recordings while the separation test used five.
+  const used = best.series;
+  const acc: number[][] = [];
+  for (const series of used) {
+    const per: number[] = [];
+    for (let ci = 0; ci < series.channels.length; ci++) {
+      const norm = cmpNorm(series, ci);
+      if (!norm || !norm.length) { per.push(NaN); continue; }
+      per.push(meanOf(norm.slice(Math.floor(norm.length * 0.4))));
+    }
+    acc.push(per);
+  }
+  const values = best.channels.map((_, i) => {
+    const v = acc.map(a => a[i]).filter(Number.isFinite);
+    // NaN (not 0) when a channel could not be normalised at all: an absent
+    // measurement must never be drawn as a small real one.
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : NaN;
+  });
+  return {
+    channels: best.channels,
+    values,
+    used: used.length,
+    groupSize: best.series.length,
+    total: usable.length,
+    records: best.records,
+  };
+}
+
+// === Separability advisor ===
+// "Can this array tell these two smells apart?" is the question that decides
+// whether a classifier is even possible. It is answerable *before* training,
+// from the replicates already in the library: between-smell gap versus
+// within-smell scatter, per channel, plus a leave-one-recording-out check.
+// The output is deliberately not just a score — it names the channel that
+// carries the difference and the smallest realistic change that would widen it.
+interface SmellReplicates {
+  channels: string[];
+  /**
+   * One fingerprint row per recording, `channels.length * FINGERPRINT_FEATURES.length`
+   * wide; NaN = that feature is not usable for this channel.
+   */
+  rows: number[][];
+  /** Recordings considered before the array-compatibility filter. */
+  considered: number;
+}
+
+const smellRepCache = new Map<string, SmellReplicates | null>();
+
+// The settled level alone misses odour identity carried by kinetics: two smells
+// can land at the same ΔR/R0 while one rises fast and the other keeps climbing.
+// Every feature here is baseline-relative, so it survives a new session on the
+// same rig (the absolute sensor offsets do not).
+//
+// Level and shape are deliberately split. Level features describe *where* the
+// response ends up; shape features are amplitude-normalised and describe *how*
+// it gets there (timing, rise, retention, late slope). Scoring them separately
+// answers whether the array is reading a chemoprint or a transformation — and
+// whether kinetics add anything beyond concentration.
+const FINGERPRINT_FEATURES = ['settled', 'peak', 'mean', 'early', 'ttp', 'rise', 'retain', 'slope'] as const;
+const FP = FINGERPRINT_FEATURES.length;
+const LEVEL_FEATURES = new Set(['settled', 'peak', 'mean', 'early']);
+const SHAPE_FEATURES = new Set(['ttp', 'rise', 'retain', 'slope']);
+
+function fingerprintFeatures(norm: number[]): number[] {
+  const n = norm.length;
+  const idx = norm.map((v, i) => (Number.isFinite(v) ? i : -1)).filter(i => i >= 0);
+  if (idx.length < 5) return new Array(FP).fill(NaN);
+  const vals = idx.map(i => norm[i]);
+  let peak = 0;
+  let peakIdx = -1;
+  for (const i of idx) {
+    if (Math.abs(norm[i]) > Math.abs(peak)) { peak = norm[i]; peakIdx = i; }
+  }
+
+  const settleStart = Math.floor(n * 0.6);
+  const settle: number[] = [];
+  const early: number[] = [];
+  for (const i of idx) {
+    if (i >= settleStart) settle.push(norm[i]);
+    if (i >= n * 0.1 && i < n * 0.35) early.push(norm[i]);
+  }
+  // Slope over the settled stretch, expressed as the change across that whole
+  // stretch so it is on the same scale as the response itself.
+  let slope = NaN;
+  if (settle.length >= 3) {
+    const m = meanOf(settle);
+    let num = 0, den = 0;
+    for (let k = 0; k < settle.length; k++) {
+      const t = k - (settle.length - 1) / 2;
+      num += t * (settle[k] - m);
+      den += t * t;
+    }
+    if (den > 0) slope = (num / den) * settle.length;
+  }
+  const settled = settle.length ? meanOf(settle) : NaN;
+  const earlyMean = early.length ? meanOf(early) : NaN;
+  // Shape features need a response to normalise against; below 0.1% the ratios
+  // are numerically meaningless and must not masquerade as strong separation.
+  const hasPeak = Math.abs(peak) >= 1e-3;
+  return [
+    settled,
+    peak,
+    meanOf(vals),
+    earlyMean,
+    peakIdx >= 0 && n > 1 ? peakIdx / (n - 1) : NaN,
+    hasPeak && Number.isFinite(earlyMean) ? (peak - earlyMean) / Math.abs(peak) : NaN,
+    hasPeak ? settled / peak : NaN,
+    hasPeak && Number.isFinite(slope) ? Math.max(-10, Math.min(10, slope / Math.abs(peak))) : NaN,
+  ];
+}
+
+async function smellReplicates(card: SmellCardData, max = 6): Promise<SmellReplicates | null> {
+  const cached = smellRepCache.get(card.key);
+  if (cached !== undefined) return cached;
+  const gen = smellCacheGen;
+  const usable = card.records.filter(r => !!r.file_id);
+  interface Group { channels: string[]; rows: number[][]; }
+  const groups = new Map<string, Group>();
+  for (const r of usable) {
+    const series = await loadCompareSeries(r.file_id!);
+    if (!series || !series.channels.length) continue;
+    // Never blend a 6-channel rig with a 7-channel one, even when the width
+    // happens to match but the sensors are wired differently. Group first, then
+    // use the largest group; a card can contain more than one physical array.
+    const sig = series.channels.join('\u0000');
+    let g = groups.get(sig);
+    if (!g) {
+      g = { channels: series.channels.slice(), rows: [] };
+      groups.set(sig, g);
+    }
+    const row: number[] = [];
+    for (let ci = 0; ci < series.channels.length; ci++) {
+      const norm = cmpNorm(series, ci);
+      row.push(...(norm && norm.length ? fingerprintFeatures(norm) : new Array(FP).fill(NaN)));
+    }
+    g.rows.push(row);
+  }
+  const best = [...groups.values()].sort((a, b) => b.rows.length - a.rows.length)[0];
+  const out = best && best.rows.length
+    ? { channels: best.channels, rows: best.rows.slice(0, max), considered: usable.length }
+    : null;
+  if (gen === smellCacheGen) smellRepCache.set(card.key, out);
+  return out;
+}
+
+interface ChannelSeparation {
+  channel: string;
+  /** Feature carrying the largest gap, and its effect size. */
+  feature: string;
+  d: number;
+  meanA: number;
+  meanB: number;
+  /** Reads exactly nothing for this smell — dead or poisoned, not different. */
+  silentA: boolean;
+  silentB: boolean;
+}
+
+type SeparationVerdict = 'separable' | 'fragile' | 'confusable' | 'insufficient';
+
+interface SmellPairSeparation {
+  a: SmellCardData;
+  b: SmellCardData;
+  nA: number;
+  nB: number;
+  consideredA: number;
+  consideredB: number;
+  channels: ChannelSeparation[];
+  best: ChannelSeparation | null;
+  /** Leave-one-recording-out nearest-centroid accuracy; NaN if unevaluable. */
+  acc: number;
+  /** Same check using only level features / only amplitude-normalised shape. */
+  accLevel: number;
+  accShape: number;
+  nEval: number;
+  /** Label-shuffle p-value for the best view; NaN if not computed. */
+  pValue: number;
+  /** Number of label arrangements the p-value is based on. */
+  permutations: number;
+  verdict: SeparationVerdict;
+  lever: string;
+}
+
+function sdOf(v: number[]): number {
+  if (v.length < 2) return NaN;
+  const m = meanOf(v);
+  return Math.sqrt(v.reduce((a, x) => a + (x - m) * (x - m), 0) / (v.length - 1));
+}
+
+function finiteColumn(rows: number[][], ci: number): number[] {
+  return rows.map(r => r[ci]).filter(Number.isFinite);
+}
+
+// Hedges-corrected standardized mean difference between two replicate sets.
+// NaN when either side has fewer than two usable replicates.
+function cohensD(fa: number[], fb: number[]): number {
+  if (fa.length < 2 || fb.length < 2) return NaN;
+  const varA = sdOf(fa) ** 2;
+  const varB = sdOf(fb) ** 2;
+  const pooled = Math.sqrt(((fa.length - 1) * varA + (fb.length - 1) * varB) / (fa.length + fb.length - 2));
+  const delta = Math.abs(meanOf(fa) - meanOf(fb));
+  // A flat channel with a tiny real offset must not read as infinite
+  // separation; cap it at the top of the credible range.
+  let d = pooled > 1e-9 ? delta / pooled : (delta > 1e-9 ? 8 : 0);
+  const df = fa.length + fb.length - 2;
+  return Math.min(8, d * (1 - 3 / (4 * df - 1)));
+}
+
+// A channel that is flat-zero for every replicate carries no information. It
+// is not "similar" — it is absent, and the advice differs.
+function columnSilent(v: number[]): boolean {
+  return v.length === 0 || v.every(x => Math.abs(x) < 1e-4);
+}
+
+function separationBetween(a: SmellReplicates, b: SmellReplicates): {
+  channels: ChannelSeparation[]; acc: number; accLevel: number; accShape: number; nEval: number;
+  pValue: number; permutations: number;
+} {
+  const channels: ChannelSeparation[] = [];
+  for (let ci = 0; ci < a.channels.length; ci++) {
+    if (a.channels[ci] !== b.channels[ci]) continue;
+    const allA: number[] = [];
+    const allB: number[] = [];
+    let bestD = NaN;
+    let bestFeature = '';
+    let bestMeanA = NaN;
+    let bestMeanB = NaN;
+    for (let f = 0; f < FP; f++) {
+      const fa = finiteColumn(a.rows, ci * FP + f);
+      const fb = finiteColumn(b.rows, ci * FP + f);
+      allA.push(...fa);
+      allB.push(...fb);
+      const d = cohensD(fa, fb);
+      if (Number.isFinite(d) && !(d <= bestD)) {
+        bestD = d;
+        bestFeature = FINGERPRINT_FEATURES[f];
+        bestMeanA = meanOf(fa);
+        bestMeanB = meanOf(fb);
+      }
+    }
+    channels.push({
+      channel: a.channels[ci], feature: bestFeature, d: bestD,
+      meanA: bestMeanA, meanB: bestMeanB,
+      silentA: columnSilent(allA), silentB: columnSilent(allB),
+    });
+  }
+  const observed = bestViewAccuracy(a.rows, b.rows);
+  const perm = separationPermutationP(a.rows, b.rows, observed.best);
+  return {
+    channels,
+    acc: observed.acc, accLevel: observed.level, accShape: observed.shape,
+    nEval: observed.n,
+    pValue: perm.p, permutations: perm.total,
+  };
+}
+
+// Honest small-sample check: standardize each feature by its pooled spread,
+// then ask whether each recording is closer to its own smell's centroid when
+// that recording is left out. This is the same logic the classifier is scored
+// with, minus the model — so it cannot flatter the data.
+//
+// Only the strongest features are used: with 5 replicates and dozens of
+// candidates, feeding every candidate into a nearest-centroid test lets
+// irrelevant noise outvote the channels that actually separate the pair.
+// Feature choice therefore happens *inside* every permutation too, so the
+// p-value pays for the selection rather than pretending the features were
+// fixed in advance.
+function rankFeatureIndices(aRows: number[][], bRows: number[][], allow?: Set<string>): number[] {
+  const width = aRows[0]?.length ?? 0;
+  const out: { f: number; d: number }[] = [];
+  for (let f = 0; f < width; f++) {
+    if (allow && !allow.has(FINGERPRINT_FEATURES[f % FP])) continue;
+    const fa = aRows.map(r => r[f]).filter(Number.isFinite);
+    const fb = bRows.map(r => r[f]).filter(Number.isFinite);
+    const d = cohensD(fa, fb);
+    if (Number.isFinite(d)) out.push({ f, d });
+  }
+  return out.sort((x, y) => y.d - x.d).map(x => x.f);
+}
+
+function looFromRows(aRows: number[][], bRows: number[][], features: number[]): { acc: number; n: number } {
+  if (aRows.length < 2 || bRows.length < 2 || !features.length) return { acc: NaN, n: 0 };
+  let A = aRows.map(row => features.map(f => row[f]));
+  let B = bRows.map(row => features.map(f => row[f]));
+  const k = A[0].length;
+  const mean: number[] = [];
+  const scale: number[] = [];
+  for (let j = 0; j < k; j++) {
+    const all = [...A.map(r => r[j]), ...B.map(r => r[j])].filter(Number.isFinite);
+    if (!all.length) { mean.push(0); scale.push(0); continue; }
+    const m = meanOf(all);
+    const sd = sdOf(all);
+    mean.push(m);
+    scale.push(Number.isFinite(sd) ? sd : 0);
+  }
+  const standardize = (r: number[]) => r.map((v, j) => {
+    if (!(scale[j] > 1e-9)) return 0;
+    return (Number.isFinite(v) ? (v - mean[j]) / scale[j] : 0);
+  });
+  A = A.map(standardize);
+  B = B.map(standardize);
+  const centroid = (rows: number[][]) => {
+    const out = new Array(rows[0].length).fill(0);
+    for (const r of rows) for (let j = 0; j < out.length; j++) out[j] += r[j] / rows.length;
+    return out;
+  };
+  const sq = (p: number[], q: number[]) => {
+    let s = 0;
+    for (let j = 0; j < p.length; j++) s += (p[j] - q[j]) ** 2;
+    return s;
+  };
+  let correct = 0;
+  for (let i = 0; i < A.length; i++) {
+    const own = centroid(A.filter((_, j) => j !== i));
+    const other = centroid(B);
+    if (sq(A[i], own) <= sq(A[i], other)) correct++;
+  }
+  for (let i = 0; i < B.length; i++) {
+    const own = centroid(B.filter((_, j) => j !== i));
+    const other = centroid(A);
+    if (sq(B[i], own) <= sq(B[i], other)) correct++;
+  }
+  return { acc: correct / (A.length + B.length), n: A.length + B.length };
+}
+
+// The verdict is the best of three views (level, shape, together), so the
+// permutation test uses that same maximum as its statistic. Taking the maximum
+// under every shuffle is what keeps the three views from inflating the claim.
+function bestViewAccuracy(aRows: number[][], bRows: number[][]): {
+  acc: number; level: number; shape: number; n: number; best: number;
+} {
+  const combined = looFromRows(aRows, bRows, rankFeatureIndices(aRows, bRows).slice(0, 5));
+  const level = looFromRows(aRows, bRows, rankFeatureIndices(aRows, bRows, LEVEL_FEATURES).slice(0, 3));
+  const shape = looFromRows(aRows, bRows, rankFeatureIndices(aRows, bRows, SHAPE_FEATURES).slice(0, 3));
+  const finite = [combined.acc, level.acc, shape.acc].filter(Number.isFinite);
+  return {
+    acc: combined.acc, level: level.acc, shape: shape.acc,
+    n: aRows.length + bRows.length,
+    best: finite.length ? Math.max(...finite) : NaN,
+  };
+}
+
+function combinations(n: number, k: number): number[][] {
+  const out: number[][] = [];
+  const cur: number[] = [];
+  const rec = (start: number) => {
+    if (cur.length === k) { out.push(cur.slice()); return; }
+    for (let i = start; i <= n - (k - cur.length); i++) {
+      cur.push(i);
+      rec(i + 1);
+      cur.pop();
+    }
+  };
+  rec(0);
+  return out;
+}
+
+function randomCombinations(n: number, k: number, count: number): number[][] {
+  let s = 0x9e3779b9;
+  const rnd = () => {
+    s ^= s << 13; s ^= s >>> 17; s ^= s << 5;
+    return (s >>> 0) / 4294967296;
+  };
+  const out: number[][] = [];
+  for (let c = 0; c < count; c++) {
+    const idx = Array.from({ length: n }, (_, i) => i);
+    for (let i = n - 1; i > 0; i--) {
+      const j = Math.floor(rnd() * (i + 1));
+      [idx[i], idx[j]] = [idx[j], idx[i]];
+    }
+    out.push(idx.slice(0, k).sort((a, b) => a - b));
+  }
+  return out;
+}
+
+function separationPermutationP(
+  aRows: number[][], bRows: number[][], observedBest: number,
+): { p: number; total: number } {
+  const n = aRows.length + bRows.length;
+  if (!Number.isFinite(observedBest) || aRows.length < 2 || bRows.length < 2) return { p: NaN, total: 0 };
+  const rows = [...aRows, ...bRows];
+  // Enumerate every label arrangement while it is cheap (5+5 gives 252); fall
+  // back to a fixed-seed sample otherwise so the p-value stays stable.
+  const totalCombos = (() => {
+    let v = 1;
+    for (let i = 1; i <= aRows.length; i++) v = (v * (n - aRows.length + i)) / i;
+    return Math.round(v);
+  })();
+  const combos = totalCombos <= 3000
+    ? combinations(n, aRows.length)
+    : randomCombinations(n, aRows.length, 2000);
+  let atLeastAsGood = 0;
+  for (const chosen of combos) {
+    const inA = new Set(chosen);
+    const A2 = rows.filter((_, i) => inA.has(i));
+    const B2 = rows.filter((_, i) => !inA.has(i));
+    const stat = bestViewAccuracy(A2, B2).best;
+    if (Number.isFinite(stat) && stat >= observedBest - 1e-9) atLeastAsGood++;
+  }
+  return { p: (atLeastAsGood + 1) / (combos.length + 1), total: combos.length };
+}
+
+function separationLever(p: SmellPairSeparation): string {
+  const silentA = p.channels.filter(c => c.silentA && !c.silentB).map(c => c.channel);
+  const silentB = p.channels.filter(c => c.silentB && !c.silentA).map(c => c.channel);
+  const silentBoth = p.channels.filter(c => c.silentA && c.silentB).map(c => c.channel);
+  const notes: string[] = [];
+  const imported = [p.a, p.b].some(c => (c.records[0]?.path || '').includes('/SmellNet/'))
+    || [p.a, p.b].every(c => !(c.records[0]?.path || '').includes('Osmograph_Recordings/'));
+  const deadWord = imported ? 'an empty/constant column in this dataset' : 'a dead or poisoned channel';
+
+  if (silentBoth.length) {
+    notes.push(`${silentBoth.join(', ')} ${silentBoth.length === 1 ? 'is' : 'are'} flat for both smells — ${silentBoth.length === 1 ? 'it contributes' : 'they contribute'} nothing to this decision (${deadWord}). Separation is being computed on the channels that actually move.`);
+  }
+  if (silentA.length) {
+    notes.push(`${silentA.join(', ')} is flat only for ${titleCase(p.a.substance)} — ${deadWord}, not a difference between smells. Do not count it as separation.`);
+  }
+  if (silentB.length) {
+    notes.push(`${silentB.join(', ')} is flat only for ${titleCase(p.b.substance)} — ${deadWord}, not a difference between smells. Do not count it as separation.`);
+  }
+
+  const best = p.best;
+  if (!best || !Number.isFinite(best.d)) {
+    notes.push(`Need at least two comparable recordings per smell: ${titleCase(p.a.substance)} has ${p.nA}/${p.consideredA} on this array, ${titleCase(p.b.substance)} has ${p.nB}/${p.consideredB}. One replicate each cannot show whether the gap is real or just run-to-run drift.`);
+    return notes.join(' ');
+  }
+  const bestName = `${best.channel} ${best.feature === 'settled' ? 'settled level' : best.feature}`;
+  const views = [
+    { label: 'level', acc: p.accLevel },
+    { label: 'shape', acc: p.accShape },
+    { label: 'together', acc: p.acc },
+  ].filter(v => Number.isFinite(v.acc)).sort((a, b) => b.acc - a.acc);
+  const verdictAcc = views.length ? views[0].acc : p.acc;
+  const viewNote = views.length && views[0].label !== 'together' ? ` (${views[0].label} view)` : '';
+  const featureLever = best.feature === 'peak' || best.feature === 'early'
+    ? 'sharpen the exposure (the transient carries the difference) and keep sampling fast'
+    : best.feature === 'slope'
+      ? 'hold the exposure open longer so the rise-versus-plateau difference has room to show'
+      : 'a longer or stronger exposure';
+  const wrong = p.nEval - Math.round(verdictAcc * p.nEval);
+
+  if (p.verdict === 'confusable') {
+    if (best.d < 1) {
+      notes.push(`Even the best feature, ${bestName}, separates them by only ${best.d.toFixed(1)}σ — the array is largely responding to something they share. Need roughly ${Math.ceil(2 / Math.max(best.d, 0.2))}× more gap: ${featureLever}, or a channel with a different sensing material (another MOX mostly repeats the same cross-sensitivity).`);
+    } else {
+      notes.push(`${bestName} separates them by ${best.d.toFixed(1)}σ; a reliable margin needs about 2σ. Widen that gap ≈${(2 / best.d).toFixed(1)}× with ${featureLever}, or add a channel tuned to a gas where they differ.`);
+    }
+  } else if (p.verdict === 'fragile') {
+    if (Number.isFinite(p.pValue) && p.pValue > 0.05 && verdictAcc >= 0.9) {
+      notes.push(`${Math.round(verdictAcc * p.nEval)}/${p.nEval} left-out recordings land on the right smell, but with ${p.nEval} recordings and ${p.channels.length * FP} candidate features a label shuffle reaches the same best score ${Math.round(p.pValue * 100)}% of the time (p = ${p.pValue.toFixed(2)} over ${p.permutations} arrangements, with the feature choice repeated inside each). Promising, not established — collect independent replicates after fixing the channel set, rather than selecting features on the same runs.`);
+    } else if (best.d >= 2) {
+      notes.push(`The average gap on ${bestName} is ${best.d.toFixed(1)}σ, but replicate scatter erodes it (${wrong}/${p.nEval} left-out recordings land on the wrong smell). The lever is consistency — same exposure time, baseline and temperature every run — plus one more replicate per smell.`);
+    } else {
+      notes.push(`Only ${Math.round(verdictAcc * p.nEval)}/${p.nEval} left-out recordings land on the right smell${viewNote}. Push ${bestName} past 2σ (${(2 / Math.max(best.d, 0.2)).toFixed(1)}× wider) or add a channel with different selectivity before relying on this pair.`);
+    }
+  } else {
+    notes.push(`No change needed: ${Math.round(verdictAcc * p.nEval)}/${p.nEval} left-out recordings land on the right smell${viewNote}, best feature ${bestName} at ${best.d.toFixed(1)}σ. Hold exposure time and baseline conditions steady so the margin survives the next session.`);
+  }
+
+  // Say *which kind* of information carries the separation. Treating a kinetic
+  // signature as a chemoprint is a real error: concentration changes the level,
+  // while flow/temperature/timing change the shape. The user needs to know which
+  // one they are trusting.
+  const level = p.accLevel, shape = p.accShape;
+  if (Number.isFinite(level) && Number.isFinite(shape) && Number.isFinite(p.acc)
+      && (!Number.isFinite(p.pValue) || p.pValue <= 0.15)) {
+    if (shape >= p.acc - 0.15 && shape >= level + 0.15) {
+      notes.push(`Most of that comes from the temporal shape, not the steady level — so keep exposure duration, flow and temperature identical between runs; changing concentration will move the level while leaving this signal intact.`);
+    } else if (level >= p.acc - 0.15 && level >= shape + 0.15) {
+      notes.push(`The steady-state pattern does the work and the trajectory adds little — spend the next effort on channel selectivity, not a more elaborate protocol.`);
+    }
+  }
+  return notes.join(' ');
+}
+
+// Wilson score lower bound (95%). With only 10 held-out recordings, raw
+// accuracy is too optimistic: 8/10 is not the same evidence as 80% from 200
+// trials. The bound keeps a small lucky run from reading as "separable".
+function wilsonLower(correct: number, n: number): number {
+  if (n <= 0) return NaN;
+  const z = 1.96;
+  const p = Math.max(0, Math.min(1, correct / n));
+  const denom = 1 + (z * z) / n;
+  const centre = p + (z * z) / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p)) / n + (z * z) / (4 * n * n));
+  return Math.max(0, (centre - margin) / denom);
+}
+
+function separationVerdict(acc: number, bestD: number, n: number, p: number): SeparationVerdict {
+  if (!Number.isFinite(acc) || n <= 0) return 'insufficient';
+  const lower = wilsonLower(Math.round(acc * n), n);
+  if (lower >= 0.55 && bestD >= 1.2 && (!Number.isFinite(p) || p <= 0.05)) return 'separable';
+  if (lower >= 0.3) return 'fragile';
+  return 'confusable';
+}
+
+const SEP_VERDICT_LABEL: Record<SeparationVerdict, string> = {
+  separable: 'separable',
+  fragile: 'fragile',
+  confusable: 'confusable',
+  insufficient: 'needs replicates',
+};
+
+/** One pair verdict, shared by the front-door advisor and the smell detail. */
+function sepPairHtml(p: SmellPairSeparation): string {
+  const active = p.channels.filter(c => Number.isFinite(c.d) && !(c.silentA && c.silentB));
+  const comparable = `${p.nA}${p.nA < p.consideredA ? `/${p.consideredA}` : ''} vs ${p.nB}${p.nB < p.consideredB ? `/${p.consideredB}` : ''}`;
+  const lower = Number.isFinite(p.acc) && p.nEval > 0
+    ? wilsonLower(Math.round(p.acc * p.nEval), p.nEval)
+    : NaN;
+  const lowerText = Number.isFinite(lower) ? ` · 95% lower ${Math.round(lower * 100)}%` : '';
+  const pText = Number.isFinite(p.pValue)
+    ? `<span class="pval" title="${p.permutations} label arrangements; the feature choice was repeated inside each one, so p pays for the selection">p ${p.pValue < 0.001 ? '< 0.001' : `= ${p.pValue.toFixed(3)}`}</span>`
+    : '';
+  const splitChip = (label: string, v: number) => Number.isFinite(v)
+    ? `<span class="${v >= 0.8 ? 'good' : v >= 0.6 ? 'mid' : 'poor'}">${label} <b>${Math.round(v * p.nEval)}/${p.nEval}</b></span>`
+    : `<span class="pval">${label} n/a</span>`;
+  return `<div class="sep-pair ${p.verdict}">
+    <div class="sep-pair-head">
+      <span class="sep-names">${titleCase(p.a.substance)} ↔ ${titleCase(p.b.substance)}</span>
+      <span class="sep-badge ${p.verdict}">${SEP_VERDICT_LABEL[p.verdict]}</span>
+    </div>
+    <div class="sep-sub">${Number.isFinite(p.acc)
+      ? `${Math.round(p.acc * p.nEval)}/${p.nEval} left-out recordings match their own smell${lowerText} · ${comparable} on this array`
+      : `${comparable} recordings on this array — add a second of each for a verdict`}</div>
+    <div class="sep-chans">
+      ${active.map(c => `<span class="sep-ch ${c.d >= 2 ? 'good' : c.d >= 1 ? 'mid' : 'poor'}" title="${c.channel} · ${c.feature} · ${c.d.toFixed(1)}σ separation">${c.channel}${c.feature && c.feature !== 'settled' ? ` ${c.feature}` : ''} ${c.d.toFixed(1)}σ</span>`).join('')}
+    </div>
+    ${[p.acc, p.accLevel, p.accShape].some(Number.isFinite) ? `<div class="sep-split">
+      ${splitChip('level', p.accLevel)}
+      ${splitChip('shape', p.accShape)}
+      ${splitChip('together', p.acc)}
+      ${pText}
+    </div>` : ''}
+    <div class="sep-lever">${p.lever}</div>
+  </div>`;
+}
+
+/** Build one pair verdict from two replicate sets. Shared by the gallery
+ *  advisor and Check so both use the same uncertainty rules. */
+function makeSeparationPair(
+  a: SmellCardData, b: SmellCardData, ra: SmellReplicates, rb: SmellReplicates,
+): SmellPairSeparation | null {
+  const { channels, acc, accLevel, accShape, nEval, pValue, permutations } = separationBetween(ra, rb);
+  if (!channels.length) return null;
+  const best = [...channels].sort((x, y) => (Number.isFinite(y.d) ? y.d : -1) - (Number.isFinite(x.d) ? x.d : -1))[0] || null;
+  const pair: SmellPairSeparation = {
+    a, b,
+    nA: ra.rows.length, nB: rb.rows.length,
+    consideredA: ra.considered, consideredB: rb.considered,
+    channels, best, acc, accLevel, accShape, nEval, pValue, permutations,
+    verdict: separationVerdict(
+      Math.max(acc, Number.isFinite(accLevel) ? accLevel : -1, Number.isFinite(accShape) ? accShape : -1),
+      best && Number.isFinite(best.d) ? best.d : 0,
+      nEval,
+      pValue,
+    ),
+    lever: '',
+  };
+  pair.lever = separationLever(pair);
+  return pair;
+}
+
+let sepRenderToken = 0;
+
+async function renderSmellSeparation(): Promise<void> {
+  const panel = document.getElementById('smellsSep');
+  if (!panel) return;
+  const chosen = smellCards.filter(c => smellSel.has(c.key));
+  if (chosen.length < 2) {
+    panel.hidden = true;
+    panel.innerHTML = '';
+    return;
+  }
+  const token = ++sepRenderToken;
+  panel.hidden = false;
+  panel.innerHTML = `<div class="sep-head"><span class="sep-title">Would these separate on a new session?</span>
+    <span class="coord-tag">reading replicates…</span></div>`;
+
+  const reps = await Promise.all(chosen.map(c => smellReplicates(c)));
+  if (token !== sepRenderToken) return;
+
+  const pairs: SmellPairSeparation[] = [];
+  for (let i = 0; i < chosen.length; i++) {
+    for (let j = i + 1; j < chosen.length; j++) {
+      const ra = reps[i], rb = reps[j];
+      if (!ra || !rb) continue;
+      const pair = makeSeparationPair(chosen[i], chosen[j], ra, rb);
+      if (pair) pairs.push(pair);
+    }
+  }
+
+  if (!pairs.length) {
+    const widths = chosen.map(c => {
+      const w = c.records.map(r => r.sensors).filter(n => n > 0);
+      const uniq = [...new Set(w)];
+      return `${titleCase(c.substance)} (${uniq.length ? uniq.join('/') : '?'} ch)`;
+    });
+    panel.innerHTML = `<div class="sep-head"><span class="sep-title">Would these separate on a new session?</span>
+        <span class="coord-tag">incomparable arrays</span></div>
+      <div class="sep-lever">No channel-for-channel comparison: ${widths.join(' vs ')}. Separation is only meaningful between recordings from the same array width — re-record the missing smell on the same rig to compare them.</div>`;
+    return;
+  }
+
+  const rank: Record<SeparationVerdict, number> = { confusable: 0, fragile: 1, insufficient: 2, separable: 3 };
+  pairs.sort((x, y) => rank[x.verdict] - rank[y.verdict]
+    || (Number.isFinite(x.acc) ? x.acc : 2) - (Number.isFinite(y.acc) ? y.acc : 2));
+  const shown = pairs.slice(0, 3);
+  const rest = pairs.length - shown.length;
+
+  // The signed difference wheel belongs in the gallery too: selecting A and B
+  // should show what actually changed, not only a verdict badge. It is drawn
+  // only for a same-array pair; different channel sets get an explicit refusal.
+  let diffHtml = '';
+  let diffValues: number[] | null = null;
+  let diffChannels: string[] = [];
+  if (chosen.length === 2) {
+    const [ma, mb] = await Promise.all([ensureMean(chosen[0]), ensureMean(chosen[1])]);
+    if (token !== sepRenderToken) return;
+    const sameArray = !!ma && !!mb && ma.channels.join('\u0000') === mb.channels.join('\u0000');
+    if (sameArray) {
+      diffChannels = ma!.channels;
+      diffValues = ma!.values.map((v, i) => {
+        const other = mb!.values[i];
+        return Number.isFinite(v) && Number.isFinite(other) ? other - v : NaN;
+      });
+    }
+    const names = `${titleCase(chosen[0].substance)} → ${titleCase(chosen[1].substance)}`;
+    diffHtml = `<div class="sep-diff">
+      <canvas class="sep-diff-print" id="sepDiffPrint"></canvas>
+      <div class="sep-diff-copy">
+        <div class="sep-diff-names">${escapeHtmlText(names)}</div>
+        <div>Signed difference on the same array. Outward means the sample is higher; inward means lower. This is not a chemical ID and it does not transfer to another rig.</div>
+        <button class="mini-btn" id="sepOpenCheck" type="button">Open in Check →</button>
+      </div>
+    </div>`;
+  }
+
+  panel.innerHTML = `
+    <div class="sep-head">
+      <span class="sep-title">Would these separate on a new session?</span>
+      <span class="coord-tag">${chosen.length} smells · ${pairs.length} pair${pairs.length === 1 ? '' : 's'} · worst first</span>
+    </div>
+    ${diffHtml}
+    <div class="sep-pairs">
+      ${shown.map(sepPairHtml).join('')}
+    </div>
+    ${rest > 0 ? `<div class="sep-more">${rest} more pair${rest === 1 ? '' : 's'} better separated.</div>` : ''}
+    <div class="sep-foot">σ = between-smell gap ÷ pooled replicate scatter. Level and shape are scored separately: level uses the steady response, shape uses amplitude-normalised timing (peak time, rise, retention, late slope). Each is a leave-one-recording-out nearest-centroid preview; the badge takes the best view, applies a 95% lower bound (8/10 ≠ 80%) and a label-shuffle p-value whose feature choice is repeated inside every shuffle. Absolute sensor levels are deliberately removed so the verdict reflects what survives a new session — a model trained on one dataset can score higher on it. Shuffling labels assumes the runs are exchangeable; if every replicate of one smell was collected together, a session or day confound can pass this test.</div>`;
+
+  const diffCanvas = document.getElementById('sepDiffPrint') as HTMLCanvasElement | null;
+  if (diffCanvas) {
+    if (diffValues) drawCheckDifference(diffCanvas, diffValues, diffChannels);
+    else drawCheckDifferenceMessage(diffCanvas, 'Different arrays\nNo channel-for-channel\ndifference');
+  }
+  document.getElementById('sepOpenCheck')?.addEventListener('click', () => {
+    if (chosen.length !== 2) return;
+    checkPrefill = { ref: chosen[0].key, sample: chosen[1].key };
+    document.querySelector<HTMLElement>('.src-subnav-btn[data-src="check"]')?.click();
+  });
+}
+
+// === Fingerprint (radar) ===
+// The signature visual: one axis per channel, the mean settled response of the
+// array to this smell. This is the object people recognise and share — the
+// pattern across sensors, not a time-series chart. The signed bars carry
+// polarity; a dead channel is drawn hollow at the centre, never as a zero.
+interface FingerprintOpts {
+  /** Draw channel names around the ring (detail view, share card). */
+  labels?: boolean;
+  /** Thinner stroke for the small gallery cards. */
+  compact?: boolean;
+  /** Keep the surrounding background (share cards); UI canvases clear first. */
+  clear?: boolean;
+}
+
+function drawFingerprintInto(
+  ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
+  values: number[], channels: string[], opts: FingerprintOpts = {},
+): void {
+  if (w <= 0 || h <= 0) return;
+  const compact = !!opts.compact;
+  const n = Math.max(values.length, channels.length, 1);
+  const pad = opts.labels ? (compact ? 16 : 26) : 6;
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const r = Math.max(8, Math.min(w, h) / 2 - pad);
+  const finite = values.filter(Number.isFinite);
+  const max = Math.max(1e-9, ...finite.map(v => Math.abs(v)));
+
+  ctx.save();
+  if (opts.clear !== false) ctx.clearRect(x, y, w, h);
+
+  // Grid rings and axes.
+  for (let ring = 1; ring <= 4; ring++) {
+    ctx.strokeStyle = ring === 4 ? 'rgba(29,26,22,0.16)' : 'rgba(29,26,22,0.075)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i <= n; i++) {
+      const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+      const rr = (ring / 4) * r;
+      const px = cx + Math.cos(a) * rr;
+      const py = cy + Math.sin(a) * rr;
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+  }
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    ctx.strokeStyle = 'rgba(29,26,22,0.08)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    ctx.stroke();
+  }
+
+  const norm = Array.from({ length: n }, (_, i) =>
+    Number.isFinite(values[i]) ? Math.min(1, Math.abs(values[i]) / max) : 0);
+
+  // One polygon for the array. Fill is deliberately quiet; the shape and the
+  // signed dots carry the information.
+  ctx.beginPath();
+  for (let i = 0; i <= n; i++) {
+    const idx = i % n;
+    const a = (idx / n) * Math.PI * 2 - Math.PI / 2;
+    const px = cx + Math.cos(a) * r * norm[idx];
+    const py = cy + Math.sin(a) * r * norm[idx];
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  }
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(14,116,144,0.10)';
+  ctx.fill();
+  ctx.strokeStyle = compact ? '#0f6f86' : '#0e7490';
+  ctx.lineWidth = compact ? 1.4 : 2;
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Points and labels. A negative (oxidising) channel is amber; a missing
+  // channel is a hollow grey dot at the centre, so it cannot masquerade as a
+  // small real response.
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const v = values[i];
+    const px = cx + Math.cos(a) * r * norm[i];
+    const py = cy + Math.sin(a) * r * norm[i];
+    ctx.beginPath();
+    ctx.arc(px, py, compact ? 2.2 : 3.2, 0, Math.PI * 2);
+    if (!Number.isFinite(v)) {
+      ctx.strokeStyle = '#a99e8b';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = v < 0 ? '#b45309' : '#0f6f86';
+      ctx.fill();
+    }
+
+    if (opts.labels) {
+      const lx = cx + Math.cos(a) * (r + (compact ? 10 : 15));
+      const ly = cy + Math.sin(a) * (r + (compact ? 10 : 15));
+      ctx.fillStyle = Number.isFinite(v) ? '#5f564a' : '#a99e8b';
+      ctx.font = `500 ${compact ? 8 : 9}px ui-monospace, "SF Mono", Menlo, monospace`;
+      ctx.textAlign = Math.cos(a) > 0.25 ? 'left' : Math.cos(a) < -0.25 ? 'right' : 'center';
+      ctx.textBaseline = Math.sin(a) > 0.25 ? 'top' : Math.sin(a) < -0.25 ? 'bottom' : 'middle';
+      const label = (channels[i] || `CH${i + 1}`).slice(0, 11);
+      ctx.fillText(Number.isFinite(v) ? label : `${label} n/a`, lx, ly);
+    }
+  }
+  ctx.restore();
+}
+
+function drawCardFingerprint(canvas: HTMLCanvasElement, values: number[], channels: string[]): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(60, canvas.clientWidth || 180);
+  const h = Math.max(50, canvas.clientHeight || 92);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  drawFingerprintInto(ctx, 0, 0, w, h, values, channels, { compact: true });
+}
+
+function drawDetailFingerprint(canvas: HTMLCanvasElement, values: number[], channels: string[]): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(260, canvas.clientWidth || 820);
+  const h = Math.max(120, canvas.clientHeight || 190);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  drawFingerprintInto(ctx, 0, 0, w, h, values, channels, { labels: true });
+}
+
+function updateSmellSelection(): void {
+  const stamp = document.getElementById('smellSelStamp');
+  const btn = document.getElementById('smellCompare') as HTMLButtonElement | null;
+  if (stamp) stamp.textContent = `${smellSel.size} selected`;
+  if (btn) btn.disabled = smellSel.size < 2;
+}
+
+function buildSmellCards(): void {
+  const bySub = new Map<string, { display: string; records: SessionRecord[] }>();
+  for (const s of sessions) {
+    const raw = (s.substance || '').trim();
+    if (!raw || raw.toLowerCase() === 'unknown') continue;
+    // Group case-insensitively: "Mosquito coil" and "mosquito coil" are one smell.
+    const key = raw.toLowerCase();
+    const g = bySub.get(key);
+    if (g) g.records.push(s); else bySub.set(key, { display: raw, records: [s] });
+  }
+  smellCards = [...bySub.entries()]
+    .map(([key, g]) => {
+      const qs = g.records.map(r => r.quality).filter(q => Number.isFinite(q));
+      return {
+        key, substance: g.display, records: g.records, channels: [], values: null,
+        meanQuality: qs.length ? Math.round(qs.reduce((a, b) => a + b, 0) / qs.length) : 0,
+        analyzed: g.records.filter(r => r.quality_report).length,
+      };
+    })
+    .sort((a, b) => b.records.length - a.records.length || a.substance.localeCompare(b.substance));
+  const sub = document.getElementById('smellsSub');
+  if (sub) {
+    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings · the fingerprint is how this array responds, not a chemical ID`;
+  }
+}
+
+type SmellFilter = 'all' | 'ready' | 'needs' | 'multi';
+type SmellSort = 'recordings' | 'name' | 'quality' | 'newest';
+let smellQuery = '';
+let smellFilter: SmellFilter = 'all';
+let smellSort: SmellSort = 'recordings';
+let smellSearchTimer = 0;
+
+function smellArrayCount(c: SmellCardData): number {
+  return new Set(c.records.map(r => r.sensors || 0)).size;
+}
+
+function smellNewest(c: SmellCardData): string {
+  return c.records.reduce((latest, r) => (r.time || '') > latest ? r.time || '' : latest, '');
+}
+
+/** The gallery is a working set, not the whole shelf. Search, filters, and sort
+ *  are shared by the grid, the "surprise me" action, and the detail arrows so a
+ *  person never loses their place when they narrow the list. */
+function visibleSmellCards(): SmellCardData[] {
+  const q = smellQuery.trim().toLowerCase();
+  const out = smellCards.filter(c => {
+    if (q && !`${c.substance} ${smellSource(c)}`.toLowerCase().includes(q)) return false;
+    if (smellFilter === 'ready' && c.records.filter(r => !!r.file_id).length < 2) return false;
+    if (smellFilter === 'needs' && c.analyzed > 0) return false;
+    if (smellFilter === 'multi' && smellArrayCount(c) < 2) return false;
+    return true;
+  });
+  out.sort((a, b) => {
+    if (smellSort === 'name') return a.substance.localeCompare(b.substance);
+    if (smellSort === 'quality') return b.meanQuality - a.meanQuality || b.records.length - a.records.length;
+    if (smellSort === 'newest') return smellNewest(b).localeCompare(smellNewest(a));
+    return b.records.length - a.records.length || a.substance.localeCompare(b.substance);
+  });
+  return out;
+}
+
+function resetSmellFilters(): void {
+  smellQuery = '';
+  smellFilter = 'all';
+  smellSort = 'recordings';
+  const search = document.getElementById('smellSearch') as HTMLInputElement | null;
+  if (search) search.value = '';
+  const sort = document.getElementById('smellSort') as HTMLSelectElement | null;
+  if (sort) sort.value = 'recordings';
+  document.querySelectorAll<HTMLElement>('.smell-chip').forEach(chip => {
+    chip.classList.toggle('active', chip.dataset.smellFilter === 'all');
+  });
+  void renderSmellGallery();
+}
+
+function renderDiscoveryStrip(): void {
+  const strip = document.getElementById('discoveryStrip');
+  if (!strip) return;
+  // Suggestions are for browsing the whole library. Once someone searches or
+  // filters, the results are the interface; don't compete with them.
+  if (smellQuery.trim() || smellFilter !== 'all' || smellCards.length < 2) {
+    strip.hidden = true;
+    strip.innerHTML = '';
+    return;
+  }
+  strip.hidden = false;
+  const pair = defaultCheckPair();
+  const a = pair ? smellCards.find(c => c.key === pair.ref) : null;
+  const b = pair ? smellCards.find(c => c.key === pair.sample) : null;
+  const most = [...smellCards].sort((x, y) =>
+    y.records.length - x.records.length || x.substance.localeCompare(y.substance))[0];
+  const pool = smellCards.filter(c => c.key !== most?.key);
+  const random = pool.length ? pool[Math.floor(Math.random() * pool.length)] : most;
+  const pairLabel = a && b
+    ? `Can the array tell <b>${escapeHtmlText(titleCase(a.substance))}</b> from <b>${escapeHtmlText(titleCase(b.substance))}</b>? →`
+    : 'Pick two smells to check →';
+  strip.innerHTML = `
+    <span class="discovery-label">Start here</span>
+    <button class="discovery-btn" type="button" data-discovery="check" ${a && b ? '' : 'disabled'}>${pairLabel}</button>
+    <button class="discovery-btn" type="button" data-discovery="smell"><b>Meet ${escapeHtmlText(titleCase(most.substance))}</b> · ${most.records.length} recording${most.records.length === 1 ? '' : 's'} →</button>
+    <button class="discovery-btn" type="button" data-discovery="random"><b>Surprise me</b> →</button>`;
+  strip.querySelector<HTMLElement>('[data-discovery="check"]')?.addEventListener('click', () => {
+    if (!a || !b) return;
+    checkPrefill = { ref: a.key, sample: b.key };
+    document.querySelector<HTMLElement>('.src-subnav-btn[data-src="check"]')?.click();
+  });
+  strip.querySelector<HTMLElement>('[data-discovery="smell"]')?.addEventListener('click', () => {
+    openSmellDetail(most);
+  });
+  strip.querySelector<HTMLElement>('[data-discovery="random"]')?.addEventListener('click', () => {
+    if (random) openSmellDetail(random);
+  });
+}
+
+async function renderSmellGallery(): Promise<void> {
+  const grid = document.getElementById('smellsGrid');
+  if (!grid) return;
+  buildSmellCards();
+  const visible = visibleSmellCards();
+  const stamp = document.getElementById('smellResultStamp');
+  if (stamp) stamp.textContent = `${visible.length} smell${visible.length === 1 ? '' : 's'}`;
+  renderDiscoveryStrip();
+
+  if (!visible.length) {
+    grid.innerHTML = `<div class="smells-empty">
+      <b>No smells match that.</b>
+      Try a shorter search, or clear the filters to see the whole starter library.
+      <div style="margin-top:10px"><button class="mini-btn" id="smellClearFilters" type="button">Clear search and filters</button></div>
+    </div>`;
+    document.getElementById('smellClearFilters')?.addEventListener('click', resetSmellFilters);
+    updateSmellSelection();
+    void renderSmellSeparation();
+    return;
+  }
+
+  grid.innerHTML = visible.map((c, i) => `
+    <div class="smell-card${smellSel.has(c.key) ? ' selected' : ''}" data-idx="${i}" role="button" tabindex="0">
+      <button class="smell-card-save" data-idx="${i}" title="Save a shareable Smell Card (PNG)">&#8595;</button>
+      <span class="smell-card-name">${titleCase(c.substance)}</span>
+      <canvas class="smell-card-print" data-idx="${i}" title="Fingerprint — mean settled response across the array"></canvas>
+      <span class="smell-card-meta" data-idx="${i}">${c.records.length} recording${c.records.length === 1 ? '' : 's'}</span>
+      <span class="smell-card-foot">
+        <input type="checkbox" class="smell-card-pick" data-idx="${i}" ${smellSel.has(c.key) ? 'checked' : ''}>
+        <span class="smell-card-pick-label">compare</span>
+      </span>
+    </div>`).join('');
+  grid.querySelectorAll<HTMLElement>('.smell-card').forEach(el => {
+    el.addEventListener('click', (ev) => {
+      const t = ev.target as HTMLElement;
+      if (t.classList.contains('smell-card-pick') || t.classList.contains('smell-card-save')) return;
+      const c = visible[parseInt((el as HTMLElement).dataset.idx || '-1', 10)];
+      if (!c) return;
+      openSmellDetail(c);
+    });
+    el.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'Enter' && ev.key !== ' ') return;
+      const t = ev.target as HTMLElement;
+      if (t.classList.contains('smell-card-pick') || t.classList.contains('smell-card-save')) return;
+      ev.preventDefault();
+      const c = visible[parseInt((el as HTMLElement).dataset.idx || '-1', 10)];
+      if (c) openSmellDetail(c);
+    });
+  });
+  grid.querySelectorAll('.smell-card-save').forEach(el => {
+    el.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const c = visible[parseInt((el as HTMLElement).dataset.idx || '-1', 10)];
+      if (c) void exportSmellCard(c);
+    });
+  });
+  grid.querySelectorAll('.smell-card-pick').forEach(el => {
+    el.addEventListener('change', (ev) => {
+      const box = ev.target as HTMLInputElement;
+      const c = visible[parseInt(box.dataset.idx || '-1', 10)];
+      if (!c) return;
+      if (box.checked) smellSel.add(c.key); else smellSel.delete(c.key);
+      void renderSmellGallery();
+    });
+  });
+  updateSmellSelection();
+  void renderSmellSeparation();
+  // Fill fingerprints lazily so the grid paints immediately.
+  for (let i = 0; i < visible.length; i++) {
+    const c = visible[i];
+    const canvas = grid.querySelector<HTMLCanvasElement>(`.smell-card-print[data-idx="${i}"]`);
+    if (!canvas) continue;
+    void (async () => {
+      const fp = await ensureMean(c);
+      if (fp) {
+        const meta = grid.querySelector<HTMLElement>(`.smell-card-meta[data-idx="${i}"]`);
+        if (meta) {
+          if (fp.groupSize < c.records.length) {
+            meta.textContent = `${fp.groupSize} of ${c.records.length} on this array · mean of ${fp.used}`;
+            meta.title = `${c.records.length - fp.groupSize} recording${c.records.length - fp.groupSize === 1 ? '' : 's'} use a different array and are not blended into this fingerprint.`;
+          } else {
+            meta.textContent = `${fp.groupSize} recording${fp.groupSize === 1 ? '' : 's'} · mean of ${fp.used}`;
+          }
+        }
+        drawCardFingerprint(canvas, fp.values, fp.channels);
+      }
+    })();
+  }
+}
+
+// === Check — the core question, as a first-class object ===
+// A Check is not a chart. It is a decision: on this array, can these two smells
+// be told apart? It shows both fingerprints, a signed difference fingerprint,
+// and the same replicate-based verdict the gallery advisor uses. No model is
+// trained, no array is blended, and a saved check is a snapshot that can be
+// reopened and recomputed.
+
+interface DifferenceOpts {
+  labels?: boolean;
+  compact?: boolean;
+  clear?: boolean;
+}
+
+/** A signed radial difference: zero is a ring, not the centre. Positive values
+ *  (sample higher) grow outward in teal; negative values cut inward in amber.
+ *  A channel with no signal is a hollow dot on the zero ring. */
+function drawDifferenceInto(
+  ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
+  diffs: number[], channels: string[], opts: DifferenceOpts = {},
+): void {
+  if (w <= 0 || h <= 0) return;
+  const labels = !!opts.labels;
+  const compact = !!opts.compact;
+  const n = Math.max(diffs.length, channels.length, 1);
+  const pad = labels ? (compact ? 22 : 46) : 10;
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const r = Math.max(10, Math.min(w, h) / 2 - pad);
+  const zeroR = r * 0.34;
+  const finite = diffs.filter(Number.isFinite);
+  const maxPos = Math.max(1e-9, ...finite.filter(v => v > 0));
+  const maxNeg = Math.max(1e-9, ...finite.filter(v => v < 0).map(v => -v));
+
+  ctx.save();
+  if (opts.clear !== false) ctx.clearRect(x, y, w, h);
+
+  // Rings, with the zero ring emphasised. The centre is the negative extreme,
+  // so a decrease is visible as a cut inward rather than a smaller "increase".
+  for (let ring = 1; ring <= 4; ring++) {
+    ctx.strokeStyle = ring === 4 ? 'rgba(29,26,22,0.14)' : 'rgba(29,26,22,0.065)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, (ring / 4) * r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.strokeStyle = 'rgba(29,26,22,0.32)';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath();
+  ctx.arc(cx, cy, zeroR, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    ctx.strokeStyle = 'rgba(29,26,22,0.075)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(a) * r, cy + Math.sin(a) * r);
+    ctx.stroke();
+  }
+
+  const half = Math.max(0.035, (Math.PI * 2 / n) * 0.28);
+  for (let i = 0; i < n; i++) {
+    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
+    const v = diffs[i];
+    if (!Number.isFinite(v)) {
+      const px = cx + Math.cos(a) * zeroR;
+      const py = cy + Math.sin(a) * zeroR;
+      ctx.beginPath();
+      ctx.arc(px, py, compact ? 2 : 2.8, 0, Math.PI * 2);
+      ctx.strokeStyle = '#a99e8b';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    } else {
+      const mag = v >= 0 ? Math.min(1, v / maxPos) : Math.min(1, -v / maxNeg);
+      const rr = v >= 0 ? zeroR + (r - zeroR) * mag : zeroR * (1 - mag);
+      ctx.beginPath();
+      ctx.arc(cx, cy, zeroR, a - half, a + half);
+      if (rr > 0.5) ctx.arc(cx, cy, rr, a + half, a - half, true);
+      else ctx.lineTo(cx, cy);
+      ctx.closePath();
+      ctx.fillStyle = v >= 0 ? 'rgba(14,116,144,0.18)' : 'rgba(180,83,9,0.18)';
+      ctx.fill();
+      ctx.strokeStyle = v >= 0 ? 'rgba(14,116,144,0.55)' : 'rgba(180,83,9,0.55)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      const px = cx + Math.cos(a) * rr;
+      const py = cy + Math.sin(a) * rr;
+      ctx.beginPath();
+      ctx.arc(px, py, compact ? 2.2 : 3, 0, Math.PI * 2);
+      ctx.fillStyle = v >= 0 ? '#0f6f86' : '#b45309';
+      ctx.fill();
+    }
+
+    if (labels) {
+      const lx = cx + Math.cos(a) * (r + (compact ? 10 : 16));
+      const ly = cy + Math.sin(a) * (r + (compact ? 10 : 16));
+      ctx.fillStyle = Number.isFinite(v) ? '#5f564a' : '#a99e8b';
+      ctx.font = `500 ${compact ? 8 : 9}px ui-monospace, "SF Mono", Menlo, monospace`;
+      ctx.textAlign = Math.cos(a) > 0.25 ? 'left' : Math.cos(a) < -0.25 ? 'right' : 'center';
+      ctx.textBaseline = Math.sin(a) > 0.25 ? 'top' : Math.sin(a) < -0.25 ? 'bottom' : 'middle';
+      const label = (channels[i] || `CH${i + 1}`).slice(0, 11);
+      ctx.fillText(Number.isFinite(v) ? label : `${label} n/a`, lx, ly);
+    }
+  }
+
+  if (!compact && labels) {
+    ctx.fillStyle = '#a99e8b';
+    ctx.font = '500 8px ui-monospace, "SF Mono", Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.fillText('0', cx, cy - zeroR - 2);
+  }
+  ctx.restore();
+}
+
+function drawCheckFingerprint(canvas: HTMLCanvasElement | null, values: number[], channels: string[]): void {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(160, canvas.clientWidth || 240);
+  const h = Math.max(120, canvas.clientHeight || 196);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  drawFingerprintInto(ctx, 0, 0, w, h, values, channels, { labels: true, compact: true });
+}
+
+function drawCheckDifference(canvas: HTMLCanvasElement | null, diffs: number[], channels: string[]): void {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(160, canvas.clientWidth || 280);
+  const h = Math.max(180, canvas.clientHeight || 280);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  drawDifferenceInto(ctx, 0, 0, w, h, diffs, channels, { labels: true });
+}
+
+function drawCheckDifferenceMessage(canvas: HTMLCanvasElement | null, message: string): void {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(160, canvas.clientWidth || 280);
+  const h = Math.max(120, canvas.clientHeight || 260);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#9a9484';
+  ctx.font = '500 11px "Geist", "Inter", system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  const lines = message.split('\n');
+  lines.forEach((line, i) => ctx.fillText(line, w / 2, h / 2 + (i - (lines.length - 1) / 2) * 16));
+}
+
+function sameChannelSignature(a: string[], b: string[]): boolean {
+  return a.length > 0 && a.length === b.length && a.every((ch, i) => ch === b[i]);
+}
+
+function formatPermP(p: number): string {
+  if (!Number.isFinite(p)) return 'p n/a';
+  return p < 0.001 ? 'p < 0.001' : `p = ${p.toFixed(3)}`;
+}
+
+function escapeHtmlText(s: string): string {
+  return s.replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[c] || c));
+}
+
+interface SavedCheck {
+  id: string;
+  name: string;
+  ref: string;
+  sample: string;
+  verdict: SeparationVerdict;
+  acc: number;
+  nEval: number;
+  pValue: number;
+  savedAt: number;
+  array: string;
+  nA: number;
+  nB: number;
+}
+
+interface CheckCurrent {
+  a: SmellCardData;
+  b: SmellCardData;
+  fa: MeanResponse | null;
+  fb: MeanResponse | null;
+  pair: SmellPairSeparation | null;
+  diffs: number[];
+  diffChannels: string[];
+  sameArray: boolean;
+}
+
+const CHECK_STORAGE_KEY = 'osmograph.checks.v1';
+let checkCurrent: CheckCurrent | null = null;
+let checkToken = 0;
+let checkPrefill: { ref?: string; sample?: string } | null = null;
+
+function loadSavedChecks(): SavedCheck[] {
+  try {
+    const raw = localStorage.getItem(CHECK_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((row): row is SavedCheck => {
+      if (!row || typeof row !== 'object') return false;
+      const o = row as Record<string, unknown>;
+      const v = o.verdict;
+      return typeof o.id === 'string'
+        && typeof o.name === 'string'
+        && typeof o.ref === 'string'
+        && typeof o.sample === 'string'
+        && (v === 'separable' || v === 'fragile' || v === 'confusable' || v === 'insufficient');
+    }).slice(0, 60);
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedChecks(checks: SavedCheck[]): void {
+  try {
+    localStorage.setItem(CHECK_STORAGE_KEY, JSON.stringify(checks.slice(0, 60)));
+  } catch {
+    showToast('Could not save the check on this machine.');
+  }
+}
+
+function defaultCheckPair(): { ref: string; sample: string } | null {
+  if (smellSel.size >= 2) {
+    const keys = [...smellSel];
+    return { ref: keys[0], sample: keys[1] };
+  }
+  const candidates = smellCards.filter(c => c.records.filter(r => !!r.file_id).length >= 2);
+  let bestA: SmellCardData | null = null;
+  let bestB: SmellCardData | null = null;
+  let bestScore = -1;
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const wa = candidates[i].records.find(r => !!r.file_id)?.sensors || 0;
+      const wb = candidates[j].records.find(r => !!r.file_id)?.sensors || 0;
+      if (!wa || wa !== wb) continue;
+      const score = Math.min(candidates[i].records.length, candidates[j].records.length);
+      if (score > bestScore) {
+        bestScore = score;
+        bestA = candidates[i];
+        bestB = candidates[j];
+      }
+    }
+  }
+  if (!bestA || !bestB) {
+    const top = candidates.slice(0, 2);
+    if (top.length === 2) { bestA = top[0]; bestB = top[1]; }
+  }
+  return bestA && bestB ? { ref: bestA.key, sample: bestB.key } : null;
+}
+
+function populateCheckSelectors(prefill?: { ref?: string; sample?: string }): void {
+  const refSel = document.getElementById('checkRef') as HTMLSelectElement | null;
+  const sampleSel = document.getElementById('checkSample') as HTMLSelectElement | null;
+  if (!refSel || !sampleSel) return;
+  const prevRef = prefill?.ref ?? refSel.value;
+  const prevSample = prefill?.sample ?? sampleSel.value;
+  if (!smellCards.length) {
+    refSel.innerHTML = '<option value="">No smells yet</option>';
+    sampleSel.innerHTML = '<option value="">No smells yet</option>';
+    return;
+  }
+  const makeOptions = () => smellCards.map(c => {
+    const usable = c.records.filter(r => !!r.file_id).length;
+    return new Option(`${titleCase(c.substance)} · ${usable} recording${usable === 1 ? '' : 's'}`, c.key);
+  });
+  refSel.replaceChildren(...makeOptions());
+  sampleSel.replaceChildren(...makeOptions());
+  if (prevRef && smellCards.some(c => c.key === prevRef)) refSel.value = prevRef;
+  if (prevSample && smellCards.some(c => c.key === prevSample)) sampleSel.value = prevSample;
+  if (!refSel.value) refSel.value = smellCards[0].key;
+  if (!sampleSel.value) sampleSel.value = smellCards.find(c => c.key !== refSel.value)?.key || refSel.value;
+}
+
+function checkDecisionHtml(pair: SmellPairSeparation): string {
+  const stat = Number.isFinite(pair.acc) && pair.nEval > 0
+    ? ` ${Math.round(pair.acc * pair.nEval)}/${pair.nEval} left-out recordings still land with their own smell.`
+    : '';
+  switch (pair.verdict) {
+    case 'separable':
+      return `<b>Yes.</b> On this array, the two smells are distinguishable from saved replicates.${stat}`;
+    case 'fragile':
+      return `<b>Not yet.</b> Some replicates separate, but the 95% lower bound is below the bar; add comparable replicates before trusting this on a new session.${stat}`;
+    case 'confusable':
+      return `<b>No.</b> This array cannot reliably tell these two smells apart from saved replicates.${stat}`;
+    default:
+      return `<b>Not enough evidence.</b> Add comparable replicates on the same array before treating this pair as separable.${stat}`;
+  }
+}
+
+function checkPickMeta(card: SmellCardData, fp: MeanResponse | null): string {
+  if (!fp) {
+    return `${card.records.length} recording${card.records.length === 1 ? '' : 's'} · no shared channel series`;
+  }
+  const other = fp.total - fp.groupSize;
+  const bits = [
+    `${fp.groupSize} on this array`,
+    `mean of ${fp.used}`,
+    `${fp.channels.length}-channel`,
+    sourceForRecords(fp.records),
+  ];
+  if (other > 0) bits.push(`${other} on another array`);
+  return bits.join(' · ');
+}
+
+async function runCheck(): Promise<void> {
+  const refSel = document.getElementById('checkRef') as HTMLSelectElement | null;
+  const sampleSel = document.getElementById('checkSample') as HTMLSelectElement | null;
+  const result = document.getElementById('checkResult');
+  const stamp = document.getElementById('checkStamp');
+  const refPrint = document.getElementById('checkRefPrint') as HTMLCanvasElement | null;
+  const samplePrint = document.getElementById('checkSamplePrint') as HTMLCanvasElement | null;
+  const diffPrint = document.getElementById('checkDiffPrint') as HTMLCanvasElement | null;
+  const diffTag = document.getElementById('checkDiffTag');
+  if (!refSel || !sampleSel || !result || !stamp) return;
+
+  const a = smellCards.find(c => c.key === refSel.value);
+  const b = smellCards.find(c => c.key === sampleSel.value);
+  if (!a || !b) {
+    result.innerHTML = '<div class="check-empty"><b>No smells to check.</b> Import a recording or load the starter pack under Explore.</div>';
+    stamp.textContent = 'no smells';
+    return;
+  }
+  if (a.key === b.key) {
+    result.innerHTML = '<div class="check-empty"><b>Pick two different smells.</b> A check compares a reference with a sample, not a smell with itself.</div>';
+    stamp.textContent = 'same smell';
+    return;
+  }
+
+  const token = ++checkToken;
+  checkCurrent = null;
+  stamp.textContent = 'reading replicates…';
+  result.innerHTML = '<div class="check-empty">Reading saved replicates on both smells…</div>';
+  drawCheckDifferenceMessage(refPrint, 'Reading…');
+  drawCheckDifferenceMessage(samplePrint, 'Reading…');
+  drawCheckDifferenceMessage(diffPrint, 'Reading replicates…');
+  if (diffTag) diffTag.textContent = 'reference → sample';
+  const refMeta = document.getElementById('checkRefMeta');
+  const sampleMeta = document.getElementById('checkSampleMeta');
+  if (refMeta) refMeta.textContent = 'Reading…';
+  if (sampleMeta) sampleMeta.textContent = 'Reading…';
+
+  try {
+    const [ra, rb, fa, fb] = await Promise.all([
+      smellReplicates(a), smellReplicates(b), ensureMean(a), ensureMean(b),
+    ]);
+    if (token !== checkToken) return;
+
+    if (fa) drawCheckFingerprint(refPrint, fa.values, fa.channels);
+    else drawCheckDifferenceMessage(refPrint, 'No usable\nfingerprint');
+    if (fb) drawCheckFingerprint(samplePrint, fb.values, fb.channels);
+    else drawCheckDifferenceMessage(samplePrint, 'No usable\nfingerprint');
+    if (refMeta) refMeta.textContent = checkPickMeta(a, fa);
+    if (sampleMeta) sampleMeta.textContent = checkPickMeta(b, fb);
+
+    const sameArray = !!ra && !!rb && sameChannelSignature(ra.channels, rb.channels);
+    let pair: SmellPairSeparation | null = null;
+    if (sameArray && ra && rb) pair = makeSeparationPair(a, b, ra, rb);
+
+    let diffs: number[] = [];
+    let diffChannels: string[] = [];
+    const fpSame = !!fa && !!fb && sameChannelSignature(fa.channels, fb.channels);
+    if (fpSame && fa && fb) {
+      diffChannels = fa.channels.slice();
+      diffs = fa.values.map((v, i) => fb.values[i] - v);
+      drawCheckDifference(diffPrint, diffs, diffChannels);
+      const max = Math.max(0, ...diffs.filter(Number.isFinite).map(v => Math.abs(v)));
+      if (diffTag) diffTag.textContent = `reference → sample · max |Δ| ${(max * 100).toFixed(0)}%`;
+    } else if (!sameArray) {
+      drawCheckDifferenceMessage(diffPrint, 'Different arrays\nNo channel-for-channel\ndifference');
+      if (diffTag) diffTag.textContent = 'different arrays';
+    } else {
+      drawCheckDifferenceMessage(diffPrint, 'No comparable\nfingerprint series');
+      if (diffTag) diffTag.textContent = 'no fingerprint';
+    }
+
+    checkCurrent = { a, b, fa, fb, pair, diffs, diffChannels, sameArray };
+
+    if (!sameArray) {
+      const aCh = ra?.channels.length ? ra.channels.join(' · ') : 'no usable series';
+      const bCh = rb?.channels.length ? rb.channels.join(' · ') : 'no usable series';
+      stamp.textContent = 'incomparable arrays';
+      result.innerHTML = `<div class="check-empty">
+        <b>No channel-for-channel comparison.</b><br>
+        ${escapeHtmlText(titleCase(a.substance))} uses ${escapeHtmlText(aCh)}.<br>
+        ${escapeHtmlText(titleCase(b.substance))} uses ${escapeHtmlText(bCh)}.<br>
+        A verdict needs the same channels in the same order. Re-record one smell on the other's array; the app will not blend arrays to manufacture a difference.
+      </div>`;
+      return;
+    }
+
+    if (!pair) {
+      stamp.textContent = 'needs replicates';
+      result.innerHTML = `<div class="check-empty"><b>No usable replicates.</b> Both smells need at least one recording with a channel series on this array. ${escapeHtmlText(titleCase(a.substance))} has ${ra?.rows.length ?? 0}, ${escapeHtmlText(titleCase(b.substance))} has ${rb?.rows.length ?? 0}.</div>`;
+      return;
+    }
+
+    stamp.textContent = `${SEP_VERDICT_LABEL[pair.verdict]} · ${pair.nA} vs ${pair.nB}`;
+    result.innerHTML = `
+      <div class="check-verdict">
+        <span class="sep-badge ${pair.verdict}">${SEP_VERDICT_LABEL[pair.verdict]}</span>
+        <span class="coord-tag">${pair.nA} vs ${pair.nB} recordings</span>
+      </div>
+      <p class="check-decision">${checkDecisionHtml(pair)}</p>
+      ${sepPairHtml(pair)}
+      <div class="check-actions">
+        <button class="mini-btn primary" type="button" data-check-action="save">Save check</button>
+        <button class="mini-btn" type="button" data-check-action="vial">Package as Vial</button>
+        <button class="mini-btn" type="button" data-check-action="card">Save card</button>
+        <button class="mini-btn" type="button" data-check-action="copy">Copy summary</button>
+      </div>`;
+  } catch (err) {
+    if (token !== checkToken) return;
+    console.error('Check failed:', err);
+    stamp.textContent = 'check failed';
+    result.innerHTML = '<div class="check-empty"><b>Could not read these replicates.</b> Try refreshing the library, then run the check again.</div>';
+  }
+}
+
+function renderCheckSaved(): void {
+  const list = document.getElementById('checkSavedList');
+  const count = document.getElementById('checkSavedCount');
+  if (!list) return;
+  const checks = loadSavedChecks();
+  if (count) count.textContent = String(checks.length);
+  if (!checks.length) {
+    list.innerHTML = '<div class="check-empty" style="font-size:11px">No saved checks yet. Run one above and save it.</div>';
+    return;
+  }
+  list.innerHTML = checks.map(ch => {
+    const lower = Number.isFinite(ch.acc) && ch.nEval > 0
+      ? wilsonLower(Math.round(ch.acc * ch.nEval), ch.nEval)
+      : NaN;
+    const correct = Number.isFinite(ch.acc) && ch.nEval > 0
+      ? `${Math.round(ch.acc * ch.nEval)}/${ch.nEval}`
+      : 'n/a';
+    const meta = [
+      SEP_VERDICT_LABEL[ch.verdict] || ch.verdict,
+      correct,
+      Number.isFinite(lower) ? `95% lower ${Math.round(lower * 100)}%` : '',
+      `${ch.nA} vs ${ch.nB}`,
+      new Date(ch.savedAt).toLocaleDateString(),
+    ].filter(Boolean).join(' · ');
+    return `<div class="check-saved-item">
+      <button class="check-saved-main" type="button" data-check-open="${escapeHtmlText(ch.id)}" title="${escapeHtmlText(ch.array)}">
+        <span class="check-saved-name">${escapeHtmlText(ch.name)}</span>
+        <span class="check-saved-meta">${escapeHtmlText(meta)}</span>
+      </button>
+      <button class="check-saved-del" type="button" data-check-del="${escapeHtmlText(ch.id)}" title="Delete saved check">×</button>
+    </div>`;
+  }).join('');
+}
+
+function openSaveCheckDialog(): void {
+  const c = checkCurrent;
+  if (!c || !c.pair) {
+    showToast('Run a check before saving it.');
+    return;
+  }
+  const modal = document.getElementById('checkSaveModal');
+  const input = document.getElementById('checkSaveName') as HTMLInputElement | null;
+  const err = document.getElementById('checkSaveError');
+  if (!modal || !input) return;
+  input.value = `${titleCase(c.a.substance)} ↔ ${titleCase(c.b.substance)}`;
+  if (err) err.style.display = 'none';
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => {
+    input.focus();
+    input.select();
+  });
+}
+
+function closeSaveCheckDialog(): void {
+  const modal = document.getElementById('checkSaveModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function commitCurrentCheck(name: string): void {
+  const c = checkCurrent;
+  if (!c || !c.pair) {
+    closeSaveCheckDialog();
+    return;
+  }
+  const trimmed = name.trim().slice(0, 80);
+  const input = document.getElementById('checkSaveName') as HTMLInputElement | null;
+  const err = document.getElementById('checkSaveError');
+  if (!trimmed) {
+    if (err) err.style.display = '';
+    input?.focus();
+    return;
+  }
+  const checks = loadSavedChecks();
+  checks.unshift({
+    id: `chk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
+    name: trimmed,
+    ref: c.a.key,
+    sample: c.b.key,
+    verdict: c.pair.verdict,
+    acc: c.pair.acc,
+    nEval: c.pair.nEval,
+    pValue: c.pair.pValue,
+    savedAt: Date.now(),
+    array: c.pair.channels.map(ch => ch.channel).join(' · '),
+    nA: c.pair.nA,
+    nB: c.pair.nB,
+  });
+  persistSavedChecks(checks);
+  closeSaveCheckDialog();
+  renderCheckSaved();
+  showToast('Check saved.');
+}
+
+function openSavedCheck(id: string): void {
+  const saved = loadSavedChecks().find(ch => ch.id === id);
+  if (!saved) return;
+  if (!smellCards.some(c => c.key === saved.ref) || !smellCards.some(c => c.key === saved.sample)) {
+    showToast('One of the smells in this check is no longer in the library.');
+    return;
+  }
+  const refSel = document.getElementById('checkRef') as HTMLSelectElement | null;
+  const sampleSel = document.getElementById('checkSample') as HTMLSelectElement | null;
+  if (!refSel || !sampleSel) return;
+  refSel.value = saved.ref;
+  sampleSel.value = saved.sample;
+  void runCheck();
+}
+
+let checkDeleteArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
+
+function armOrDeleteSavedCheck(id: string, button: HTMLButtonElement): void {
+  // Two-step delete instead of a native confirm dialog: the first click arms
+  // the control, the second within 2.5s deletes. No unstyled OS prompt.
+  if (checkDeleteArm?.id === id) {
+    window.clearTimeout(checkDeleteArm.timer);
+    checkDeleteArm = null;
+    persistSavedChecks(loadSavedChecks().filter(ch => ch.id !== id));
+    renderCheckSaved();
+    showToast('Saved check deleted.');
+    return;
+  }
+  if (checkDeleteArm) {
+    window.clearTimeout(checkDeleteArm.timer);
+    checkDeleteArm.button.textContent = '×';
+    checkDeleteArm.button.title = 'Delete saved check';
+  }
+  button.textContent = '×?';
+  button.title = 'Click again to delete';
+  const timer = window.setTimeout(() => {
+    if (checkDeleteArm?.id === id) {
+      checkDeleteArm = null;
+      button.textContent = '×';
+      button.title = 'Delete saved check';
+    }
+  }, 2500);
+  checkDeleteArm = { id, timer, button };
+}
+
+async function copyCurrentCheck(): Promise<void> {
+  const c = checkCurrent;
+  if (!c || !c.pair) {
+    showToast('Run a check first.');
+    return;
+  }
+  const p = c.pair;
+  const lower = Number.isFinite(p.acc) && p.nEval > 0
+    ? wilsonLower(Math.round(p.acc * p.nEval), p.nEval)
+    : NaN;
+  const carried = p.channels
+    .filter(ch => Number.isFinite(ch.d) && !(ch.silentA && ch.silentB))
+    .sort((x, y) => y.d - x.d)
+    .slice(0, 3)
+    .map(ch => `${ch.channel} ${ch.feature || 'response'} ${ch.d.toFixed(1)}σ`);
+  const lines = [
+    `Osmograph check — ${titleCase(c.a.substance)} ↔ ${titleCase(c.b.substance)}`,
+    `Verdict: ${SEP_VERDICT_LABEL[p.verdict]}`,
+    Number.isFinite(p.acc) && p.nEval > 0
+      ? `${Math.round(p.acc * p.nEval)}/${p.nEval} left-out recordings match their own smell`
+      : 'Not enough replicates for a left-out score',
+    Number.isFinite(lower) ? `95% lower bound: ${Math.round(lower * 100)}%` : '',
+    formatPermP(p.pValue),
+    `Replicates on this array: ${p.nA} vs ${p.nB}`,
+    `Array: ${p.channels.map(ch => ch.channel).join(', ')}`,
+    carried.length ? `Carried by: ${carried.join(' · ')}` : '',
+    p.lever,
+    'Preview from saved replicates, before training. Not a chemical identification. Different arrays are never blended.',
+  ].filter(Boolean);
+  const ok = await copyText(lines.join('\n'));
+  showToast(ok ? 'Check summary copied.' : 'Copy failed.');
+}
+
+function wrapCanvasText(
+  ctx: CanvasRenderingContext2D, text: string, x: number, y: number,
+  maxWidth: number, lineHeight: number, maxLines = 4,
+): number {
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.split(/\s+/)) {
+    const test = line ? `${line} ${word}` : word;
+    if (ctx.measureText(test).width > maxWidth && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = test;
+    }
+  }
+  if (line) lines.push(line);
+  const shown = lines.slice(0, maxLines);
+  if (lines.length > maxLines) shown[maxLines - 1] = `${shown[maxLines - 1]}…`;
+  shown.forEach((l, i) => ctx.fillText(l, x, y + i * lineHeight));
+  return y + shown.length * lineHeight;
+}
+
+function drawCheckCardCanvas(c: CheckCurrent): HTMLCanvasElement | null {
+  if (!c.pair) return null;
+  const W = 1000, H = 760, dpr = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = W * dpr;
+  canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  ctx.scale(dpr, dpr);
+  const sans = '"Geist", "Inter", system-ui, sans-serif';
+  const mono = 'ui-monospace, "SF Mono", Menlo, monospace';
+  const p = c.pair;
+
+  ctx.fillStyle = '#f8f4ea';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#e4dac6';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(14, 14, W - 28, H - 28);
+
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `600 12px ${mono}`;
+  ctx.fillText('O S M O G R A P H', 44, 52);
+  ctx.textAlign = 'right';
+  ctx.fillText('CHECK CARD', W - 44, 52);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 36px ${sans}`;
+  ctx.fillText(`${titleCase(c.a.substance)}  ↔  ${titleCase(c.b.substance)}`, 44, 102);
+
+  const lower = Number.isFinite(p.acc) && p.nEval > 0
+    ? wilsonLower(Math.round(p.acc * p.nEval), p.nEval)
+    : NaN;
+  const meta = [
+    SEP_VERDICT_LABEL[p.verdict],
+    Number.isFinite(p.acc) && p.nEval > 0 ? `${Math.round(p.acc * p.nEval)}/${p.nEval} left-out correct` : 'no left-out score',
+    Number.isFinite(lower) ? `95% lower ${Math.round(lower * 100)}%` : '',
+    formatPermP(p.pValue),
+    `${p.nA} vs ${p.nB} recordings`,
+  ].filter(Boolean).join('   ·   ');
+  ctx.fillStyle = '#6b6152';
+  ctx.font = `400 14px ${sans}`;
+  ctx.fillText(meta, 44, 130);
+
+  ctx.strokeStyle = '#e4dac6';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(44, 150);
+  ctx.lineTo(W - 44, 150);
+  ctx.stroke();
+
+  // Two fingerprints, each on its own array. They are never blended into a
+  // single pseudo-fingerprint.
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 12px ${mono}`;
+  ctx.textAlign = 'left';
+  ctx.fillText('REFERENCE', 44, 182);
+  ctx.fillStyle = '#6b6152';
+  ctx.font = `400 12px ${sans}`;
+  ctx.fillText(titleCase(c.a.substance), 130, 182);
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 12px ${mono}`;
+  ctx.fillText('SAMPLE', 520, 182);
+  ctx.fillStyle = '#6b6152';
+  ctx.font = `400 12px ${sans}`;
+  ctx.fillText(titleCase(c.b.substance), 584, 182);
+
+  if (c.fa) drawFingerprintInto(ctx, 44, 192, 430, 210, c.fa.values, c.fa.channels, { labels: true, clear: false });
+  else {
+    ctx.fillStyle = '#a99e8b';
+    ctx.font = `400 12px ${sans}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('No usable fingerprint', 259, 300);
+  }
+  if (c.fb) drawFingerprintInto(ctx, 520, 192, 430, 210, c.fb.values, c.fb.channels, { labels: true, clear: false });
+  else {
+    ctx.fillStyle = '#a99e8b';
+    ctx.font = `400 12px ${sans}`;
+    ctx.textAlign = 'center';
+    ctx.fillText('No usable fingerprint', 735, 300);
+  }
+
+  ctx.strokeStyle = '#e4dac6';
+  ctx.beginPath();
+  ctx.moveTo(44, 418);
+  ctx.lineTo(W - 44, 418);
+  ctx.stroke();
+
+  // Signed difference fingerprint: the part a person cannot see by comparing
+  // two radars by eye.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 12px ${mono}`;
+  ctx.fillText('DIFFERENCE FINGERPRINT', 44, 448);
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `400 10px ${sans}`;
+  ctx.fillText('sample − reference · one shared scale', 44, 463);
+  if (c.sameArray && c.diffs.length) {
+    drawDifferenceInto(ctx, 44, 470, 420, 206, c.diffs, c.diffChannels, { labels: true, compact: true, clear: false });
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#8a7f6c';
+    ctx.font = `400 10px ${sans}`;
+    ctx.fillText('● sample higher    ● sample lower    ○ no signal', 44, 690);
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#a99e8b';
+    ctx.font = `400 12px ${sans}`;
+    ctx.fillText('Different arrays — no difference fingerprint.', 254, 560);
+  }
+
+  // Verdict panel — the decision, not just a score.
+  const badgeFill = p.verdict === 'separable' ? '#1a1a17'
+    : p.verdict === 'fragile' ? '#f6e3bc'
+      : p.verdict === 'confusable' ? '#e11d48' : '#e7dfd0';
+  const badgeText = p.verdict === 'separable' ? '#fbf8f2'
+    : p.verdict === 'fragile' ? '#7a5208'
+      : p.verdict === 'confusable' ? '#fff' : '#5a5750';
+  ctx.fillStyle = badgeFill;
+  const badgeLabel = SEP_VERDICT_LABEL[p.verdict].toUpperCase();
+  ctx.font = `600 11px ${mono}`;
+  const bw = ctx.measureText(badgeLabel).width + 20;
+  ctx.fillRect(520, 460, bw, 22);
+  ctx.fillStyle = badgeText;
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(badgeLabel, 530, 471);
+
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 21px ${sans}`;
+  const decision = p.verdict === 'separable'
+    ? 'Yes. These are distinguishable on this array.'
+    : p.verdict === 'fragile'
+      ? 'Not yet. The gap is too thin to trust.'
+      : p.verdict === 'confusable'
+        ? 'No. This array cannot tell them apart.'
+        : 'Not enough replicates to answer.';
+  wrapCanvasText(ctx, decision, 520, 510, 430, 27, 3);
+
+  ctx.fillStyle = '#3a342c';
+  ctx.font = `500 12px ${sans}`;
+  const statLines = [
+    Number.isFinite(p.acc) && p.nEval > 0 ? `${Math.round(p.acc * p.nEval)}/${p.nEval} left-out recordings match their own smell` : 'No left-out score yet',
+    Number.isFinite(lower) ? `95% lower bound: ${Math.round(lower * 100)}%` : 'Lower bound: n/a',
+    formatPermP(p.pValue),
+    `${p.channels.length}-channel array · ${p.nA} vs ${p.nB} replicates`,
+  ];
+  statLines.forEach((line, i) => ctx.fillText(line, 520, 590 + i * 19));
+
+  const carried = p.channels
+    .filter(ch => Number.isFinite(ch.d) && !(ch.silentA && ch.silentB))
+    .sort((x, y) => y.d - x.d)
+    .slice(0, 2)
+    .map(ch => `${ch.channel} ${ch.d.toFixed(1)}σ`);
+  ctx.fillStyle = '#6b6152';
+  ctx.font = `400 11px ${sans}`;
+  if (carried.length) ctx.fillText(`Carried by ${carried.join(' · ')}`, 520, 676);
+
+  ctx.strokeStyle = '#e4dac6';
+  ctx.beginPath();
+  ctx.moveTo(44, 708);
+  ctx.lineTo(W - 44, 708);
+  ctx.stroke();
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `400 10px ${mono}`;
+  ctx.textAlign = 'left';
+  ctx.fillText('Saved replicates · one array · not a chemical identification', 44, 732);
+  ctx.textAlign = 'right';
+  ctx.fillText('OSMOGRAPH', W - 44, 732);
+  return canvas;
+}
+
+async function exportCurrentCheckCard(): Promise<void> {
+  if (!checkCurrent?.pair) {
+    showToast('Run a check first.');
+    return;
+  }
+  const canvas = drawCheckCardCanvas(checkCurrent);
+  if (!canvas) return;
+  const safe = `${checkCurrent.a.substance}-vs-${checkCurrent.b.substance}`
+    .replace(/[^a-z0-9]+/gi, '-').replace(/^-+|-+$/g, '').toLowerCase();
+  await exportCanvasPng(canvas, `osmograph-check-${safe || 'pair'}.png`);
+}
+
+async function renderCheckView(force = false): Promise<void> {
+  if (force || !smellCards.length) buildSmellCards();
+  populateCheckSelectors(checkPrefill || undefined);
+  checkPrefill = null;
+  renderCheckSaved();
+
+  const result = document.getElementById('checkResult');
+  const stamp = document.getElementById('checkStamp');
+  const refSel = document.getElementById('checkRef') as HTMLSelectElement | null;
+  const sampleSel = document.getElementById('checkSample') as HTMLSelectElement | null;
+  if (!smellCards.length) {
+    if (stamp) stamp.textContent = 'no smells';
+    if (result) {
+      result.innerHTML = '<div class="check-empty"><b>No smells in the library yet.</b> Import a recording or load the starter pack under Explore, then come back.</div>';
+    }
+    drawCheckDifferenceMessage(document.getElementById('checkDiffPrint') as HTMLCanvasElement | null, 'No smells');
+    return;
+  }
+  if (smellCards.length < 2) {
+    if (stamp) stamp.textContent = 'needs a second smell';
+    if (result) {
+      result.innerHTML = '<div class="check-empty"><b>Check needs two smells.</b> Record or import one more smell on the same array.</div>';
+    }
+    return;
+  }
+  if (!refSel || !sampleSel) return;
+  if (!refSel.value) refSel.value = smellCards[0].key;
+  if (!sampleSel.value || sampleSel.value === refSel.value) {
+    sampleSel.value = smellCards.find(c => c.key !== refSel.value)?.key || refSel.value;
+  }
+  await runCheck();
+}
+
+document.getElementById('checkRun')?.addEventListener('click', () => { void runCheck(); });
+document.getElementById('checkSwap')?.addEventListener('click', () => {
+  const refSel = document.getElementById('checkRef') as HTMLSelectElement | null;
+  const sampleSel = document.getElementById('checkSample') as HTMLSelectElement | null;
+  if (!refSel || !sampleSel) return;
+  const tmp = refSel.value;
+  refSel.value = sampleSel.value;
+  sampleSel.value = tmp;
+  void runCheck();
+});
+document.getElementById('checkRef')?.addEventListener('change', () => { void runCheck(); });
+document.getElementById('checkSample')?.addEventListener('change', () => { void runCheck(); });
+document.getElementById('checkResult')?.addEventListener('click', (ev) => {
+  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-check-action]');
+  if (!target) return;
+  const action = target.dataset.checkAction;
+  if (action === 'save') openSaveCheckDialog();
+  else if (action === 'vial') openVialCreate('current');
+  else if (action === 'card') void exportCurrentCheckCard();
+  else if (action === 'copy') void copyCurrentCheck();
+});
+document.getElementById('checkSavedList')?.addEventListener('click', (ev) => {
+  const target = ev.target as HTMLElement;
+  const open = target.closest<HTMLElement>('[data-check-open]');
+  if (open?.dataset.checkOpen) {
+    openSavedCheck(open.dataset.checkOpen);
+    return;
+  }
+  const del = target.closest<HTMLButtonElement>('[data-check-del]');
+  if (del?.dataset.checkDel) armOrDeleteSavedCheck(del.dataset.checkDel, del);
+});
+
+// === Vials — package a check into a reusable, validated decision ===
+// A Vial is the shareable object the rest of the platform was missing: a
+// closed-set claim plus the evidence, array, limits, and method that make it
+// inspectable. Creation is deliberately downstream of a saved check. A check
+// answers "can this array tell these two apart?"; a Vial says "here is that
+// answer as a decision someone else can try, validate, or refuse."
+const VIAL_AUTHOR_KEY = 'osmograph.vial.author.v1';
+const VIAL_CHECK_RECIPE: Vial.VialRecipeRef = {
+  id: 'check.baseline-relative.v1',
+  name: 'Baseline-relative fingerprint check',
+  version: '1.0.0',
+  steps: 3,
+};
+
+let vialCreateEvidence: Vial.VialEvidence | null = null;
+let vialDetailId: string | null = null;
+let vialUseId: string | null = null;
+let vialDeleteArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
+
+function vialStatusOf(v: Vial.VialManifest): Vial.VialStatus {
+  if (!v.validation) return 'draft';
+  return v.validation.passed ? 'sealed' : 'open';
+}
+
+function vialStatusLabel(status: Vial.VialStatus): string {
+  return status === 'sealed' ? 'Sealed' : status === 'open' ? 'Open' : 'Draft';
+}
+
+function vialCorrect(c: Vial.VialClaim): string {
+  if (!Number.isFinite(c.accuracy) || c.nEval <= 0) return '—';
+  return `${Math.round(c.accuracy * c.nEval)}/${c.nEval}`;
+}
+
+function vialLower(c: Vial.VialClaim): string {
+  return Number.isFinite(c.lowerBound) ? `${Math.round(c.lowerBound * 100)}%` : '—';
+}
+
+function vialP(c: Vial.VialClaim): string {
+  return Number.isFinite(c.pValue)
+    ? `p ${c.pValue < 0.001 ? '< 0.001' : `= ${c.pValue.toFixed(3)}`}`
+    : 'p n/a';
+}
+
+function vialEvidenceFromCurrentCheck(): Vial.VialEvidence | null {
+  const c = checkCurrent;
+  if (!c?.pair) return null;
+  return {
+    question: `Can this array tell ${titleCase(c.a.substance)} from ${titleCase(c.b.substance)} apart?`,
+    referenceKey: c.a.key,
+    sampleKey: c.b.key,
+    reference: titleCase(c.a.substance),
+    sample: titleCase(c.b.substance),
+    verdict: c.pair.verdict,
+    accuracy: c.pair.acc,
+    nEval: c.pair.nEval,
+    nRef: c.pair.nA,
+    nSample: c.pair.nB,
+    pValue: c.pair.pValue,
+    channels: c.pair.channels.map(ch => ch.channel),
+    source: smellSource(c.a),
+  };
+}
+
+function vialEvidenceFromSavedCheck(ch: SavedCheck): Vial.VialEvidence | null {
+  const a = smellCards.find(c => c.key === ch.ref);
+  const b = smellCards.find(c => c.key === ch.sample);
+  if (!a || !b) return null;
+  return {
+    checkId: ch.id,
+    question: `Can this array tell ${titleCase(a.substance)} from ${titleCase(b.substance)} apart?`,
+    referenceKey: a.key,
+    sampleKey: b.key,
+    reference: titleCase(a.substance),
+    sample: titleCase(b.substance),
+    verdict: ch.verdict,
+    accuracy: ch.acc,
+    nEval: ch.nEval,
+    nRef: ch.nA,
+    nSample: ch.nB,
+    pValue: ch.pValue,
+    channels: ch.array.split(/\s*·\s*/).filter(Boolean),
+    source: smellSource(a),
+  };
+}
+
+function vialEvidenceForSource(value: string): Vial.VialEvidence | null {
+  if (value === 'current') return vialEvidenceFromCurrentCheck();
+  const saved = loadSavedChecks().find(ch => ch.id === value);
+  return saved ? vialEvidenceFromSavedCheck(saved) : null;
+}
+
+function vialSourceOptions(): Array<{ value: string; label: string }> {
+  const out: Array<{ value: string; label: string }> = [];
+  const current = vialEvidenceFromCurrentCheck();
+  if (current) {
+    out.push({
+      value: 'current',
+      label: `Current check — ${current.reference} ↔ ${current.sample} · ${SEP_VERDICT_LABEL[current.verdict]}`,
+    });
+  }
+  for (const ch of loadSavedChecks()) {
+    out.push({
+      value: ch.id,
+      label: `${ch.name} · ${SEP_VERDICT_LABEL[ch.verdict] || ch.verdict} · ${ch.nA} vs ${ch.nB}`,
+    });
+  }
+  return out;
+}
+
+function vialChecksHtml(v: Vial.VialValidation): string {
+  return v.checks.map(c => `<div class="vial-check-row ${c.passed ? 'pass' : 'fail'}">
+    <div class="vial-check-mark">${c.passed ? '✓' : '×'}</div>
+    <div>
+      <div class="vial-check-label">${escapeHtmlText(c.label)}${c.critical ? '' : ' · advisory'}</div>
+      <div class="vial-check-detail">${escapeHtmlText(c.detail)}</div>
+    </div>
+  </div>`).join('');
+}
+
+function vialValidationSummary(v: Vial.VialValidation): string {
+  const critical = v.checks.filter(c => c.critical);
+  const criticalPass = critical.filter(c => c.passed).length;
+  const totalPass = v.checks.filter(c => c.passed).length;
+  return `<div class="vial-validation-summary ${v.passed ? 'pass' : 'fail'}">
+    ${escapeHtmlText(v.summary)}<br>
+    <b>${criticalPass}/${critical.length} critical checks · ${totalPass}/${v.checks.length} total</b>
+  </div>`;
+}
+
+function vialInput(): Vial.VialInput {
+  const val = (id: string): string => (document.getElementById(id) as HTMLInputElement | null)?.value.trim() || '';
+  const limits = (document.getElementById('vialLimits') as HTMLTextAreaElement | null)?.value
+    .split('\n').map(l => l.trim()).filter(Boolean) || [];
+  return {
+    name: val('vialName'),
+    author: val('vialAuthor'),
+    version: val('vialVersion') || '0.1.0',
+    license: val('vialLicense') || 'CC-BY-4.0',
+    domain: val('vialDomain') || 'general',
+    description: val('vialDescription'),
+    limits,
+    recipe: VIAL_CHECK_RECIPE,
+  };
+}
+
+function vialDraftManifest(): Vial.VialManifest | null {
+  if (!vialCreateEvidence) return null;
+  return Vial.createManifest(vialInput(), vialCreateEvidence);
+}
+
+function updateVialValidationPreview(): void {
+  const wrap = document.getElementById('vialValidationPreview');
+  const list = document.getElementById('vialValidationChecks');
+  const publish = document.getElementById('vialCreateValidate') as HTMLButtonElement | null;
+  if (!wrap || !list) return;
+  const manifest = vialDraftManifest();
+  if (!manifest) {
+    wrap.innerHTML = '<p class="hint" style="margin:0">Pick a saved check. The gate needs real replicates, not a written claim.</p>';
+    list.innerHTML = '';
+    if (publish) publish.disabled = true;
+    return;
+  }
+  const validation = Vial.validateVial(manifest);
+  wrap.innerHTML = vialValidationSummary(validation);
+  list.innerHTML = vialChecksHtml(validation);
+  if (publish) publish.disabled = false;
+}
+
+function syncVialFormFromEvidence(): void {
+  const ev = vialCreateEvidence;
+  const preview = document.getElementById('vialEvidencePreview');
+  if (!ev) {
+    if (preview) preview.textContent = 'This check no longer has both smells in the library. Import or re-record them before packaging.';
+    updateVialValidationPreview();
+    return;
+  }
+  const val = (id: string): HTMLInputElement | null => document.getElementById(id) as HTMLInputElement | null;
+  const name = val('vialName');
+  const question = val('vialQuestion');
+  const description = document.getElementById('vialDescription') as HTMLTextAreaElement | null;
+  const limits = document.getElementById('vialLimits') as HTMLTextAreaElement | null;
+  const author = val('vialAuthor');
+  const version = val('vialVersion');
+  const domain = val('vialDomain');
+  const license = val('vialLicense');
+
+  if (name) name.value = `${ev.reference} ↔ ${ev.sample}`;
+  if (question) question.value = ev.question;
+  if (description) {
+    description.value = `A closed-set comparison on this ${ev.channels.length}-channel array: ${ev.reference} and ${ev.sample} are distinguishable in the saved replicates. This is not an open-world identification.`;
+  }
+  if (limits) {
+    limits.value = [
+      'Closed-set comparison only; not open-world identification.',
+      `Validated on this ${ev.channels.length}-channel array from ${ev.source}; not a cross-rig claim.`,
+    ].join('\n');
+  }
+  if (author) author.value = localStorage.getItem(VIAL_AUTHOR_KEY) || '@you';
+  if (version) version.value = '0.1.0';
+  if (domain) domain.value = 'general';
+  if (license) license.value = 'CC-BY-4.0';
+  if (preview) {
+    preview.textContent = [
+      `Reference: ${ev.reference}`,
+      `Sample:    ${ev.sample}`,
+      `Verdict:   ${SEP_VERDICT_LABEL[ev.verdict] || ev.verdict}`,
+      `Left out:  ${Number.isFinite(ev.accuracy) ? `${Math.round(ev.accuracy * ev.nEval)}/${ev.nEval}` : 'n/a'}`,
+      `Array:     ${ev.channels.length ? ev.channels.join(' · ') : 'not recorded'}`,
+      `Source:    ${ev.source}`,
+    ].join('\n');
+  }
+  updateVialValidationPreview();
+}
+
+function setVialError(msg: string): void {
+  const el = document.getElementById('vialCreateError');
+  if (!el) return;
+  el.textContent = msg;
+  el.style.display = msg ? '' : 'none';
+}
+
+function openVialCreate(preferred?: string): void {
+  const options = vialSourceOptions();
+  if (!options.length) {
+    showToast('Run a check first, then package it as a Vial.');
+    return;
+  }
+  const select = document.getElementById('vialSourceCheck') as HTMLSelectElement | null;
+  const modal = document.getElementById('vialCreateModal');
+  if (!select || !modal) return;
+  select.innerHTML = options.map(o => `<option value="${escapeHtmlText(o.value)}">${escapeHtmlText(o.label)}</option>`).join('');
+  const initial = preferred && options.some(o => o.value === preferred) ? preferred : options[0].value;
+  select.value = initial;
+  vialCreateEvidence = vialEvidenceForSource(initial);
+  syncVialFormFromEvidence();
+  setVialError('');
+  modal.style.display = 'flex';
+  requestAnimationFrame(() => {
+    (document.getElementById('vialName') as HTMLInputElement | null)?.focus();
+    (document.getElementById('vialName') as HTMLInputElement | null)?.select();
+  });
+}
+
+function closeVialCreate(): void {
+  const modal = document.getElementById('vialCreateModal');
+  if (modal) modal.style.display = 'none';
+  vialCreateEvidence = null;
+}
+
+function saveVialFromModal(publish: boolean): void {
+  const ev = vialCreateEvidence;
+  if (!ev) {
+    setVialError('Pick a check with both smells still in the library.');
+    return;
+  }
+  const input = vialInput();
+  if (!input.name) {
+    setVialError('Give the Vial a name.');
+    return;
+  }
+  if (!input.author) {
+    setVialError('Add an author or handle.');
+    return;
+  }
+  try {
+    let vial = Vial.createManifest(input, ev);
+    if (publish) vial = Vial.applyValidation(vial);
+    else {
+      vial.status = 'draft';
+      vial.validation = null;
+    }
+    Vial.upsertVial(vial);
+    localStorage.setItem(VIAL_AUTHOR_KEY, input.author);
+    closeVialCreate();
+    renderVials();
+    openVialDetail(vial.id);
+    if (!publish) showToast('Vial draft saved. Validate it before using it for a decision.');
+    else if (vial.status === 'sealed') showToast('Vial sealed. The local evidence passed every critical check.');
+    else showToast('Vial saved as Open. Validation failed — inspect the gate before using it.');
+  } catch (err) {
+    setVialError(err instanceof Error ? err.message : 'Could not save this Vial.');
+  }
+}
+
+let activeDomainPackId: string | null = null;
+let activeDomainState: Domain.DomainState | null = null;
+let activeDomainHotspot: string | null = null;
+let domainRemoveArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
+let domainPackDeleteArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
+
+function domainArtSvg(art: Domain.DomainArt, hotspots: Array<{ id: string; label: string; x: number; y: number }> = []): string {
+  const marks = hotspots.map(h => {
+    const cx = (h.x / 100) * 320;
+    const cy = (h.y / 100) * 240;
+    return `<g class="domain-hotspot ${activeDomainHotspot === h.id ? 'active' : ''}" data-domain-hotspot="${escapeHtmlText(h.id)}">
+      <title>${escapeHtmlText(h.label)}</title>
+      <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="5" />
+      <text x="${(cx + 8).toFixed(1)}" y="${(cy + 2.6).toFixed(1)}">${escapeHtmlText(h.label)}</text>
+    </g>`;
+  }).join('');
+
+  if (art === 'generic') {
+    return `<svg class="domain-art" viewBox="0 0 320 240" role="img" aria-label="Declarative domain pack diagram">
+      <rect x="24" y="86" width="78" height="68" rx="6" class="domain-art-fill domain-art-line" />
+      <text x="63" y="112" text-anchor="middle" class="domain-art-label">SAMPLE</text>
+      <text x="63" y="128" text-anchor="middle" class="domain-art-label">+ context</text>
+      <path d="M102 120 H126" class="domain-art-line" />
+      <path d="M120 114 L128 120 L120 126" class="domain-art-line" />
+      <circle cx="160" cy="120" r="34" class="domain-art-soft" />
+      <circle cx="160" cy="120" r="16" class="domain-art-line domain-art-fill" />
+      <circle cx="160" cy="120" r="5" class="domain-art-sensor" />
+      <text x="160" y="168" text-anchor="middle" class="domain-art-label">same array</text>
+      <path d="M194 120 H218" class="domain-art-line" />
+      <path d="M212 114 L220 120 L212 126" class="domain-art-line" />
+      <rect x="218" y="86" width="78" height="68" rx="6" class="domain-art-fill domain-art-line" />
+      <text x="257" y="112" text-anchor="middle" class="domain-art-label">DECISION</text>
+      <text x="257" y="128" text-anchor="middle" class="domain-art-label">+ limits</text>
+      <text x="12" y="232" class="domain-art-label">declarative · host-rendered · no executable code</text>
+      ${marks}
+    </svg>`;
+  }
+
+  if (art === 'plant') {
+    return `<svg class="domain-art" viewBox="0 0 320 240" role="img" aria-label="Dotted plant diagram">
+      <path d="M112 166 L208 166 L197 228 L123 228 Z" class="domain-art-fill domain-art-line" />
+      <line x1="115" y1="176" x2="205" y2="176" class="domain-art-soft" />
+      <path d="M160 170 C158 145 162 120 160 76" class="domain-art-line" />
+      <path d="M160 124 C132 120 112 98 108 66 C138 72 154 90 160 110 Z" class="domain-art-soft" />
+      <path d="M160 108 C186 104 206 82 212 52 C182 58 164 74 160 94 Z" class="domain-art-soft" />
+      <path d="M160 92 C148 78 146 56 154 38 C166 50 170 68 166 84 Z" class="domain-art-line domain-art-fill" />
+      <path d="M160 124 C150 118 142 106 142 94 C154 98 160 108 160 116 Z" class="domain-art-line domain-art-fill" />
+      <path d="M160 110 C170 104 178 92 178 80 C166 84 160 94 160 102 Z" class="domain-art-line domain-art-fill" />
+      <path d="M145 228 C140 234 134 236 128 238" class="domain-art-soft" />
+      <path d="M175 228 C180 234 186 236 192 238" class="domain-art-soft" />
+      <line x1="234" y1="198" x2="234" y2="150" class="domain-art-line" />
+      <circle cx="234" cy="146" r="5" class="domain-art-sensor" />
+      <text x="246" y="148" class="domain-art-label">sensor</text>
+      <text x="12" y="232" class="domain-art-label">no ethylene channel · change detector only</text>
+      ${marks}
+    </svg>`;
+  }
+
+  return `<svg class="domain-art" viewBox="0 0 320 240" role="img" aria-label="Fermentation vessel diagram">
+    <rect x="96" y="56" width="128" height="152" rx="10" class="domain-art-fill domain-art-line" />
+    <rect x="88" y="43" width="144" height="12" rx="4" class="domain-art-fill domain-art-line" />
+    <path d="M160 43 L160 24 Q160 16 170 16 L192 16" class="domain-art-line" />
+    <circle cx="198" cy="16" r="3" class="domain-art-sensor" />
+    <rect x="101" y="102" width="118" height="100" rx="6" class="domain-art-accent" />
+    <line x1="101" y1="102" x2="219" y2="102" class="domain-art-soft" />
+    <circle cx="130" cy="132" r="2.5" class="domain-art-soft domain-bubble" />
+    <circle cx="148" cy="158" r="2" class="domain-art-soft domain-bubble" style="animation-delay:.7s" />
+    <circle cx="176" cy="126" r="2.5" class="domain-art-soft domain-bubble" style="animation-delay:1.4s" />
+    <circle cx="190" cy="170" r="2" class="domain-art-soft domain-bubble" style="animation-delay:2.1s" />
+    <line x1="224" y1="118" x2="250" y2="118" class="domain-art-line" />
+    <circle cx="256" cy="118" r="5" class="domain-art-sensor" />
+    <text x="12" y="232" class="domain-art-label">same array · same sample prep · not a safety test</text>
+    ${marks}
+  </svg>`;
+}
+
+function domainChartSvg(w: Extract<Domain.DomainWidget, { type: 'chart' }>, state: Domain.DomainState): string {
+  const logged = state.logs
+    .map((log, i) => {
+      const value = Number.parseFloat(log.values[w.logField] ?? '');
+      return Number.isFinite(value) ? { x: i + 1, y: value } : null;
+    })
+    .filter((p): p is { x: number; y: number } => !!p)
+    .reverse();
+  const demo = logged.length < 2;
+  const points = demo ? w.demo : logged;
+  const W = 640, H = 220, L = 46, R = 16, T = 20, B = 30;
+  const xVals = points.map(p => p.x);
+  const yVals = points.map(p => p.y);
+  const xMin = Math.min(...xVals), xMax = Math.max(...xVals);
+  let yMin = Math.min(...yVals), yMax = Math.max(...yVals);
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) { yMin = 0; yMax = 1; }
+  if (yMax - yMin < 0.5) { yMin -= 0.5; yMax += 0.5; }
+  const pad = (yMax - yMin) * 0.12;
+  yMin -= pad;
+  yMax += pad;
+  const sx = (x: number) => L + ((x - xMin) / Math.max(1, xMax - xMin)) * (W - L - R);
+  const sy = (y: number) => T + (1 - (y - yMin) / Math.max(0.0001, yMax - yMin)) * (H - T - B);
+  const path = points.map((p, i) => `${i ? 'L' : 'M'}${sx(p.x).toFixed(1)} ${sy(p.y).toFixed(1)}`).join(' ');
+  const dots = points.map(p => `<circle class="domain-chart-dot" cx="${sx(p.x).toFixed(1)}" cy="${sy(p.y).toFixed(1)}" r="3"><title>${escapeHtmlText(`${p.x}: ${p.y}`)}</title></circle>`).join('');
+  const grid = [0.25, 0.5, 0.75].map(f => {
+    const y = T + f * (H - T - B);
+    return `<line x1="${L}" y1="${y.toFixed(1)}" x2="${W - R}" y2="${y.toFixed(1)}" class="domain-chart-axis" />`;
+  }).join('');
+  return `<svg class="domain-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtmlText(w.title)}">
+    <text x="${L}" y="12" class="domain-chart-title">${escapeHtmlText(w.yLabel)}</text>
+    ${grid}
+    <line x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" class="domain-chart-axis" />
+    <line x1="${L}" y1="${T}" x2="${L}" y2="${H - B}" class="domain-chart-axis" />
+    <text x="8" y="${(T + 6).toFixed(1)}" class="domain-chart-label">${yMax.toFixed(1)}</text>
+    <text x="8" y="${(H - B).toFixed(1)}" class="domain-chart-label">${yMin.toFixed(1)}</text>
+    <text x="${L}" y="${H - 8}" class="domain-chart-label">${xMin}</text>
+    <text x="${W - R}" y="${H - 8}" text-anchor="end" class="domain-chart-label">${xMax}</text>
+    <path d="${path}" class="domain-chart-line" />
+    ${dots}
+  </svg>
+  <div class="domain-chart-note">${escapeHtmlText(w.note)}${demo ? ' Showing example points until you add two readings.' : ''}</div>`;
+}
+
+function domainFieldHtml(f: Domain.DomainField, value: string, attr: 'domain-field' | 'domain-log-field'): string {
+  const id = escapeHtmlText(f.id);
+  const label = `${escapeHtmlText(f.label)}${f.unit ? ` <span style="text-transform:none;letter-spacing:0">(${escapeHtmlText(f.unit)})</span>` : ''}`;
+  const common = `data-${attr}="${id}"`;
+  if (f.type === 'select') {
+    const options = (f.options || []).map(o => `<option value="${escapeHtmlText(o)}" ${value === o ? 'selected' : ''}>${escapeHtmlText(o)}</option>`).join('');
+    return `<div class="domain-field"><label>${label}</label><select ${common}><option value="">—</option>${options}</select></div>`;
+  }
+  return `<div class="domain-field"><label>${label}</label><input type="${f.type}" ${common} value="${escapeHtmlText(value)}" placeholder="${escapeHtmlText(f.placeholder || '')}" ${f.type === 'number' ? 'step="any" inputmode="decimal"' : ''} /></div>`;
+}
+
+function domainLogHtml(log: Domain.DomainLog, fields: Domain.DomainField[]): string {
+  const values = fields
+    .map(f => {
+      const value = log.values[f.id];
+      if (!value) return '';
+      return `<b>${escapeHtmlText(f.label)}</b> ${escapeHtmlText(value)}${f.unit ? ` ${escapeHtmlText(f.unit)}` : ''}`;
+    })
+    .filter(Boolean)
+    .join(' · ');
+  return `<div class="domain-log-entry">
+    <div class="domain-log-values">${values || '<span class="hint">Empty reading</span>'}<br><span class="hint">${new Date(log.at).toLocaleString()}</span></div>
+    <button class="domain-log-del" type="button" data-domain-log-del="${escapeHtmlText(log.id)}" title="Delete reading">×</button>
+  </div>`;
+}
+
+function domainHotspotInfo(pack: Domain.DomainPack, id: string | null): string {
+  if (!id) return 'Click a point on the diagram. Every point is a place where a confident reading can turn into a bad decision.';
+  for (const w of pack.widgets) {
+    if (w.type !== 'diagram') continue;
+    const h = w.hotspots.find(x => x.id === id);
+    if (h) return `<b>${escapeHtmlText(h.label)}</b> · ${escapeHtmlText(Domain.SEVERITY_LABEL[h.severity])}<br>${escapeHtmlText(h.body)}`;
+  }
+  return 'Click a point on the diagram.';
+}
+
+function domainWidgetHtml(w: Domain.DomainWidget, pack: Domain.DomainPack, state: Domain.DomainState): string {
+  if (w.type === 'hero') {
+    return `<div class="domain-hero">
+      <div>
+        <span class="domain-risk ${pack.risk}">${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}</span>
+        <h2>${escapeHtmlText(w.title)}</h2>
+        <p>${escapeHtmlText(w.subtitle)}</p>
+        <p>${escapeHtmlText(pack.summary)}</p>
+        <p><b>What it is:</b> ${escapeHtmlText(pack.whatItIs)}</p>
+        <p><b>What it is not:</b> ${escapeHtmlText(pack.whatItIsNot)}</p>
+        <div class="domain-hero-note">${escapeHtmlText(w.note)}</div>
+      </div>
+      <div>${domainArtSvg(w.art)}</div>
+    </div>`;
+  }
+  if (w.type === 'risk') {
+    return `<div class="domain-risk-banner ${w.level}">
+      <div class="domain-risk-head"><b>${escapeHtmlText(w.headline)}</b><span class="domain-risk ${w.level}">${escapeHtmlText(Domain.RISK_LABEL[w.level])}</span></div>
+      <div class="domain-risk-body">${escapeHtmlText(w.body)}</div>
+      <div class="domain-risk-lists">
+        <div class="always"><h4>Always</h4><ul>${w.always.map(x => `<li>${escapeHtmlText(x)}</li>`).join('')}</ul></div>
+        <div class="never"><h4>Never</h4><ul>${w.never.map(x => `<li>${escapeHtmlText(x)}</li>`).join('')}</ul></div>
+      </div>
+    </div>`;
+  }
+  if (w.type === 'metrics') {
+    return `<div class="domain-panel"><h3>${escapeHtmlText(w.title)}</h3><div class="domain-metrics">
+      ${w.items.map(item => `<div class="domain-metric"><span>${escapeHtmlText(item.label)}</span><strong>${escapeHtmlText(item.value)}</strong><p>${escapeHtmlText(item.hint)}</p></div>`).join('')}
+    </div></div>`;
+  }
+  if (w.type === 'diagram') {
+    return `<div class="domain-panel"><h3>${escapeHtmlText(w.title)}</h3><p class="hint">${escapeHtmlText(w.caption)}</p>
+      ${domainArtSvg(w.art, w.hotspots)}
+      <div class="domain-hotspot-info" id="domainHotspotInfo">${domainHotspotInfo(pack, activeDomainHotspot)}</div>
+    </div>`;
+  }
+  if (w.type === 'timeline') {
+    return `<div class="domain-panel"><h3>${escapeHtmlText(w.title)}</h3><div class="domain-timeline">
+      ${w.steps.map(step => `<div class="domain-step"><div class="domain-step-range">${escapeHtmlText(step.range)}</div><div><div class="domain-step-label">${escapeHtmlText(step.label)}</div><div class="domain-step-body">${escapeHtmlText(step.body)}</div>${step.warn ? `<div class="domain-step-warn">${escapeHtmlText(step.warn)}</div>` : ''}</div></div>`).join('')}
+    </div></div>`;
+  }
+  if (w.type === 'tracking') {
+    const logs = state.logs.length
+      ? state.logs.map(log => domainLogHtml(log, w.logFields)).join('')
+      : '<div class="hint">No readings yet. Add one when you measure or inspect.</div>';
+    return `<div class="domain-panel" id="domainTracking"><h3>${escapeHtmlText(w.title)}</h3><p class="hint">${escapeHtmlText(w.description)}</p>
+      <div class="domain-track-grid">${w.fields.map(f => domainFieldHtml(f, state.fields[f.id] || '', 'domain-field')).join('')}</div>
+      <div class="domain-log-form">${w.logFields.map(f => domainFieldHtml(f, '', 'domain-log-field')).join('')}<button class="mini-btn primary domain-log-add" type="button" data-domain-log-add>${escapeHtmlText(w.logLabel)}</button></div>
+      <div class="domain-log-list">${logs}</div>
+    </div>`;
+  }
+  if (w.type === 'chart') {
+    return `<div class="domain-panel"><h3>${escapeHtmlText(w.title)}</h3>${domainChartSvg(w, state)}</div>`;
+  }
+  if (w.type === 'detector') {
+    const levels = w.levels.map(level => {
+      const n = Math.max(0, Math.min(3, Math.round(level.level)));
+      return `<div class="domain-detector-level l${n}">
+        <div class="domain-detector-level-key">L${n} · ${escapeHtmlText(level.label)}</div>
+        <div class="domain-detector-level-meaning">${escapeHtmlText(level.meaning)}</div>
+        <div class="domain-detector-level-action">→ ${escapeHtmlText(level.action)}</div>
+      </div>`;
+    }).join('');
+    return `<div class="domain-panel domain-detector">
+      <div class="domain-detector-head">
+        <div><h3>${escapeHtmlText(w.title)}</h3><p class="hint">${escapeHtmlText(w.intro)}</p></div>
+        <button class="mini-btn primary" type="button" data-domain-dashboard>Open live detector</button>
+      </div>
+      <div class="domain-detector-baseline"><b>Baseline</b><span>${escapeHtmlText(w.baseline)}</span></div>
+      <div class="domain-detector-levels">${levels}</div>
+      <div class="domain-detector-limits"><b>Limits</b><ul>${w.limits.map(limit => `<li>${escapeHtmlText(limit)}</li>`).join('')}</ul></div>
+      <div class="domain-detector-evidence">${escapeHtmlText(w.evidence)}</div>
+    </div>`;
+  }
+  if (w.type === 'rules') {
+    return `<div class="domain-panel"><h3>${escapeHtmlText(w.title)}</h3><div class="domain-rules">
+      ${w.rules.map(rule => `<div class="domain-rule ${rule.severity}"><div class="domain-rule-sev">${escapeHtmlText(Domain.SEVERITY_LABEL[rule.severity])}</div><div><div class="domain-rule-when">${escapeHtmlText(rule.when)}</div><div class="domain-rule-then">${escapeHtmlText(rule.then)}</div></div></div>`).join('')}
+    </div></div>`;
+  }
+  if (w.type === 'checklist') {
+    return `<div class="domain-panel"><h3>${escapeHtmlText(w.title)}</h3><div class="domain-checklist">
+      ${w.items.map(item => {
+        const inputId = `dchk_${pack.id}_${item.id}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+        return `<div class="domain-check"><input id="${inputId}" type="checkbox" data-domain-check="${escapeHtmlText(item.id)}" ${state.checks[item.id] ? 'checked' : ''} /><label for="${inputId}">${escapeHtmlText(item.label)}<span>${escapeHtmlText(item.detail)}</span></label></div>`;
+      }).join('')}
+    </div></div>`;
+  }
+  if (w.type === 'docs') {
+    const docs = pack.docs.map(doc => `<details class="domain-doc"><summary>${escapeHtmlText(doc.title)}</summary><div class="domain-doc-body">${doc.body.map(p => `<p>${escapeHtmlText(p)}</p>`).join('')}</div></details>`).join('');
+    const cites = `<details class="domain-doc"><summary>Citations and limits</summary><div class="domain-doc-body">${pack.citations.map(c => `<p>${escapeHtmlText(c)}</p>`).join('')}<p>Citations describe the domain context; they do not turn this Vial into a diagnostic or safety instrument.</p></div></details>`;
+    return `<div class="domain-panel" id="domainDocs"><h3>${escapeHtmlText(w.title)}</h3><div class="domain-docs">${docs}${cites}</div></div>`;
+  }
+  if (w.type === 'rig') {
+    return `<div class="domain-rig"><div><b>${escapeHtmlText(w.title)}</b><p>${escapeHtmlText(w.body)}</p></div><button class="mini-btn primary" type="button" data-domain-rig>${escapeHtmlText(w.cta)}</button></div>`;
+  }
+  return '';
+}
+
+function domainSourceLabel(pack: Domain.DomainPack): string {
+  if (!pack.sourceUrl) return '';
+  try {
+    const url = new URL(pack.sourceUrl);
+    return ` · from ${url.hostname}`;
+  } catch {
+    return '';
+  }
+}
+
+function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
+  const official = Domain.OFFICIAL_DOMAIN_PACKS.some(p => p.id === pack.id);
+  const origin = official ? 'Official' : 'Community · policy-gated';
+  const source = domainSourceLabel(pack);
+  const gate = Domain.validateDomainPack(pack, !official);
+  const gatePassed = gate.checks.filter(c => c.passed).length;
+  return `<div class="domain-card ${installed ? 'installed' : ''}">
+    <div class="domain-card-head">
+      <div style="min-width:0"><div class="domain-card-name">${escapeHtmlText(pack.name)}</div><div class="domain-card-sub">v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.author)} · ${escapeHtmlText(pack.domain)}</div></div>
+      <span class="domain-risk ${pack.risk}">${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}</span>
+    </div>
+    <div class="domain-card-tagline">${escapeHtmlText(pack.tagline)}</div>
+    <div class="domain-card-meta">${escapeHtmlText(pack.summary)}</div>
+    <div class="domain-card-meta">${origin}${escapeHtmlText(source)} · ${installed ? 'installed · log stays on this machine' : 'declarative · no executable code'} · ${pack.docs.length} docs · ${pack.citations.length} citations · ${escapeHtmlText(pack.license)} · local gate ${gatePassed}/${gate.checks.length}</div>
+    <div class="domain-card-actions">
+      ${installed
+        ? `<button class="mini-btn primary" type="button" data-domain-open="${escapeHtmlText(pack.id)}">Open workspace</button>
+           <button class="mini-btn" type="button" data-domain-docs="${escapeHtmlText(pack.id)}">Docs</button>
+           <button class="mini-btn" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
+           <button class="mini-btn" type="button" data-domain-remove="${escapeHtmlText(pack.id)}">Remove</button>`
+        : `<button class="mini-btn primary" type="button" data-domain-install="${escapeHtmlText(pack.id)}">Install</button>
+           <button class="mini-btn" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
+           ${official ? '' : `<button class="mini-btn" type="button" data-domain-delete="${escapeHtmlText(pack.id)}">Delete</button>`}`}
+    </div>
+  </div>`;
+}
+
+function renderDomainArea(): void {
+  const installedHost = document.getElementById('domainInstalledList');
+  const catalogHost = document.getElementById('domainCatalog');
+  const all = Domain.allDomainPacks();
+  const installedIds = new Set(Domain.loadInstalledIds());
+  const installed = all.filter(p => installedIds.has(p.id));
+  const available = all.filter(p => !installedIds.has(p.id));
+  if (installedHost) {
+    installedHost.innerHTML = installed.length
+      ? `<div class="domain-grid">${installed.map(p => domainCardHtml(p, true)).join('')}</div>`
+      : `<div class="domain-empty"><b>No domain Vials installed.</b><br>Install a workspace to get a protocol, a log, safety limits, and the questions the array cannot answer. <button class="text-link" type="button" data-vials-tab-go="aromatory">Open the Aromatory →</button></div>`;
+  }
+  if (catalogHost) {
+    catalogHost.innerHTML = `
+      <div class="vials-section-head" style="margin-top:0"><span>Domain packs</span><span class="domain-catalog-actions"><button class="mini-btn" type="button" data-domain-import>Import .vial.json</button><button class="mini-btn" type="button" data-domain-url>Install from URL</button><button class="mini-btn" type="button" data-domain-template>Starter template</button><button class="mini-btn" type="button" data-guide-open="authoring">Authoring</button><span class="coord-tag">${available.length} available</span></span></div>
+      <div class="domain-grid">
+        ${available.length ? available.map(p => domainCardHtml(p, false)).join('') : '<div class="domain-empty">Everything in the Aromatory is installed. Import a community Vial or start from the template to add another.</div>'}
+      </div>`;
+  }
+}
+
+const DOMAIN_SECTION_LABEL: Record<string, string> = {
+  hero: 'Overview', risk: 'Risk', metrics: 'Claims', detector: 'Detector', diagram: 'Diagram', timeline: 'Rhythm',
+  tracking: 'Log', chart: 'Trend', rules: 'Stop rules', checklist: 'Checklist', docs: 'Field notes', rig: 'Rig',
+};
+const DOMAIN_JUMP_ORDER = ['hero', 'risk', 'metrics', 'detector', 'tracking', 'chart', 'diagram', 'timeline', 'rules', 'checklist', 'docs', 'rig'];
+const DOMAIN_TOP_TYPES = new Set(['hero', 'risk', 'metrics']);
+const DOMAIN_LEFT_TYPES = new Set(['detector', 'tracking', 'chart']);
+const DOMAIN_RIGHT_TYPES = new Set(['diagram', 'timeline', 'rules', 'checklist', 'docs']);
+
+function domainSectionHtml(w: Domain.DomainWidget, pack: Domain.DomainPack, state: Domain.DomainState): string {
+  return `<section class="domain-section domain-section--${w.type}" id="domainSection_${w.type}" data-domain-section="${w.type}">${domainWidgetHtml(w, pack, state)}</section>`;
+}
+
+function updateDomainJumpActive(): void {
+  const workspace = document.getElementById('domainWorkspace');
+  const jumpBar = document.getElementById('domainJumpBar');
+  if (!workspace || !jumpBar) return;
+  const workspaceTop = workspace.getBoundingClientRect().top;
+  const sections = [...workspace.querySelectorAll<HTMLElement>('[data-domain-section]')];
+  let active = sections[0]?.dataset.domainSection || '';
+  for (const section of sections) {
+    if (section.getBoundingClientRect().top - workspaceTop <= 128) active = section.dataset.domainSection || active;
+  }
+  jumpBar.querySelectorAll<HTMLElement>('.domain-jump').forEach(button => {
+    button.classList.toggle('active', button.dataset.domainJump === active);
+  });
+}
+
+function renderDomainWorkspace(pack: Domain.DomainPack): void {
+  const body = document.getElementById('domainWorkspaceBody');
+  const meta = document.getElementById('domainWorkspaceMeta');
+  const jumpBar = document.getElementById('domainJumpBar');
+  const state = activeDomainState || Domain.loadDomainState(pack.id);
+  activeDomainState = state;
+  const origin = pack.tier === 'official' ? 'Official' : 'Community';
+  if (meta) meta.innerHTML = `${escapeHtmlText(origin)} · v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.license)} · ${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}${escapeHtmlText(domainSourceLabel(pack))} · log local-only <button class="text-link" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export manifest</button> <button class="text-link" type="button" data-guide-open="domain">Policy gate</button>`;
+  const present = new Set<string>(pack.widgets.map(w => w.type));
+  if (jumpBar) {
+    jumpBar.innerHTML = DOMAIN_JUMP_ORDER
+      .filter(type => present.has(type))
+      .map((type, index) => `<button class="domain-jump" type="button" data-domain-jump="${type}"><span>${String(index + 1).padStart(2, '0')}</span>${escapeHtmlText(DOMAIN_SECTION_LABEL[type] || type)}</button>`)
+      .join('');
+    jumpBar.scrollLeft = 0;
+  }
+  if (!body) return;
+  const top = pack.widgets.filter(w => DOMAIN_TOP_TYPES.has(w.type));
+  const left = pack.widgets.filter(w => DOMAIN_LEFT_TYPES.has(w.type));
+  const right = pack.widgets.filter(w => DOMAIN_RIGHT_TYPES.has(w.type));
+  const bottom = pack.widgets.filter(w => !DOMAIN_TOP_TYPES.has(w.type) && !DOMAIN_LEFT_TYPES.has(w.type) && !DOMAIN_RIGHT_TYPES.has(w.type));
+  body.innerHTML = `
+    ${top.length ? `<div class="domain-full">${top.map(w => domainSectionHtml(w, pack, state)).join('')}</div>` : ''}
+    ${left.length || right.length ? `<div class="domain-columns"><div class="domain-col">${left.map(w => domainSectionHtml(w, pack, state)).join('')}</div><div class="domain-col">${right.map(w => domainSectionHtml(w, pack, state)).join('')}</div></div>` : ''}
+    ${bottom.length ? `<div class="domain-full">${bottom.map(w => domainSectionHtml(w, pack, state)).join('')}</div>` : ''}`;
+  window.requestAnimationFrame(updateDomainJumpActive);
+}
+
+function openDomainWorkspace(id: string): void {
+  const pack = Domain.domainPackById(id);
+  if (!pack) return;
+  activeDomainPackId = id;
+  activeDomainState = Domain.loadDomainState(id);
+  activeDomainHotspot = null;
+  const main = document.getElementById('vialsMain');
+  const ws = document.getElementById('domainWorkspace');
+  if (main) main.style.display = 'none';
+  if (ws) ws.style.display = 'flex';
+  renderDomainWorkspace(pack);
+  if (ws) ws.scrollTop = 0;
+}
+
+function closeDomainWorkspace(): void {
+  const main = document.getElementById('vialsMain');
+  const ws = document.getElementById('domainWorkspace');
+  if (ws) ws.style.display = 'none';
+  if (main) main.style.display = '';
+  activeDomainPackId = null;
+  activeDomainState = null;
+  activeDomainHotspot = null;
+  renderVials();
+}
+
+function installDomainVial(id: string): void {
+  const pack = Domain.domainPackById(id);
+  if (!pack) return;
+  Domain.installDomainPack(id);
+  renderVials();
+  openDomainWorkspace(id);
+  showToast(`Installed ${pack.name}. Your log stays on this machine.`);
+}
+
+function openDomainDocs(id: string): void {
+  openDomainWorkspace(id);
+  window.setTimeout(() => document.getElementById('domainDocs')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
+}
+
+function armOrRemoveDomainVial(id: string, button: HTMLButtonElement): void {
+  if (domainRemoveArm?.id === id) {
+    window.clearTimeout(domainRemoveArm.timer);
+    domainRemoveArm = null;
+    Domain.uninstallDomainPack(id);
+    if (activeDomainPackId === id) closeDomainWorkspace();
+    else renderVials();
+    showToast('Domain Vial removed. Its local log is kept until you clear site data.');
+    return;
+  }
+  if (domainRemoveArm) {
+    window.clearTimeout(domainRemoveArm.timer);
+    domainRemoveArm.button.textContent = 'Remove';
+  }
+  button.textContent = 'Confirm';
+  const timer = window.setTimeout(() => {
+    if (domainRemoveArm?.id === id) {
+      domainRemoveArm = null;
+      button.textContent = 'Remove';
+    }
+  }, 2500);
+  domainRemoveArm = { id, timer, button };
+}
+
+function armOrDeleteDomainPack(id: string, button: HTMLButtonElement): void {
+  if (domainPackDeleteArm?.id === id) {
+    window.clearTimeout(domainPackDeleteArm.timer);
+    domainPackDeleteArm = null;
+    Domain.uninstallDomainPack(id);
+    Domain.deleteCustomPack(id);
+    Domain.deleteDomainState(id);
+    if (activeDomainPackId === id) closeDomainWorkspace();
+    else renderVials();
+    showToast('Community domain Vial deleted, including its local log.');
+    return;
+  }
+  if (domainPackDeleteArm) {
+    window.clearTimeout(domainPackDeleteArm.timer);
+    domainPackDeleteArm.button.textContent = 'Delete';
+  }
+  button.textContent = 'Confirm';
+  const timer = window.setTimeout(() => {
+    if (domainPackDeleteArm?.id === id) {
+      domainPackDeleteArm = null;
+      button.textContent = 'Delete';
+    }
+  }, 2500);
+  domainPackDeleteArm = { id, timer, button };
+}
+
+function selectDomainHotspot(id: string): void {
+  const pack = activeDomainPackId ? Domain.domainPackById(activeDomainPackId) : null;
+  if (!pack) return;
+  activeDomainHotspot = id;
+  document.querySelectorAll<HTMLElement>('#domainWorkspaceBody .domain-hotspot').forEach(el => {
+    el.classList.toggle('active', el.dataset.domainHotspot === id);
+  });
+  const info = document.getElementById('domainHotspotInfo');
+  if (info) info.innerHTML = domainHotspotInfo(pack, id);
+}
+
+function addDomainLogFromForm(): void {
+  if (!activeDomainState || !activeDomainPackId) return;
+  const fields = [...document.querySelectorAll<HTMLInputElement | HTMLSelectElement>('#domainWorkspaceBody [data-domain-log-field]')];
+  const values: Record<string, string> = {};
+  for (const field of fields) {
+    const key = field.dataset.domainLogField;
+    if (key && field.value.trim()) values[key] = field.value.trim();
+  }
+  if (!Object.keys(values).length) {
+    showToast('Add at least one value to the reading.');
+    return;
+  }
+  activeDomainState = Domain.addDomainLog(activeDomainState, values);
+  Domain.saveDomainState(activeDomainState);
+  const pack = Domain.domainPackById(activeDomainPackId);
+  if (pack) renderDomainWorkspace(pack);
+  showToast('Reading added to the local log.');
+}
+
+function openDomainCheck(): void {
+  closeDomainWorkspace();
+  (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+  (document.querySelector('.src-subnav-btn[data-src="check"]') as HTMLElement | null)?.click();
+}
+
+function openDomainDashboard(): void {
+  closeDomainWorkspace();
+  (document.querySelector('.tab-btn[data-tab="dashboard"]') as HTMLElement | null)?.click();
+}
+
+// === Field guide + command palette ===
+let activeGuideId = GUIDE_SECTIONS[0]?.id || 'start';
+let guideQuery = '';
+
+function openGuide(id?: string): void {
+  if (id && guideSection(id)) activeGuideId = id;
+  const overlay = document.getElementById('guideOverlay');
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  guideQuery = '';
+  const search = document.getElementById('guideSearch') as HTMLInputElement | null;
+  if (search) search.value = '';
+  renderGuide();
+}
+
+function closeGuide(): void {
+  const overlay = document.getElementById('guideOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function filteredGuideSections(): typeof GUIDE_SECTIONS {
+  const q = guideQuery.trim().toLowerCase();
+  if (!q) return GUIDE_SECTIONS;
+  return GUIDE_SECTIONS.filter(section => {
+    const haystack = [section.title, section.summary, ...section.paragraphs, ...(section.bullets || [])].join(' ').toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+function renderGuide(): void {
+  const sections = filteredGuideSections();
+  const nav = document.getElementById('guideNav');
+  const content = document.getElementById('guideContent');
+  const count = document.getElementById('guideCount');
+  if (count) count.textContent = `${sections.length} section${sections.length === 1 ? '' : 's'}`;
+  if (!sections.some(s => s.id === activeGuideId) && sections[0]) activeGuideId = sections[0].id;
+  if (nav) {
+    const groups: Array<{ group: string; items: typeof GUIDE_SECTIONS }> = [];
+    for (const section of sections) {
+      let group = groups.find(g => g.group === section.group);
+      if (!group) { group = { group: section.group, items: [] }; groups.push(group); }
+      group.items.push(section);
+    }
+    nav.innerHTML = groups.length
+      ? groups.map(group => `<div class="guide-nav-group">${escapeHtmlText(group.group)}</div>${group.items.map(section => `<button class="guide-nav-btn ${section.id === activeGuideId ? 'active' : ''}" type="button" data-guide-id="${escapeHtmlText(section.id)}">${escapeHtmlText(section.title)}</button>`).join('')}`).join('')
+      : '<div class="guide-empty">No section matches that search.</div>';
+  }
+  if (!content) return;
+  const section = guideSection(activeGuideId);
+  if (!section) {
+    content.innerHTML = '<div class="guide-empty">No section selected.</div>';
+    return;
+  }
+  content.innerHTML = `<div class="coord-tag">${escapeHtmlText(section.group)} · ${escapeHtmlText(section.id)}</div>
+    <h2>${escapeHtmlText(section.title)}</h2>
+    <p class="guide-summary">${escapeHtmlText(section.summary)}</p>
+    ${section.paragraphs.map(p => `<p class="guide-p">${escapeHtmlText(p)}</p>`).join('')}
+    ${section.bullets?.length ? `<ul class="guide-list">${section.bullets.map(b => `<li>${escapeHtmlText(b)}</li>`).join('')}</ul>` : ''}`;
+}
+
+function activateTab(tab: string): void {
+  (document.querySelector(`.tab-btn[data-tab="${tab}"]`) as HTMLElement | null)?.click();
+}
+
+function activateSmellsView(src: string): void {
+  showWorkspaceView(src);
+}
+
+interface CommandAction {
+  id: string;
+  group: string;
+  title: string;
+  hint: string;
+  run: () => void;
+}
+
+const COMMANDS: CommandAction[] = [
+  { id: 'dashboard', group: 'Go', title: 'Home', hint: 'live rig', run: () => activateTab('dashboard') },
+  { id: 'gallery', group: 'Go', title: 'Explore → Gallery', hint: 'browse fingerprints', run: () => activateSmellsView('smells') },
+  { id: 'check', group: 'Go', title: 'Decide → Check', hint: 'can this array tell two smells apart?', run: () => activateSmellsView('check') },
+  { id: 'compare', group: 'Go', title: 'Decide → Compare', hint: 'overlay saved recordings', run: () => activateSmellsView('compare') },
+  { id: 'vials', group: 'Go', title: 'Vials', hint: 'domain workspaces + decisions', run: () => activateSmellsView('vials') },
+  { id: 'aromatory', group: 'Go', title: 'Vials → Aromatory', hint: 'install a domain Vial', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); window.setTimeout(() => document.getElementById('domainCatalog')?.scrollIntoView({ block: 'start' }), 80); } },
+  { id: 'sessions', group: 'Go', title: 'Data → Recordings', hint: 'import + inspect sessions', run: () => activateSmellsView('sessions') },
+  { id: 'datasets', group: 'Go', title: 'Data → Datasets', hint: 'public data', run: () => activateSmellsView('datasets') },
+  { id: 'train', group: 'Go', title: 'Train', hint: 'teach this array', run: () => activateTab('train') },
+  { id: 'fleet', group: 'Go', title: 'Rig → Fleet', hint: 'multiple rigs', run: () => activateSmellsView('fleet') },
+  { id: 'system', group: 'Go', title: 'Rig → System', hint: 'hardware + release', run: () => activateSmellsView('system') },
+  { id: 'install-fermentation', group: 'Vials', title: 'Install Fermentation Lab', hint: 'official · high risk', run: () => installDomainVial('official.fermentation') },
+  { id: 'install-plant', group: 'Vials', title: 'Install Plant Respiration', hint: 'official · medium risk', run: () => installDomainVial('official.plant') },
+  { id: 'install-anomaly', group: 'Vials', title: 'Install Anomaly Watch', hint: 'official · same-device change watch', run: () => installDomainVial('official.anomaly-watch') },
+  { id: 'import-domain', group: 'Vials', title: 'Import a domain Vial', hint: '.vial.json', run: () => (document.getElementById('domainImportFile') as HTMLInputElement | null)?.click() },
+  { id: 'install-domain-url', group: 'Vials', title: 'Install a domain Vial from URL', hint: 'raw GitHub manifest', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); showDomainUrlBar(); } },
+  { id: 'template', group: 'Vials', title: 'Download starter domain Vial', hint: 'authoring template', run: () => downloadDomainTemplate() },
+  { id: 'guide-start', group: 'Guide', title: 'Field guide: Start here', hint: 'scope', run: () => openGuide('start') },
+  { id: 'guide-check', group: 'Guide', title: 'Field guide: How Check works', hint: 'method', run: () => openGuide('check') },
+  { id: 'guide-vials', group: 'Guide', title: 'Field guide: Vial validation', hint: 'seals + limits', run: () => openGuide('vials') },
+  { id: 'guide-domain', group: 'Guide', title: 'Field guide: Domain Vials', hint: 'policy + limits', run: () => openGuide('domain') },
+  { id: 'guide-authoring', group: 'Guide', title: 'Field guide: Authoring a domain Vial', hint: 'schema + gate', run: () => openGuide('authoring') },
+  { id: 'guide-data', group: 'Guide', title: 'Field guide: Data provenance', hint: 'licences', run: () => openGuide('data') },
+  { id: 'guide-limits', group: 'Guide', title: 'Field guide: Known limits', hint: 'refusals', run: () => openGuide('limits') },
+];
+
+let commandActive = 0;
+let commandResults = COMMANDS;
+
+function openCommandPalette(): void {
+  const overlay = document.getElementById('commandOverlay');
+  const input = document.getElementById('commandInput') as HTMLInputElement | null;
+  if (!overlay) return;
+  overlay.style.display = 'flex';
+  commandActive = 0;
+  if (input) { input.value = ''; window.setTimeout(() => input.focus(), 20); }
+  renderCommands('');
+}
+
+function closeCommandPalette(): void {
+  const overlay = document.getElementById('commandOverlay');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function renderCommands(query: string): void {
+  const q = query.trim().toLowerCase();
+  commandResults = COMMANDS.filter(c => [c.title, c.hint, c.group].join(' ').toLowerCase().includes(q));
+  commandActive = Math.min(commandActive, Math.max(0, commandResults.length - 1));
+  const list = document.getElementById('commandList');
+  if (!list) return;
+  list.innerHTML = commandResults.length
+    ? commandResults.map((c, i) => `<button class="command-item ${i === commandActive ? 'active' : ''}" type="button" data-command-id="${escapeHtmlText(c.id)}"><span class="cmd-group">${escapeHtmlText(c.group)}</span><span class="cmd-title">${escapeHtmlText(c.title)}</span><span class="cmd-hint">${escapeHtmlText(c.hint)}</span></button>`).join('')
+    : '<div class="guide-empty">No command matches that.</div>';
+}
+
+function runCommand(id: string): void {
+  const command = COMMANDS.find(c => c.id === id);
+  if (!command) return;
+  closeCommandPalette();
+  command.run();
+}
+
+document.getElementById('guideBtn')?.addEventListener('click', () => openGuide());
+document.getElementById('guideClose')?.addEventListener('click', closeGuide);
+document.getElementById('guideSearch')?.addEventListener('input', (ev) => {
+  guideQuery = (ev.target as HTMLInputElement).value;
+  renderGuide();
+});
+document.getElementById('guideNav')?.addEventListener('click', (ev) => {
+  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-guide-id]');
+  if (!target?.dataset.guideId) return;
+  activeGuideId = target.dataset.guideId;
+  renderGuide();
+});
+document.querySelectorAll('[data-guide-close]').forEach(el => el.addEventListener('click', closeGuide));
+document.addEventListener('click', (ev) => {
+  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-guide-open]');
+  if (target?.dataset.guideOpen) openGuide(target.dataset.guideOpen);
+});
+document.getElementById('commandBtn')?.addEventListener('click', openCommandPalette);
+document.querySelectorAll('[data-command-close]').forEach(el => el.addEventListener('click', closeCommandPalette));
+document.getElementById('commandInput')?.addEventListener('input', (ev) => {
+  commandActive = 0;
+  renderCommands((ev.target as HTMLInputElement).value);
+});
+document.getElementById('commandList')?.addEventListener('click', (ev) => {
+  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-command-id]');
+  if (target?.dataset.commandId) runCommand(target.dataset.commandId);
+});
+document.addEventListener('keydown', (ev) => {
+  const commandOverlay = document.getElementById('commandOverlay');
+  const commandOpen = commandOverlay?.style.display !== 'none';
+  if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') {
+    ev.preventDefault();
+    if (commandOpen) closeCommandPalette();
+    else openCommandPalette();
+    return;
+  }
+  if (ev.key === 'Escape') {
+    closeCommandPalette();
+    closeGuide();
+    return;
+  }
+  if (!commandOpen) return;
+  if (ev.key === 'ArrowDown') {
+    ev.preventDefault();
+    commandActive = Math.min(commandActive + 1, Math.max(0, commandResults.length - 1));
+    renderCommands((document.getElementById('commandInput') as HTMLInputElement | null)?.value || '');
+  } else if (ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    commandActive = Math.max(0, commandActive - 1);
+    renderCommands((document.getElementById('commandInput') as HTMLInputElement | null)?.value || '');
+  } else if (ev.key === 'Enter') {
+    ev.preventDefault();
+    const command = commandResults[commandActive];
+    if (command) runCommand(command.id);
+  }
+});
+
+document.getElementById('domainBack')?.addEventListener('click', closeDomainWorkspace);
+document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
+  const target = ev.target as HTMLElement;
+  const tab = target.closest<HTMLElement>('[data-vials-tab]');
+  if (tab?.dataset.vialsTab) { setVialsTab(tab.dataset.vialsTab); return; }
+  const tabGo = target.closest<HTMLElement>('[data-vials-tab-go]');
+  if (tabGo?.dataset.vialsTabGo) { setVialsTab(tabGo.dataset.vialsTabGo); return; }
+  const install = target.closest<HTMLElement>('[data-domain-install]');
+  if (install?.dataset.domainInstall) { installDomainVial(install.dataset.domainInstall); return; }
+  const open = target.closest<HTMLElement>('[data-domain-open]');
+  if (open?.dataset.domainOpen) { openDomainWorkspace(open.dataset.domainOpen); return; }
+  const docs = target.closest<HTMLElement>('[data-domain-docs]');
+  if (docs?.dataset.domainDocs) { openDomainDocs(docs.dataset.domainDocs); return; }
+  const exp = target.closest<HTMLElement>('[data-domain-export]');
+  if (exp?.dataset.domainExport) { exportDomainPack(exp.dataset.domainExport); return; }
+  if (target.closest('[data-domain-import]')) {
+    (document.getElementById('domainImportFile') as HTMLInputElement | null)?.click();
+    return;
+  }
+  if (target.closest('[data-domain-url]')) { showDomainUrlBar(); return; }
+  if (target.closest('[data-domain-template]')) { downloadDomainTemplate(); return; }
+  const del = target.closest<HTMLButtonElement>('[data-domain-delete]');
+  if (del?.dataset.domainDelete) { armOrDeleteDomainPack(del.dataset.domainDelete, del); return; }
+  const remove = target.closest<HTMLButtonElement>('[data-domain-remove]');
+  if (remove?.dataset.domainRemove) armOrRemoveDomainVial(remove.dataset.domainRemove, remove);
+});
+document.getElementById('domainWorkspace')?.addEventListener('click', (ev) => {
+  const target = ev.target as HTMLElement;
+  const jump = target.closest<HTMLElement>('[data-domain-jump]');
+  if (jump?.dataset.domainJump) {
+    document.getElementById(`domainSection_${jump.dataset.domainJump}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    return;
+  }
+  const exp = target.closest<HTMLElement>('[data-domain-export]');
+  if (exp?.dataset.domainExport) exportDomainPack(exp.dataset.domainExport);
+  const guide = target.closest<HTMLElement>('[data-guide-open]');
+  if (guide?.dataset.guideOpen) openGuide(guide.dataset.guideOpen);
+});
+let domainJumpRaf = 0;
+document.getElementById('domainWorkspace')?.addEventListener('scroll', () => {
+  if (domainJumpRaf) return;
+  domainJumpRaf = window.requestAnimationFrame(() => {
+    domainJumpRaf = 0;
+    updateDomainJumpActive();
+  });
+});
+document.getElementById('domainImportFile')?.addEventListener('change', (ev) => {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file) importDomainPackFile(file);
+  input.value = '';
+});
+document.getElementById('domainUrlCancel')?.addEventListener('click', hideDomainUrlBar);
+document.getElementById('domainUrlInstall')?.addEventListener('click', () => {
+  const input = document.getElementById('domainUrlInput') as HTMLInputElement | null;
+  void installDomainFromUrl(input?.value || '');
+});
+document.getElementById('domainUrlInput')?.addEventListener('keydown', (ev) => {
+  if ((ev as KeyboardEvent).key === 'Enter') {
+    ev.preventDefault();
+    const input = ev.target as HTMLInputElement;
+    void installDomainFromUrl(input.value);
+  }
+});
+document.getElementById('domainWorkspaceBody')?.addEventListener('click', (ev) => {
+  const target = ev.target as HTMLElement;
+  const hotspot = target.closest<HTMLElement>('[data-domain-hotspot]');
+  if (hotspot?.dataset.domainHotspot) { selectDomainHotspot(hotspot.dataset.domainHotspot); return; }
+  if (target.closest('[data-domain-log-add]')) { addDomainLogFromForm(); return; }
+  const del = target.closest<HTMLElement>('[data-domain-log-del]');
+  if (del?.dataset.domainLogDel && activeDomainState) {
+    activeDomainState = Domain.removeDomainLog(activeDomainState, del.dataset.domainLogDel);
+    Domain.saveDomainState(activeDomainState);
+    const pack = activeDomainPackId ? Domain.domainPackById(activeDomainPackId) : null;
+    if (pack) renderDomainWorkspace(pack);
+    return;
+  }
+  if (target.closest('[data-domain-dashboard]')) { openDomainDashboard(); return; }
+  if (target.closest('[data-domain-rig]')) openDomainCheck();
+});
+document.getElementById('domainWorkspaceBody')?.addEventListener('input', (ev) => {
+  const target = ev.target as HTMLInputElement;
+  const field = target.closest<HTMLInputElement>('[data-domain-field]');
+  if (field?.dataset.domainField && activeDomainState) {
+    activeDomainState.fields[field.dataset.domainField] = target.value;
+    Domain.saveDomainState(activeDomainState);
+    return;
+  }
+  if (target.matches('[data-domain-check]') && activeDomainState) {
+    activeDomainState.checks[target.dataset.domainCheck || ''] = target.checked;
+    Domain.saveDomainState(activeDomainState);
+  }
+});
+document.getElementById('domainWorkspaceBody')?.addEventListener('change', (ev) => {
+  const target = ev.target as HTMLInputElement;
+  const field = target.closest<HTMLInputElement>('[data-domain-field]');
+  if (field?.dataset.domainField && activeDomainState) {
+    activeDomainState.fields[field.dataset.domainField] = target.value;
+    Domain.saveDomainState(activeDomainState);
+  }
+  if (target.matches('[data-domain-check]') && activeDomainState) {
+    activeDomainState.checks[target.dataset.domainCheck || ''] = target.checked;
+    Domain.saveDomainState(activeDomainState);
+  }
+});
+
+function vialCardHtml(v: Vial.VialManifest): string {
+  const status = vialStatusOf(v);
+  const c = v.claim;
+  const passed = v.validation ? v.validation.checks.filter(x => x.passed).length : 0;
+  const total = v.validation ? v.validation.checks.length : 0;
+  return `<div class="vial-card ${status}">
+    <div class="vial-card-head">
+      <div style="min-width:0">
+        <div class="vial-card-name">${escapeHtmlText(v.name)}</div>
+        <div class="vial-card-sub">v${escapeHtmlText(v.version)} · ${escapeHtmlText(v.author)} · ${escapeHtmlText(v.domain)}</div>
+      </div>
+      <span class="vial-status ${status}">${vialStatusLabel(status)}</span>
+    </div>
+    <div class="vial-question">${escapeHtmlText(c.question)}</div>
+    <div class="vial-stats">
+      <div class="vial-stat"><b>${escapeHtmlText(SEP_VERDICT_LABEL[c.verdict] || c.verdict)}</b><span>verdict</span></div>
+      <div class="vial-stat"><b>${vialCorrect(c)}</b><span>left out</span></div>
+      <div class="vial-stat"><b>${vialLower(c)}</b><span>95% lower</span></div>
+    </div>
+    <div class="vial-card-meta">
+      ${escapeHtmlText(vialP(c))} · ${c.nRef} vs ${c.nSample} replicates · ${c.channels.length} channels · ${escapeHtmlText(v.source)}<br>
+      ${v.validation ? `${passed}/${total} validation checks · ` : 'Not validated · '}${v.usage.uses} use${v.usage.uses === 1 ? '' : 's'}
+    </div>
+    <div class="vial-card-actions">
+      <button class="mini-btn primary" type="button" data-vial-action="use" data-vial-id="${escapeHtmlText(v.id)}">Use</button>
+      <button class="mini-btn" type="button" data-vial-action="inspect" data-vial-id="${escapeHtmlText(v.id)}">Inspect</button>
+      <button class="mini-btn" type="button" data-vial-action="validate" data-vial-id="${escapeHtmlText(v.id)}">${v.validation ? 'Revalidate' : 'Validate'}</button>
+      <button class="mini-btn" type="button" data-vial-action="export" data-vial-id="${escapeHtmlText(v.id)}">Export</button>
+      <button class="mini-btn" type="button" data-vial-action="delete" data-vial-id="${escapeHtmlText(v.id)}">Delete</button>
+    </div>
+  </div>`;
+}
+
+let activeVialsTab: 'workspaces' | 'decisions' | 'aromatory' = 'workspaces';
+
+function syncVialsTabs(): void {
+  const panes: Record<string, string> = {
+    workspaces: 'vialsWorkspacesPane',
+    decisions: 'vialsDecisionsPane',
+    aromatory: 'vialsAromatoryPane',
+  };
+  for (const [tab, id] of Object.entries(panes)) {
+    const pane = document.getElementById(id);
+    if (pane) pane.style.display = tab === activeVialsTab ? 'flex' : 'none';
+  }
+  document.querySelectorAll<HTMLElement>('[data-vials-tab]').forEach(button => {
+    button.classList.toggle('active', button.dataset.vialsTab === activeVialsTab);
+  });
+}
+
+function setVialsTab(tab: string): void {
+  if (tab !== 'workspaces' && tab !== 'decisions' && tab !== 'aromatory') return;
+  activeVialsTab = tab;
+  syncVialsTabs();
+}
+
+function renderVials(): void {
+  const list = document.getElementById('vialsList');
+  const summary = document.getElementById('vialsSummary');
+  if (!list) return;
+  const vials = Vial.loadVials();
+  const sealed = vials.filter(v => vialStatusOf(v) === 'sealed').length;
+  const uses = vials.reduce((n, v) => n + (v.usage?.uses || 0), 0);
+  const allDomain = Domain.allDomainPacks();
+  const domainCount = Domain.loadInstalledIds().filter(id => allDomain.some(p => p.id === id)).length;
+  if (summary) summary.textContent = `${domainCount} domain · ${vials.length} decision${vials.length === 1 ? '' : 's'} · ${sealed} sealed · ${uses} use${uses === 1 ? '' : 's'}`;
+  const workspaces = document.getElementById('vialsWorkspacesCount');
+  const decisions = document.getElementById('vialsDecisionsCount');
+  const aromatory = document.getElementById('vialsAromatoryCount');
+  const decisionCount = document.getElementById('vialsDecisionCount');
+  if (workspaces) workspaces.textContent = String(domainCount);
+  if (decisions) decisions.textContent = String(vials.length);
+  if (aromatory) aromatory.textContent = String(allDomain.length);
+  if (decisionCount) decisionCount.textContent = String(vials.length);
+  renderDomainArea();
+  syncVialsTabs();
+  if (!vials.length) {
+    list.innerHTML = `<div class="vial-empty">
+      <b>No decision Vials yet.</b>
+      <p>A check answers a question once. A decision Vial packages that answer — claim, evidence, array, limits, method — so you can use it again, give it to someone, or sell it. Start from a saved check.</p>
+      <button class="mini-btn primary" type="button" data-vial-action="new">Package a check</button>
+    </div>`;
+    return;
+  }
+  list.innerHTML = vials.map(vialCardHtml).join('');
+}
+
+function openVialDetail(id: string): void {
+  const vial = Vial.loadVials().find(v => v.id === id);
+  if (!vial) return;
+  vialDetailId = id;
+  const modal = document.getElementById('vialDetailModal');
+  const title = document.getElementById('vialDetailTitle');
+  const meta = document.getElementById('vialDetailMeta');
+  const body = document.getElementById('vialDetailBody');
+  if (!modal || !title || !meta || !body) return;
+  const status = vialStatusOf(vial);
+  const c = vial.claim;
+  const recipe = vial.recipe
+    ? `${vial.recipe.name} ${vial.recipe.version} · ${vial.recipe.steps} step(s)`
+    : 'No recipe attached. The check evidence is still inspectable.';
+  title.textContent = vial.name;
+  meta.textContent = `v${vial.version} · ${vial.author} · ${vial.domain} · ${vialStatusLabel(status)}`;
+  body.innerHTML = `
+    ${vial.validation ? vialValidationSummary(vial.validation) : '<div class="vial-validation-summary fail">Not validated. Run the gate before treating this as a decision.</div>'}
+    <div class="vial-detail-section">
+      <h4>Claim</h4>
+      <p>${escapeHtmlText(c.question)}</p>
+      <div class="vial-stats">
+        <div class="vial-stat"><b>${escapeHtmlText(SEP_VERDICT_LABEL[c.verdict] || c.verdict)}</b><span>verdict</span></div>
+        <div class="vial-stat"><b>${vialCorrect(c)}</b><span>left out</span></div>
+        <div class="vial-stat"><b>${vialLower(c)}</b><span>95% lower</span></div>
+      </div>
+      <p class="vial-card-meta">${escapeHtmlText(c.reference)} ↔ ${escapeHtmlText(c.sample)} · ${escapeHtmlText(vialP(c))} · ${c.nRef} vs ${c.nSample} replicates · ${c.channels.length} channels</p>
+    </div>
+    <div class="vial-detail-section"><h4>Array</h4><p>${escapeHtmlText(c.channels.join(' · '))}</p></div>
+    <div class="vial-detail-section"><h4>Evidence</h4><ul>${vial.evidence.map(e => `<li>${escapeHtmlText(e)}</li>`).join('')}</ul></div>
+    <div class="vial-detail-section"><h4>Limits</h4><ul>${vial.limits.map(l => `<li>${escapeHtmlText(l)}</li>`).join('')}</ul></div>
+    <div class="vial-detail-section"><h4>Method</h4><p>${escapeHtmlText(recipe)}</p></div>
+    <div class="vial-detail-section"><h4>Validation gate</h4>${vial.validation ? vialChecksHtml(vial.validation) : '<p>Not run.</p>'}</div>
+    <div class="vial-detail-section"><h4>Usage</h4><p>${vial.usage.uses} use${vial.usage.uses === 1 ? '' : 's'}${vial.usage.lastUsedAt ? ` · last ${new Date(vial.usage.lastUsedAt).toLocaleString()}` : ''}</p></div>
+    <div class="vial-detail-actions">
+      <button class="mini-btn primary" type="button" data-vial-detail-action="use" data-vial-id="${escapeHtmlText(vial.id)}">Use</button>
+      <button class="mini-btn" type="button" data-vial-detail-action="validate" data-vial-id="${escapeHtmlText(vial.id)}">Re-run gate</button>
+      <button class="mini-btn" type="button" data-vial-detail-action="copy" data-vial-id="${escapeHtmlText(vial.id)}">Copy JSON</button>
+      <button class="mini-btn" type="button" data-vial-detail-action="export" data-vial-id="${escapeHtmlText(vial.id)}">Export .vial.json</button>
+      <button class="mini-btn" type="button" data-vial-detail-action="delete" data-vial-id="${escapeHtmlText(vial.id)}">Delete</button>
+    </div>`;
+  modal.style.display = 'flex';
+}
+
+function closeVialDetail(): void {
+  const modal = document.getElementById('vialDetailModal');
+  if (modal) modal.style.display = 'none';
+  vialDetailId = null;
+}
+
+function validateStoredVial(id: string): void {
+  const vial = Vial.loadVials().find(v => v.id === id);
+  if (!vial) return;
+  const next = Vial.applyValidation(vial);
+  Vial.upsertVial(next);
+  renderVials();
+  openVialDetail(id);
+  showToast(next.status === 'sealed'
+    ? 'Vial sealed. Every critical check passes on the stored evidence.'
+    : 'Vial is Open. The stored evidence does not support a sealed decision.');
+}
+
+async function copyVialJson(id: string): Promise<void> {
+  const vial = Vial.loadVials().find(v => v.id === id);
+  if (!vial) return;
+  const text = Vial.vialToJson(vial);
+  try {
+    await navigator.clipboard.writeText(text);
+    showToast('Vial JSON copied. Submit it or hand it to another rig.');
+  } catch {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch { /* no clipboard, no false success */ }
+    ta.remove();
+    showToast('Vial JSON copied.');
+  }
+}
+
+function exportVial(id: string): void {
+  const vial = Vial.loadVials().find(v => v.id === id);
+  if (!vial) return;
+  const blob = new Blob([Vial.vialToJson(vial)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${vial.id}.vial.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('Vial exported. The manifest is the submission unit.');
+}
+
+function downloadTextFile(filename: string, text: string, type = 'application/json'): void {
+  const blob = new Blob([text], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportDomainPack(id: string): void {
+  const pack = Domain.domainPackById(id);
+  if (!pack) return;
+  downloadTextFile(`${pack.id}.vial.json`, Domain.domainPackToJson(pack));
+  showToast('Domain Vial exported. The manifest is the submission unit.');
+}
+
+function starterDomainPack(): Domain.DomainPack {
+  return {
+    schema: 'osmograph.domain-pack/1',
+    id: 'community.my-workspace',
+    name: 'My domain workspace',
+    version: '0.1.0',
+    author: '@your-handle',
+    license: 'CC-BY-4.0',
+    tier: 'community',
+    risk: 'medium',
+    domain: 'custom',
+    tagline: 'A short, honest line about the decision this workspace supports.',
+    summary: 'Explain the narrow, repeated decision this workspace is for, the context it records, and the evidence it refuses to claim.',
+    whatItIs: 'A protocol and a log for a narrow domain task. Replace this with the specific useful thing your workspace helps a person do.',
+    whatItIsNot: 'Not a universal smell identifier, not a concentration meter, not a diagnosis, and not a cross-rig claim. Replace this with the exact refusal that matters in your domain.',
+    citations: [
+      'Replace with a real reference: author, year, title, venue. A citation is not decoration; it is the context for your claims.',
+    ],
+    widgets: [
+      { type: 'hero', art: 'generic', title: 'My domain workspace', subtitle: 'A protocol, a log, and the limits that keep it honest.', note: 'Community domain Vial · host-rendered · no executable code' },
+      { type: 'risk', level: 'medium', headline: 'What this workspace is not allowed to claim.', body: 'Name the decision the user might wrongly make here, and the evidence that would be required to make it.', always: ['Record the context that changes the interpretation.'], never: ['Do not turn a sensor change into a diagnosis.'] },
+      { type: 'metrics', title: 'What this workspace can claim', items: [
+        { label: 'Signal', value: 'Change detection', hint: 'Same array, same sample preparation, against your own baseline.' },
+        { label: 'Not a', value: 'Universal answer', hint: 'State the closed set and the scope.' },
+        { label: 'Primary record', value: 'Context + log', hint: 'The sensor is one column, not the verdict.' },
+      ] },
+      { type: 'detector', title: 'Detector contract', intro: 'If this workspace uses the live anomaly engine, copy this panel and replace the domain-specific actions. Do not invent a second detector.', baseline: 'A fresh clean-air window on this exact array. Verify a quiet baseline before you arm it.', levels: [
+        { level: 0, label: 'Warming up', meaning: 'The baseline is still forming; no alarm is possible.', action: 'Keep the baseline window stable. Do not arm yet.' },
+        { level: 1, label: 'Warning', meaning: 'A sustained change from the baseline.', action: 'Stop and inspect. Verify with the primary measurement.' },
+        { level: 2, label: 'Critical', meaning: 'The change persisted past the critical duration.', action: 'Follow the domain stop rule. Do not treat the alert as an identification.' },
+      ], limits: [
+        'The detector is same-device and same-array only. A baseline from another rig does not transfer.',
+        'A change is not an identity, a concentration, or a safety verdict.',
+      ], evidence: 'State the evidence behind the detector mapping, or remove this panel if the workspace does not use the live anomaly engine.' },
+      { type: 'tracking', title: 'Workspace log', description: 'Replace these fields with the ones a practitioner would actually keep.', fields: [
+        { id: 'batch', label: 'Batch / subject', type: 'text', placeholder: 'Batch 01' },
+        { id: 'started', label: 'Started', type: 'date' },
+      ], logFields: [
+        { id: 'day', label: 'Day / reading', type: 'number', placeholder: '1' },
+        { id: 'note', label: 'Observation', type: 'text', placeholder: 'what changed?' },
+        { id: 'action', label: 'Action', type: 'select', options: ['none', 'inspect', 'discard'] },
+      ], logLabel: 'Add reading' },
+      { type: 'rules', title: 'Decision rules', rules: [
+        { when: 'A reading changes without a context change', then: 'Inspect the sample and the sensor before changing the process.', severity: 'warn' },
+        { when: 'The process is outside its safe range', then: 'Stop and use the primary measurement, not the smell.', severity: 'stop' },
+      ] },
+      { type: 'docs', title: 'Field notes' },
+      { type: 'rig', title: 'Use this with your rig', body: 'Record a clean reference and a sample on the same array, then compare with Check. If the arrays differ, the app refuses the comparison.', cta: 'Open Check' },
+    ],
+    docs: [
+      { id: 'how', title: 'How to use this workspace', body: ['Explain the first action, the reading cadence, and what the log is for.'] },
+      { id: 'limits', title: 'What it cannot tell you', body: ['State the specific overclaim a user might make, and the primary measurement or inspection that replaces it.'] },
+      { id: 'refs', title: 'References', body: ['List the domain references and say that they contextualise the workspace; they do not validate the sensor.'] },
+    ],
+  };
+}
+
+function downloadDomainTemplate(): void {
+  downloadTextFile('my-domain-vial.vial.json', Domain.domainPackToJson(starterDomainPack()));
+  showToast('Starter domain Vial downloaded. Edit the JSON, then import it.');
+}
+
+function importDomainPackText(text: string): void {
+  const result = Domain.importDomainPackJson(text);
+  Domain.installDomainPack(result.pack.id);
+  renderVials();
+  openDomainWorkspace(result.pack.id);
+  const passed = result.validation.checks.filter(c => c.passed).length;
+  showToast(`Community domain Vial installed. ${passed}/${result.validation.checks.length} policy checks passed.`);
+}
+
+function importDomainPackFile(file: File): void {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      importDomainPackText(String(reader.result || ''));
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not import this domain Vial.');
+    }
+  };
+  reader.onerror = () => showToast('Could not read that file.');
+  reader.readAsText(file);
+}
+
+function domainUrlAllowed(url: URL): boolean {
+  if (url.protocol === 'https:') return true;
+  return url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]');
+}
+
+function showDomainUrlBar(): void {
+  const bar = document.getElementById('domainUrlBar');
+  const input = document.getElementById('domainUrlInput') as HTMLInputElement | null;
+  if (!bar) return;
+  bar.hidden = false;
+  if (input) {
+    input.focus();
+    input.select();
+  }
+}
+
+function hideDomainUrlBar(): void {
+  const bar = document.getElementById('domainUrlBar');
+  if (bar) bar.hidden = true;
+}
+
+function setDomainUrlStatus(text: string, state: 'idle' | 'busy' | 'pass' | 'fail' = 'idle'): void {
+  const status = document.getElementById('domainUrlStatus');
+  if (!status) return;
+  status.textContent = text;
+  status.className = `domain-url-status${state === 'idle' ? '' : ` ${state}`}`;
+}
+
+async function installDomainFromUrl(raw: string): Promise<void> {
+  const input = document.getElementById('domainUrlInput') as HTMLInputElement | null;
+  const install = document.getElementById('domainUrlInstall') as HTMLButtonElement | null;
+  const urlText = raw.trim();
+  if (!urlText) {
+    setDomainUrlStatus('Paste the raw URL of a .vial.json manifest.', 'fail');
+    input?.focus();
+    return;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(urlText);
+  } catch {
+    setDomainUrlStatus('That is not a valid URL.', 'fail');
+    input?.focus();
+    return;
+  }
+  if (!domainUrlAllowed(url)) {
+    setDomainUrlStatus('Use https:// for a remote manifest. http://localhost is allowed for development only.', 'fail');
+    input?.focus();
+    return;
+  }
+
+  const previous = install?.textContent || 'Validate & install';
+  if (install) { install.disabled = true; install.textContent = 'Fetching…'; }
+  setDomainUrlStatus(`Fetching ${url.hostname}…`, 'busy');
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 20000);
+
+  try {
+    const response = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`The server returned HTTP ${response.status}.`);
+    }
+    const finalUrl = new URL(response.url);
+    if (!domainUrlAllowed(finalUrl)) {
+      throw new Error('The download redirected away from HTTPS. Refusing to install it.');
+    }
+    const text = await response.text();
+    if (text.length > 1_500_000) {
+      throw new Error('That manifest is larger than 1.5 MB. Refusing to install it.');
+    }
+    setDomainUrlStatus('Fetched. Running the local policy gate…', 'busy');
+    const result = Domain.importDomainPackJson(text, finalUrl.toString());
+    Domain.installDomainPack(result.pack.id);
+    hideDomainUrlBar();
+    if (input) input.value = '';
+    renderVials();
+    openDomainWorkspace(result.pack.id);
+    const passed = result.validation.checks.filter(c => c.passed).length;
+    setDomainUrlStatus('', 'idle');
+    showToast(`Installed from ${finalUrl.hostname}. ${passed}/${result.validation.checks.length} policy checks passed.`);
+  } catch (err) {
+    const message = err instanceof Error && err.name === 'AbortError'
+      ? 'The download timed out after 20 seconds.'
+      : err instanceof Error ? err.message : 'Could not install that manifest.';
+    setDomainUrlStatus(message, 'fail');
+    showToast(message);
+  } finally {
+    window.clearTimeout(timeout);
+    if (install) { install.disabled = false; install.textContent = previous; }
+  }
+}
+
+function armOrDeleteVial(id: string, button: HTMLButtonElement): void {
+  if (vialDeleteArm?.id === id) {
+    window.clearTimeout(vialDeleteArm.timer);
+    vialDeleteArm = null;
+    Vial.deleteVial(id);
+    renderVials();
+    closeVialDetail();
+    showToast('Vial deleted.');
+    return;
+  }
+  if (vialDeleteArm) {
+    window.clearTimeout(vialDeleteArm.timer);
+    vialDeleteArm.button.textContent = 'Delete';
+  }
+  button.textContent = 'Confirm';
+  button.title = 'Click again to delete this Vial';
+  const timer = window.setTimeout(() => {
+    if (vialDeleteArm?.id === id) {
+      vialDeleteArm = null;
+      button.textContent = 'Delete';
+      button.title = '';
+    }
+  }, 2500);
+  vialDeleteArm = { id, timer, button };
+}
+
+function openVialUse(id: string): void {
+  const vial = Vial.loadVials().find(v => v.id === id);
+  if (!vial) return;
+  const ref = smellCards.find(c => c.key === vial.claim.referenceKey);
+  if (!ref) {
+    showToast('The Vial’s reference smell is no longer in the library.');
+    return;
+  }
+  const candidates = smellCards.filter(c => c.key !== ref.key);
+  if (!candidates.length) {
+    showToast('Add a second smell on this array before using the Vial.');
+    return;
+  }
+  const modal = document.getElementById('vialUseModal');
+  const intro = document.getElementById('vialUseIntro');
+  const select = document.getElementById('vialUseSample') as HTMLSelectElement | null;
+  const result = document.getElementById('vialUseResult');
+  if (!modal || !intro || !select || !result) return;
+  vialUseId = id;
+  intro.textContent = `${vial.name} · reference ${vial.claim.reference} · ${vialStatusLabel(vialStatusOf(vial))}${vial.status === 'sealed' ? '' : ' — exploratory only, not a sealed decision'}`;
+  select.innerHTML = candidates
+    .map(c => `<option value="${escapeHtmlText(c.key)}">${escapeHtmlText(titleCase(c.substance))}</option>`)
+    .join('');
+  const preferred = candidates.find(c => c.key === vial.claim.sampleKey);
+  if (preferred) select.value = preferred.key;
+  result.innerHTML = `<div class="vial-validation-summary ${vialStatusOf(vial) === 'sealed' ? 'pass' : 'fail'}">
+    ${vialStatusOf(vial) === 'sealed'
+      ? 'Sealed Vial. The result below is a check on this sample, not a guarantee about a different rig.'
+      : 'Open Vial. This is an exploratory check; do not treat it as a validated decision.'}
+  </div>`;
+  modal.style.display = 'flex';
+}
+
+function closeVialUse(): void {
+  const modal = document.getElementById('vialUseModal');
+  if (modal) modal.style.display = 'none';
+  vialUseId = null;
+}
+
+async function runVialUse(): Promise<void> {
+  const vial = vialUseId ? Vial.loadVials().find(v => v.id === vialUseId) : null;
+  if (!vial) return;
+  const ref = smellCards.find(c => c.key === vial.claim.referenceKey);
+  const select = document.getElementById('vialUseSample') as HTMLSelectElement | null;
+  const sample = select ? smellCards.find(c => c.key === select.value) : null;
+  const result = document.getElementById('vialUseResult');
+  const run = document.getElementById('vialUseRun') as HTMLButtonElement | null;
+  if (!ref || !sample || !result) {
+    showToast('Pick a sample smell from the library.');
+    return;
+  }
+  if (sample.key === ref.key) {
+    showToast('Pick a smell other than the reference.');
+    return;
+  }
+  if (run) run.disabled = true;
+  result.innerHTML = '<div class="vial-validation-summary fail">Reading replicates…</div>';
+  try {
+    const [ra, rb] = await Promise.all([smellReplicates(ref), smellReplicates(sample)]);
+    if (!ra || !rb) {
+      result.innerHTML = '<div class="vial-validation-summary fail"><b>Not enough usable recordings.</b> Both smells need a channel series on this array.</div>';
+      return;
+    }
+    if (!sameChannelSignature(ra.channels, rb.channels)) {
+      result.innerHTML = `<div class="vial-validation-summary fail"><b>Different arrays — no comparison.</b><br>
+        ${escapeHtmlText(titleCase(ref.substance))} uses ${escapeHtmlText(ra.channels.join(' · '))}.<br>
+        ${escapeHtmlText(titleCase(sample.substance))} uses ${escapeHtmlText(rb.channels.join(' · '))}.<br>
+        The Vial cannot be applied across arrays.</div>`;
+      return;
+    }
+    const pair = makeSeparationPair(ref, sample, ra, rb);
+    if (!pair) {
+      result.innerHTML = '<div class="vial-validation-summary fail"><b>No usable replicates.</b> Record another sample on the same array.</div>';
+      return;
+    }
+    const distinct = pair.verdict === 'separable';
+    Vial.recordVialUse(vial.id);
+    renderVials();
+    result.innerHTML = `
+      <div class="vial-validation-summary ${distinct ? 'pass' : 'fail'}">
+        <b>${distinct ? 'Distinct from the reference on this array.' : 'Not distinguishable from the reference on this array.'}</b><br>
+        ${distinct
+          ? 'This sample does not behave like the Vial’s reference under the same decision rule. That is evidence of difference, not identification.'
+          : 'This is a refusal, not a match claim. The array may not carry enough signal, or the sample may be the reference.'}
+      </div>
+      ${sepPairHtml(pair)}
+      <div class="vial-detail-section">
+        <h4>Vial claim</h4>
+        <p>${escapeHtmlText(vial.name)} claims ${escapeHtmlText(vial.claim.reference)} ↔ ${escapeHtmlText(vial.claim.sample)} is ${escapeHtmlText(SEP_VERDICT_LABEL[vial.claim.verdict] || vial.claim.verdict)} on ${vial.claim.nRef} vs ${vial.claim.nSample} saved replicates. This run compares ${escapeHtmlText(titleCase(ref.substance))} ↔ ${escapeHtmlText(titleCase(sample.substance))}.</p>
+      </div>`;
+  } catch (err) {
+    result.innerHTML = `<div class="vial-validation-summary fail"><b>Could not run this Vial.</b> ${escapeHtmlText(err instanceof Error ? err.message : 'Unknown read error.')}</div>`;
+  } finally {
+    if (run) run.disabled = false;
+  }
+}
+
+function importVialFile(file: File): void {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const text = String(reader.result || '');
+    try {
+      const parsed = JSON.parse(text) as { schema?: unknown };
+      if (parsed?.schema === 'osmograph.domain-pack/1') {
+        importDomainPackText(text);
+        return;
+      }
+      const vial = Vial.importVialJson(text);
+      const checked = Vial.applyValidation(vial);
+      Vial.upsertVial(checked);
+      renderVials();
+      openVialDetail(checked.id);
+      showToast(checked.status === 'sealed'
+        ? 'Vial imported and sealed by the local gate.'
+        : 'Vial imported as Open. Its evidence does not pass the local gate.');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Could not import this Vial.');
+    }
+  };
+  reader.onerror = () => showToast('Could not read that file.');
+  reader.readAsText(file);
+}
+
+document.getElementById('vialNewBtn')?.addEventListener('click', () => openVialCreate());
+document.getElementById('vialImportBtn')?.addEventListener('click', () => {
+  (document.getElementById('vialImportFile') as HTMLInputElement | null)?.click();
+});
+document.getElementById('vialImportFile')?.addEventListener('change', (ev) => {
+  const input = ev.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file) importVialFile(file);
+  input.value = '';
+});
+document.getElementById('vialsList')?.addEventListener('click', (ev) => {
+  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-vial-action]');
+  if (!target) return;
+  const action = target.dataset.vialAction;
+  const id = target.dataset.vialId || '';
+  if (action === 'new') openVialCreate();
+  else if (action === 'use' && id) openVialUse(id);
+  else if (action === 'inspect' && id) openVialDetail(id);
+  else if (action === 'validate' && id) validateStoredVial(id);
+  else if (action === 'export' && id) exportVial(id);
+  else if (action === 'delete' && id) armOrDeleteVial(id, target as HTMLButtonElement);
+});
+document.getElementById('vialDetailBody')?.addEventListener('click', (ev) => {
+  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-vial-detail-action]');
+  if (!target) return;
+  const action = target.dataset.vialDetailAction;
+  const id = target.dataset.vialId || '';
+  if (!id) return;
+  if (action === 'use') openVialUse(id);
+  else if (action === 'validate') validateStoredVial(id);
+  else if (action === 'copy') void copyVialJson(id);
+  else if (action === 'export') exportVial(id);
+  else if (action === 'delete') armOrDeleteVial(id, target as HTMLButtonElement);
+});
+document.getElementById('vialCreateClose')?.addEventListener('click', closeVialCreate);
+document.getElementById('vialDetailClose')?.addEventListener('click', closeVialDetail);
+document.getElementById('vialUseClose')?.addEventListener('click', closeVialUse);
+document.getElementById('vialUseRun')?.addEventListener('click', () => { void runVialUse(); });
+document.getElementById('vialCreateDraft')?.addEventListener('click', () => saveVialFromModal(false));
+document.getElementById('vialCreateValidate')?.addEventListener('click', () => saveVialFromModal(true));
+document.getElementById('vialSourceCheck')?.addEventListener('change', (ev) => {
+  vialCreateEvidence = vialEvidenceForSource((ev.target as HTMLSelectElement).value);
+  syncVialFormFromEvidence();
+});
+for (const el of document.querySelectorAll('#vialCreateModal input, #vialCreateModal textarea')) {
+  el.addEventListener('input', updateVialValidationPreview);
+}
+for (const modalId of ['vialCreateModal', 'vialDetailModal', 'vialUseModal']) {
+  document.getElementById(modalId)?.addEventListener('click', (ev) => {
+    if (ev.target === ev.currentTarget) {
+      if (modalId === 'vialCreateModal') closeVialCreate();
+      else if (modalId === 'vialDetailModal') closeVialDetail();
+      else closeVialUse();
+    }
+  });
+}
+
+// === Smell detail — the front door's one-click answer ===
+// A card click used to list files. A smell is not a file: this view shows its
+// fingerprint, its signed response, and the nearest smell the array struggles
+// to tell it apart from, using the same replicate test as the advisor.
+
+let smellDetailToken = 0;
+let detailCard: SmellCardData | null = null;
+let detailNeighbor: SmellCardData | null = null;
+let detailPair: SmellPairSeparation | null = null;
+// The order currently visible in the gallery. The arrows walk that order, so
+// narrowing the gallery and then opening a card gives a coherent way to browse
+// the result set instead of dumping the person back into the whole library.
+let detailList: SmellCardData[] = [];
+let detailIndex = -1;
+
+async function ensureMean(card: SmellCardData): Promise<MeanResponse | null> {
+  const cached = smellFpCache.get(card.key);
+  if (cached !== undefined) {
+    if (cached) {
+      card.channels = cached.channels;
+      card.values = cached.values;
+      card.groupRecords = cached.records;
+      card.usedInMean = cached.used;
+    }
+    return cached;
+  }
+  let pending = smellFpPending.get(card.key);
+  if (!pending) {
+    const gen = smellCacheGen;
+    pending = meanResponseFor(card.records)
+      .then(fp => {
+        if (gen === smellCacheGen) {
+          smellFpCache.set(card.key, fp);
+          smellFpPending.delete(card.key);
+          if (fp) {
+            card.channels = fp.channels;
+            card.values = fp.values;
+            card.groupRecords = fp.records;
+            card.usedInMean = fp.used;
+          }
+        }
+        return fp;
+      })
+      .catch(err => {
+        if (gen === smellCacheGen) smellFpPending.delete(card.key);
+        throw err;
+      });
+    smellFpPending.set(card.key, pending);
+  }
+  return pending;
+}
+
+function cosineOf(a: number[], b: number[]): number {
+  let ab = 0, aa = 0, bb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    if (!Number.isFinite(a[i]) || !Number.isFinite(b[i])) continue;
+    ab += a[i] * b[i];
+    aa += a[i] * a[i];
+    bb += b[i] * b[i];
+  }
+  return aa > 0 && bb > 0 ? ab / Math.sqrt(aa * bb) : NaN;
+}
+
+/** Linear resample over the finite stretch, so traces of different lengths can
+ *  share an axis. NaN gaps are dropped rather than drawn as real samples. */
+function resampleCurve(v: number[], n = 96): number[] {
+  const pts = v.map((y, x) => [x, y] as const).filter(([, y]) => Number.isFinite(y));
+  if (pts.length < 2) return new Array(n).fill(NaN);
+  const x0 = pts[0][0], x1 = pts[pts.length - 1][0];
+  const out: number[] = [];
+  let j = 0;
+  for (let k = 0; k < n; k++) {
+    const x = x0 + (x1 - x0) * (k / (n - 1));
+    while (j < pts.length - 2 && pts[j + 1][0] < x) j++;
+    const [xa, ya] = pts[j];
+    const [xb, yb] = pts[j + 1];
+    out.push(xb === xa ? ya : ya + (yb - ya) * (x - xa) / (xb - xa));
+  }
+  return out;
+}
+
+/** Mean normalized trace for one array group on one channel. Descriptive: it
+ *  makes the shape/level distinction visible, not a substitute for the test. */
+async function meanTraceFor(card: SmellCardData, channel: string, shape: boolean): Promise<number[] | null> {
+  const group = card.groupRecords?.length ? card.groupRecords : card.records;
+  const usable = group.filter(r => !!r.file_id);
+  const curves: number[][] = [];
+  for (const r of usable) {
+    const series = await loadCompareSeries(r.file_id!);
+    if (!series) continue;
+    const ci = series.channels.indexOf(channel);
+    if (ci < 0) continue;
+    let curve = cmpNorm(series, ci);
+    if (!curve || curve.length < 2) continue;
+    if (curve.filter(Number.isFinite).length < 2) continue;
+    if (shape) {
+      const peak = Math.max(...curve.filter(Number.isFinite).map(v => Math.abs(v)), 0);
+      if (!(peak > 1e-6)) continue;
+      curve = curve.map(v => (Number.isFinite(v) ? v / peak : NaN));
+    }
+    curves.push(resampleCurve(curve, 96));
+  }
+  if (!curves.length) return null;
+  return Array.from({ length: 96 }, (_, i) => {
+    const vals = curves.map(c => c[i]).filter(Number.isFinite);
+    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : NaN;
+  });
+}
+
+function drawTraceCompare(a: number[], b: number[]): void {
+  const canvas = document.getElementById('sdTrace') as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(280, canvas.clientWidth || 400);
+  const h = 118;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const vals = [...a, ...b].filter(Number.isFinite);
+  if (!vals.length) return;
+  let lo = Math.min(...vals), hi = Math.max(...vals);
+  if (!(hi - lo > 1e-9)) { lo -= 0.5; hi += 0.5; }
+  const pad = (hi - lo) * 0.12;
+  lo -= pad; hi += pad;
+  const padL = 2, padR = 2, padT = 6, padB = 6;
+  const px = (i: number) => padL + (i / Math.max(1, a.length - 1)) * (w - padL - padR);
+  const py = (v: number) => padT + (1 - (v - lo) / (hi - lo)) * (h - padT - padB);
+  ctx.strokeStyle = 'rgba(8,8,12,0.07)';
+  ctx.lineWidth = 1;
+  for (let k = 1; k <= 3; k++) {
+    const y = padT + (k / 4) * (h - padT - padB);
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(w - padR, y);
+    ctx.stroke();
+  }
+  if (lo < 0 && hi > 0) {
+    ctx.strokeStyle = 'rgba(8,8,12,0.18)';
+    ctx.setLineDash([2, 3]);
+    ctx.beginPath();
+    ctx.moveTo(padL, py(0));
+    ctx.lineTo(w - padR, py(0));
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  const draw = (curve: number[], color: string) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.7;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < curve.length; i++) {
+      if (!Number.isFinite(curve[i])) { started = false; continue; }
+      const x = px(i), y = py(curve[i]);
+      if (started) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+      started = true;
+    }
+    ctx.stroke();
+  };
+  draw(a, '#0e7490');
+  draw(b, '#b45309');
+}
+
+async function renderTraceCompare(p: SmellPairSeparation, token: number): Promise<void> {
+  const wrap = document.getElementById('sdTraceWrap');
+  if (!wrap) return;
+  const best = p.best;
+  const channel = best?.channel || p.channels.find(c => Number.isFinite(c.d))?.channel;
+  if (!channel) return;
+  const shape = !!best && SHAPE_FEATURES.has(best.feature);
+  const [ta, tb] = await Promise.all([
+    meanTraceFor(p.a, channel, shape),
+    meanTraceFor(p.b, channel, shape),
+  ]);
+  if (token !== smellDetailToken) return;
+  if (!ta || !tb) return;
+  const title = document.getElementById('sdTraceTitle');
+  if (title) {
+    title.textContent = `Mean ${shape ? 'shape' : 'level'} on ${channel} · ${shape ? 'each replicate scaled to its own peak' : 'ΔR/R0'}`;
+  }
+  const legend = document.getElementById('sdTraceLegend');
+  if (legend) {
+    legend.innerHTML = `<span style="color:#0e7490">■</span> ${esc(titleCase(p.a.substance))} <span style="color:#b45309;margin-left:8px">■</span> ${esc(titleCase(p.b.substance))} <span style="color:var(--text-3)">· descriptive only</span>`;
+  }
+  wrap.hidden = false;
+  requestAnimationFrame(() => drawTraceCompare(ta, tb));
+}
+
+function closeSmellDetail(): void {
+  smellDetailToken++;
+  detailCard = null;
+  detailNeighbor = null;
+  detailPair = null;
+  const modal = document.getElementById('smellDetailModal');
+  if (modal) modal.style.display = 'none';
+}
+
+function drawSignedBars(values: number[], channels: string[]): void {
+  const el = document.getElementById('sdBars');
+  if (!el) return;
+  const finite = values.filter(Number.isFinite);
+  if (!finite.length) {
+    el.innerHTML = '<div class="sd-section-title" style="margin-top:8px">Signed settled response</div><div class="hint">No signed response available.</div>';
+    return;
+  }
+  const max = Math.max(...finite.map(v => Math.abs(v)), 1e-9);
+  const rows = channels.map((ch, i) => {
+    const v = values[i];
+    if (!Number.isFinite(v)) {
+      return `<div class="sd-bar-row"><span class="sd-bar-name" title="${esc(ch)}">${esc(ch)}</span><span class="hint" style="grid-column:span 2">n/a</span></div>`;
+    }
+    const frac = Math.min(1, Math.abs(v) / max);
+    const width = (frac * 50).toFixed(1);
+    const left = v >= 0 ? 50 : 50 - frac * 50;
+    const color = v >= 0 ? '#0e7490' : '#b45309';
+    return `<div class="sd-bar-row">
+      <span class="sd-bar-name" title="${esc(ch)}">${esc(ch)}</span>
+      <span class="sd-bar-track"><span class="sd-bar-zero"></span><span class="sd-bar-fill" style="left:${left}%;width:${width}%;background:${color}"></span></span>
+      <span class="sd-bar-val" title="settled ΔR/R0">${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div class="sd-section-title" style="margin-top:8px">Signed settled response · ΔR/R0</div>${rows}`;
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // Fall through to the selection-based fallback.
+  }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+/** A compact, honest text version of the detail view — for lab notes and chat. */
+function smellSummaryText(card: SmellCardData): string {
+  const lines: string[] = [];
+  lines.push(`${titleCase(card.substance)} — ${smellSource(card)}`);
+  const groupN = card.groupRecords?.length || card.records.length;
+  lines.push(`${groupN} recording${groupN === 1 ? '' : 's'} on this array · ${card.analyzed} analyzed${card.meanQuality ? ` · mean quality ${card.meanQuality}` : ''}`);
+  if (card.channels.length && card.values) {
+    const parts = card.channels.map((ch, i) => {
+      const v = card.values![i];
+      return Number.isFinite(v) ? `${ch} ${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%` : `${ch} n/a`;
+    });
+    lines.push(`Mean settled response (ΔR/R0): ${parts.join(', ')}`);
+  }
+  const p = detailPair;
+  if (p) {
+    const acc = Number.isFinite(p.acc) ? `${Math.round(p.acc * p.nEval)}/${p.nEval}` : 'n/a';
+    const lower = Number.isFinite(p.acc) && p.nEval > 0
+      ? wilsonLower(Math.round(p.acc * p.nEval), p.nEval)
+      : NaN;
+    const split = [p.accLevel, p.accShape, p.acc].map((v, i) =>
+      Number.isFinite(v) ? `${['level', 'shape', 'together'][i]} ${Math.round(v * 100)}%` : `${['level', 'shape', 'together'][i]} n/a`,
+    ).join(', ');
+    lines.push(`Closest confusable: ${titleCase(p.b.substance)} — ${SEP_VERDICT_LABEL[p.verdict]}`);
+    lines.push(`${acc} left-out recordings match their own smell (${split})${Number.isFinite(lower) ? `; 95% lower ${Math.round(lower * 100)}%` : ''}${Number.isFinite(p.pValue) ? `; p = ${p.pValue.toFixed(3)} over ${p.permutations} label arrangements` : ''}.`);
+    if (p.lever) lines.push(`Lever: ${p.lever}`);
+  } else {
+    lines.push('No confusable verdict yet — needs at least two comparable recordings on this array.');
+  }
+  lines.push('Preview from saved replicates, not a trained model. Osmograph.');
+  return lines.join('\n');
+}
+
+function openSmellSessions(card: SmellCardData): void {
+  closeSmellDetail();
+  const search = document.getElementById('libSearch') as HTMLInputElement | null;
+  if (search) search.value = card.substance;
+  document.querySelector<HTMLElement>('.src-subnav-btn[data-src="sessions"]')?.click();
+  renderLibrary();
+}
+
+/** Plain-language version of a pair verdict. The statistics stay in the
+ *  evidence drawer; this is what a person needs before trusting the smell. */
+function confusableNarrative(card: SmellCardData, p: SmellPairSeparation): string {
+  const name = esc(titleCase(card.substance));
+  const other = esc(titleCase(p.b.substance));
+  const acc = Number.isFinite(p.acc) ? `${Math.round(p.acc * p.nEval)}/${p.nEval}` : 'n/a';
+  const lower = Number.isFinite(p.acc) && p.nEval > 0
+    ? wilsonLower(Math.round(p.acc * p.nEval), p.nEval)
+    : NaN;
+  const lowerTxt = Number.isFinite(lower) ? ` Even the conservative 95% estimate is ${Math.round(lower * 100)}%.` : '';
+  const pTxt = Number.isFinite(p.pValue)
+    ? (p.pValue < 0.001 ? '&lt; 0.001' : p.pValue.toFixed(3))
+    : null;
+  const chanceTxt = Number.isFinite(p.pValue)
+    ? ` A label shuffle reaches that score ${Math.round(p.pValue * 100)}% of the time (p = ${pTxt}).`
+    : '';
+  const dTxt = p.best && Number.isFinite(p.best.d) ? `${p.best.d.toFixed(1)}σ` : 'a narrow margin';
+
+  if (p.verdict === 'separable') {
+    return `<b>Separable on this array.</b> ${acc} held-out recordings matched their own smell.${lowerTxt}${chanceTxt ? '' : ' The permutation test is unavailable.'} Keep baseline, flow and exposure time steady so the margin survives the next session.`;
+  }
+  if (p.verdict === 'fragile') {
+    if (Number.isFinite(p.pValue) && p.pValue > 0.05 && p.acc >= 0.9) {
+      return `<b>Promising, not established.</b> ${acc} held-out recordings matched, but with this many recordings and candidate features, chance can reach the same score.${chanceTxt} Do not use ${name} vs ${other} as an identity test yet.`;
+    }
+    return `<b>Not reliable yet.</b> ${acc} held-out recordings matched their own smell, and the best feature separates them by ${dTxt}.${lowerTxt} That is too fragile to identify either smell from one recording.`;
+  }
+  if (p.verdict === 'confusable') {
+    return `<b>Confusable.</b> ${acc} held-out recordings matched — close to chance for ${name} vs ${other}. The best feature separates them by only ${dTxt}. More of the same MOX sensor mostly repeats the same cross-sensitivity.`;
+  }
+  return `<b>Needs replicates.</b> ${name} has ${p.nA} comparable recording${p.nA === 1 ? '' : 's'} and ${other} has ${p.nB}. A pair verdict needs at least two of each on the same array.`;
+}
+
+function confusableAction(p: SmellPairSeparation): string {
+  if (p.verdict === 'separable') {
+    return 'Keep the protocol identical next time — baseline, flow, temperature and exposure duration — so the margin survives a new session.';
+  }
+  if (p.verdict === 'fragile') {
+    return 'Collect independent, interleaved replicates of both smells on this array before relying on this pair.';
+  }
+  if (p.verdict === 'confusable') {
+    return 'Add a channel with different selectivity, or change the exposure protocol. More of the same MOX sensor mostly repeats the same cross-sensitivity.';
+  }
+  return 'Record at least two replicates of each smell on the same channel-for-channel array.';
+}
+
+function hideDetailEvidence(): void {
+  const method = document.getElementById('sdMethod') as HTMLDetailsElement | null;
+  if (method) {
+    method.hidden = true;
+    method.open = false;
+  }
+  const evidence = document.getElementById('sdEvidence');
+  if (evidence) evidence.innerHTML = '';
+  const trace = document.getElementById('sdTraceWrap');
+  if (trace) trace.hidden = true;
+}
+
+async function findClosestConfusable(card: SmellCardData, token: number): Promise<void> {
+  const panel = document.getElementById('sdNeighbor');
+  if (!panel) return;
+  hideDetailEvidence();
+  const ownFp = smellFpCache.get(card.key);
+  if (!ownFp) {
+    panel.innerHTML = '<p class="sd-verdict-line">This smell has no usable channel series, so a confusion verdict cannot be computed.</p>';
+    return;
+  }
+  const candidates: { card: SmellCardData; cos: number }[] = [];
+  for (const c of smellCards) {
+    if (c.key === card.key) continue;
+    const fp = await ensureMean(c);
+    if (token !== smellDetailToken) return;
+    if (!fp || fp.channels.length !== ownFp.channels.length) continue;
+    if (fp.channels.some((ch, i) => ch !== ownFp.channels[i])) continue;
+    const cos = cosineOf(ownFp.values, fp.values);
+    if (Number.isFinite(cos)) candidates.push({ card: c, cos });
+  }
+  if (!candidates.length) {
+    panel.innerHTML = '<p class="sd-verdict-line">No other smell uses the same channel-for-channel array. A confusion verdict needs the same sensors wired the same way — record another smell on this rig to compare.</p>';
+    return;
+  }
+  candidates.sort((a, b) => b.cos - a.cos);
+  const ownRep = await smellReplicates(card);
+  if (token !== smellDetailToken) return;
+  const closest = candidates[0].card;
+  if (!ownRep || ownRep.rows.length < 2) {
+    panel.innerHTML = `<div class="sd-neighbor-name">${esc(titleCase(closest.substance))}</div>
+      <p class="sd-verdict-line">Closest by steady response, but ${esc(titleCase(card.substance))} needs at least two comparable recordings before a confusion verdict is meaningful. Add replicates of both smells on this array.</p>`;
+    return;
+  }
+  const pairs: SmellPairSeparation[] = [];
+  const considered: string[] = [];
+  let evaluable = 0;
+  for (const cand of candidates) {
+    if (evaluable >= 3 || considered.length >= 6) break;
+    const rep = await smellReplicates(cand.card);
+    if (token !== smellDetailToken) return;
+    if (!rep) continue;
+    const sep = separationBetween(ownRep, rep);
+    if (!sep.channels.length) continue;
+    considered.push(titleCase(cand.card.substance));
+    const best = [...sep.channels].sort((x, y) => (Number.isFinite(y.d) ? y.d : -1) - (Number.isFinite(x.d) ? x.d : -1))[0] || null;
+    const pair: SmellPairSeparation = {
+      a: card, b: cand.card,
+      nA: ownRep.rows.length, nB: rep.rows.length,
+      consideredA: ownRep.considered, consideredB: rep.considered,
+      channels: sep.channels, best, acc: sep.acc, accLevel: sep.accLevel, accShape: sep.accShape,
+      nEval: sep.nEval, pValue: sep.pValue, permutations: sep.permutations,
+      verdict: separationVerdict(
+        Math.max(sep.acc, Number.isFinite(sep.accLevel) ? sep.accLevel : -1, Number.isFinite(sep.accShape) ? sep.accShape : -1),
+        best && Number.isFinite(best.d) ? best.d : 0,
+        sep.nEval,
+        sep.pValue,
+      ),
+      lever: '',
+    };
+    pair.lever = separationLever(pair);
+    pairs.push(pair);
+    if ([pair.acc, pair.accLevel, pair.accShape].some(Number.isFinite)) evaluable++;
+  }
+  if (!pairs.length) {
+    panel.innerHTML = `<div class="sd-neighbor-name">${esc(titleCase(closest.substance))}</div>
+      <p class="sd-verdict-line">Closest by steady response, but the two arrays could not be compared channel-for-channel with enough replicates.</p>`;
+    return;
+  }
+  const score = (p: SmellPairSeparation): number => {
+    const v = [p.acc, p.accLevel, p.accShape].filter(Number.isFinite);
+    return v.length ? Math.max(...v) : 2;
+  };
+  pairs.sort((a, b) => score(a) - score(b));
+  const pick = pairs[0];
+  detailNeighbor = pick.b;
+  detailPair = pick;
+  const btn = document.getElementById('sdCompare') as HTMLButtonElement | null;
+  if (btn) btn.disabled = false;
+  const note = considered.length > 1
+    ? `Compared with the ${considered.length} most similar smells by steady response (${considered.join(', ')}); showing the least separable.`
+    : 'Compared with the most similar smell by steady response.';
+  panel.innerHTML = `<div class="sd-neighbor-name">${esc(titleCase(pick.b.substance))} <span class="sep-badge ${pick.verdict}">${SEP_VERDICT_LABEL[pick.verdict]}</span></div>
+    <p class="sd-verdict-line">${confusableNarrative(card, pick)}</p>
+    <p class="sd-action">${esc(confusableAction(pick))}</p>
+    <div class="hint" style="margin-top:2px">${esc(note)}</div>`;
+  const evidence = document.getElementById('sdEvidence');
+  if (evidence) evidence.innerHTML = sepPairHtml(pick);
+  const method = document.getElementById('sdMethod') as HTMLDetailsElement | null;
+  if (method) method.hidden = false;
+  void renderTraceCompare(pick, token);
+}
+
+function openSmellDetail(card: SmellCardData): void {
+  detailCard = card;
+  detailNeighbor = null;
+  detailPair = null;
+  detailList = visibleSmellCards();
+  detailIndex = detailList.findIndex(c => c.key === card.key);
+  if (detailIndex < 0) {
+    detailList = smellCards.slice();
+    detailIndex = detailList.findIndex(c => c.key === card.key);
+  }
+  const pos = document.getElementById('sdPos');
+  if (pos) pos.textContent = `${detailIndex + 1} / ${detailList.length}`;
+  const prev = document.getElementById('sdPrev') as HTMLButtonElement | null;
+  const next = document.getElementById('sdNext') as HTMLButtonElement | null;
+  if (prev) prev.disabled = detailList.length < 2;
+  if (next) next.disabled = detailList.length < 2;
+  hideDetailEvidence();
+  const modal = document.getElementById('smellDetailModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const name = document.getElementById('sdName');
+  if (name) name.textContent = titleCase(card.substance);
+  const meta = document.getElementById('sdMeta');
+  if (meta) {
+    meta.textContent = `${card.records.length} recording${card.records.length === 1 ? '' : 's'} · ${card.analyzed} analyzed${card.meanQuality ? ` · mean quality ${card.meanQuality}` : ''} · ${smellSource(card)}`;
+  }
+  // Clear the previous smell's fingerprint immediately; never let one smell's
+  // shape sit under another smell's name while the replicates load.
+  const print = document.getElementById('sdPrint') as HTMLCanvasElement | null;
+  if (print) {
+    const ctx = print.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, print.width, print.height);
+  }
+  const bars = document.getElementById('sdBars');
+  if (bars) bars.innerHTML = '<div class="hint">Reading replicates…</div>';
+  const btn = document.getElementById('sdCompare') as HTMLButtonElement | null;
+  if (btn) btn.disabled = !card.records.some(r => !!r.file_id);
+  const neighbor = document.getElementById('sdNeighbor');
+  if (neighbor) neighbor.innerHTML = '<div class="hint">Ranking smells by steady-response similarity…</div>';
+  const token = ++smellDetailToken;
+  void (async () => {
+    const fp = await ensureMean(card);
+    if (token !== smellDetailToken) return;
+    if (!fp) {
+      if (neighbor) neighbor.innerHTML = '<p class="sd-verdict-line">This smell has no usable channel series on a single array.</p>';
+      return;
+    }
+    if (meta) {
+      const other = fp.total - fp.groupSize;
+      const otherNote = other > 0 ? ` · ${other} on another array` : '';
+      meta.textContent = `${fp.groupSize} recording${fp.groupSize === 1 ? '' : 's'} on this array${otherNote} · mean of ${fp.used} · ${smellSource(card)}`;
+      meta.title = `${card.analyzed} analyzed${card.meanQuality ? ` · mean quality ${card.meanQuality}` : ''}. ${other > 0
+        ? `${other} recording${other === 1 ? '' : 's'} use a different array and are not blended into this fingerprint.`
+        : 'All recordings use this array.'}`;
+    }
+    if (print) drawDetailFingerprint(print, fp.values, fp.channels);
+    drawSignedBars(fp.values, fp.channels);
+    await findClosestConfusable(card, token);
+  })();
+}
+
+function stepSmellDetail(delta: number): void {
+  if (!detailCard || detailList.length < 2) return;
+  let idx = detailList.findIndex(c => c.key === detailCard!.key);
+  if (idx < 0) idx = detailIndex;
+  const next = detailList[(idx + delta + detailList.length) % detailList.length];
+  if (next) openSmellDetail(next);
+}
+
+function randomSmellDetail(): void {
+  if (smellCards.length < 2) return;
+  const pool = smellCards.filter(c => c.key !== detailCard?.key);
+  const pick = pool[Math.floor(Math.random() * pool.length)];
+  if (pick) openSmellDetail(pick);
+}
+
+document.getElementById('sdClose')?.addEventListener('click', closeSmellDetail);
+document.getElementById('sdPrev')?.addEventListener('click', () => stepSmellDetail(-1));
+document.getElementById('sdNext')?.addEventListener('click', () => stepSmellDetail(1));
+document.getElementById('sdRandom')?.addEventListener('click', randomSmellDetail);
+document.getElementById('smellDetailModal')?.addEventListener('click', (ev) => {
+  if (ev.target === ev.currentTarget) closeSmellDetail();
+});
+document.addEventListener('keydown', (ev) => {
+  const modal = document.getElementById('smellDetailModal');
+  if (!modal || modal.style.display === 'none') return;
+  const target = ev.target as HTMLElement | null;
+  const typing = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
+  if (ev.key === 'Escape') closeSmellDetail();
+  else if (!typing && ev.key === 'ArrowLeft') { ev.preventDefault(); stepSmellDetail(-1); }
+  else if (!typing && ev.key === 'ArrowRight') { ev.preventDefault(); stepSmellDetail(1); }
+});
+document.getElementById('sdAll')?.addEventListener('click', () => {
+  if (detailCard) openSmellSessions(detailCard);
+});
+document.getElementById('sdCard')?.addEventListener('click', () => {
+  if (detailCard) void exportSmellCard(detailCard);
+});
+document.getElementById('sdCopy')?.addEventListener('click', async (ev) => {
+  const card = detailCard;
+  if (!card) return;
+  const btn = ev.currentTarget as HTMLButtonElement | null;
+  await ensureMean(card);
+  if (card !== detailCard) return;
+  const ok = await copyText(smellSummaryText(card));
+  if (!btn) return;
+  const prev = btn.textContent;
+  btn.textContent = ok ? 'Copied' : 'Copy failed';
+  setTimeout(() => { btn.textContent = prev; }, 1600);
+});
+function showRecipePanel(): void {
+  document.body.dataset.workspace = 'explore';
+  document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll<HTMLElement>('.content > .tab-panel').forEach(p => p.classList.remove('active'));
+  // Keep Explore highlighted: the recipe is a property of a smell, not a
+  // top-level destination. The panel is reached from the smell detail.
+  document.querySelector<HTMLElement>('.tab-btn[data-tab="explore"]')?.classList.add('active');
+  document.getElementById('panel-recipe')?.classList.add('active');
+}
+
+document.getElementById('recipeBack')?.addEventListener('click', () => {
+  document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
+});
+
+document.getElementById('sdRecipe')?.addEventListener('click', async () => {
+  const card = detailCard;
+  if (!card) return;
+  // Use the same array group the fingerprint and verdict came from, not just
+  // the newest file that shares the smell name.
+  const group = card.groupRecords?.length ? card.groupRecords : card.records;
+  const rec = group.find(r => !!r.file_id);
+  if (!rec?.file_id) return;
+  const recipeName = `${titleCase(card.substance)} response`;
+  closeSmellDetail();
+  showRecipePanel();
+  await ensureRecipeOps();
+  openRecipeEditor({
+    id: `${recipeSlug(recipeName)}-${Date.now().toString(36)}`,
+    name: recipeName,
+    version: '1.0.0',
+    source: `osmell:${rec.file_id}`,
+    steps: [
+      { op: 'smooth.movavg', channel: null, params: { window: 5 } },
+      { op: 'response.ratio', channel: null, params: {} },
+    ],
+    notes: '',
+  });
+});
+document.getElementById('sdCheck')?.addEventListener('click', () => {
+  const a = detailCard;
+  if (!a) return;
+  const b = detailNeighbor && detailNeighbor.key !== a.key ? detailNeighbor : null;
+  checkPrefill = { ref: a.key, sample: b?.key };
+  closeSmellDetail();
+  document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
+  document.querySelector<HTMLElement>('.src-subnav-btn[data-src="check"]')?.click();
+});
+document.getElementById('sdCompare')?.addEventListener('click', () => {
+  const a = detailCard;
+  if (!a) return;
+  const ids: string[] = [];
+  for (const c of [a, detailNeighbor]) {
+    if (!c) continue;
+    // Compare the array group the verdict was computed on, not every file that
+    // happens to share the smell name. Mixing arrays would silently blend them.
+    const group = c.groupRecords?.length ? c.groupRecords : c.records;
+    for (const r of group.filter(rec => !!rec.file_id).slice(0, 6)) {
+      if (r.file_id && !ids.includes(r.file_id)) ids.push(r.file_id);
+    }
+  }
+  if (!ids.length) return;
+  closeSmellDetail();
+  compareFiles = ids;
+  document.querySelector<HTMLElement>('.tab-btn[data-tab="compare"]')?.click();
+  updateCompare();
+});
+
+document.getElementById('smellCompare')?.addEventListener('click', () => {
+  // One representative recording per selected smell, from the same dominant
+  // array group the fingerprint and advisor use — never a stray file from a
+  // different rig that happens to share the smell name.
+  compareFiles = smellCards
+    .filter(c => smellSel.has(c.key))
+    .map(c => (c.groupRecords?.length ? c.groupRecords : c.records).find(r => !!r.file_id)?.file_id)
+    .filter((f): f is string => !!f);
+  document.querySelector<HTMLElement>('.tab-btn[data-tab="compare"]')?.click();
+  updateCompare();
+});
+document.getElementById('smellClearSel')?.addEventListener('click', () => {
+  smellSel.clear();
+  void renderSmellGallery();
+});
+
+// Gallery controls. A search field that only filters after Enter is a dead
+// control, so this re-renders after a short pause and keeps the result count
+// visible. "Surprise me" draws from the current result set, not the whole shelf.
+(document.getElementById('smellSearch') as HTMLInputElement | null)?.addEventListener('input', (ev) => {
+  smellQuery = (ev.target as HTMLInputElement).value;
+  window.clearTimeout(smellSearchTimer);
+  smellSearchTimer = window.setTimeout(() => { void renderSmellGallery(); }, 120);
+});
+document.querySelectorAll<HTMLElement>('.smell-chip').forEach(chip => {
+  chip.addEventListener('click', () => {
+    smellFilter = (chip.dataset.smellFilter as SmellFilter) || 'all';
+    document.querySelectorAll<HTMLElement>('.smell-chip').forEach(c => {
+      c.classList.toggle('active', c === chip);
+    });
+    void renderSmellGallery();
+  });
+});
+(document.getElementById('smellSort') as HTMLSelectElement | null)?.addEventListener('change', (ev) => {
+  smellSort = (ev.target as HTMLSelectElement).value as SmellSort;
+  void renderSmellGallery();
+});
+document.getElementById('smellSurprise')?.addEventListener('click', () => {
+  const pool = visibleSmellCards();
+  if (!pool.length) { void renderSmellGallery(); return; }
+  openSmellDetail(pool[Math.floor(Math.random() * pool.length)]);
+});
+// "/" focuses the gallery search unless the person is already typing somewhere.
+document.addEventListener('keydown', (ev) => {
+  if (ev.key !== '/' || ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  const t = ev.target as HTMLElement | null;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+  const panel = document.getElementById('panel-explore');
+  if (!panel?.classList.contains('active')) return;
+  ev.preventDefault();
+  document.getElementById('smellSearch')?.focus();
+});
+
+document.getElementById('smellImport')?.addEventListener('click', () => {
+  // The gallery front door should not make a person hunt for the Sessions tab
+  // just to add a recording.
+  document.getElementById('libImport')?.click();
+});
+document.getElementById('smellCapture')?.addEventListener('click', () => {
+  if (!isStreamingActive()) {
+    showToast('Connect your e-nose to capture a smell — or Import a CSV.');
+    return;
+  }
+  openRecordModal();
+});
+
+// === Smell Card — the unit of sharing ===
+// One image that carries the thing a person actually wants to send someone:
+// what this smell did to this array, how many recordings back it, where the
+// data came from, and what it does *not* claim. The caveat is not decoration —
+// it is the reason the number is trustworthy.
+function smellSource(card: SmellCardData): string {
+  return sourceForRecords(card.groupRecords || card.records);
+}
+
+function sourceForRecords(records: SessionRecord[]): string {
+  const paths = records.map(r => r.path || '');
+  // Keep the everyday provenance short. The full citation, institution, and
+  // licence live in Datasets and NOTICE — repeating "MIT Media Lab" on every
+  // card, check, and share image reads like an endorsement badge.
+  if (paths.length && paths.every(p => p.includes('/SmellNet/'))) {
+    return 'SmellNet';
+  }
+  const own = paths.some(p => p.includes('Osmograph_Recordings/') && !p.includes('/SmellNet/'));
+  if (own) return 'Recorded on this rig';
+  return 'Imported';
+}
+
+function drawSmellCardCanvas(card: SmellCardData): HTMLCanvasElement {
+  const W = 1000, H = 760, dpr = 2;
+  const c = document.createElement('canvas');
+  c.width = W * dpr;
+  c.height = H * dpr;
+  const ctx = c.getContext('2d')!;
+  ctx.scale(dpr, dpr);
+  const sans = '"Geist", "Inter", system-ui, sans-serif';
+  const mono = 'ui-monospace, "SF Mono", Menlo, monospace';
+
+  ctx.fillStyle = '#f8f4ea';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#e4dac6';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(14, 14, W - 28, H - 28);
+
+  // Header
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `600 12px ${mono}`;
+  ctx.fillText('O S M O G R A P H', 44, 56);
+  ctx.textAlign = 'right';
+  ctx.fillText('SMELL CARD', W - 44, 56);
+
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 40px ${sans}`;
+  ctx.fillText(titleCase(card.substance), 44, 110);
+
+  const width = card.channels.length || card.records[0]?.sensors || 0;
+  const groupN = card.groupRecords?.length || card.records.length;
+  const used = card.usedInMean || Math.min(3, groupN);
+  const other = Math.max(0, card.records.length - groupN);
+  ctx.fillStyle = '#6b6152';
+  ctx.font = `400 14px ${sans}`;
+  const metaBits = [
+    `${groupN} recording${groupN === 1 ? '' : 's'} on this array`,
+    `mean of ${used}`,
+    `${width}-channel array`,
+    'baseline-relative',
+  ];
+  if (other > 0) metaBits.push(`${other} on another array`);
+  ctx.fillText(metaBits.join('   ·   '), 44, 138);
+
+  ctx.strokeStyle = '#e4dac6';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(44, 160);
+  ctx.lineTo(W - 44, 160);
+  ctx.stroke();
+
+  // Fingerprint — the hero. The pattern across channels is the identity; the
+  // signed bars below carry amplitude and polarity.
+  ctx.textAlign = 'left';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 13px ${mono}`;
+  ctx.fillText('FINGERPRINT', 44, 196);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `400 11px ${sans}`;
+  ctx.fillText('mean settled response per channel · shared scale', W - 44, 196);
+
+  if (card.values?.length) {
+    drawFingerprintInto(ctx, 44, 206, W - 88, 246, card.values, card.channels, { labels: true, clear: false });
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#a99e8b';
+    ctx.font = `400 13px ${sans}`;
+    ctx.fillText('No channel series available for this recording.', W / 2, 330);
+  }
+
+  ctx.strokeStyle = '#e4dac6';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(44, 484);
+  ctx.lineTo(W - 44, 484);
+  ctx.stroke();
+
+  const values = card.values || [];
+  const max = Math.max(...values.filter(Number.isFinite).map(v => Math.abs(v)), 1e-9);
+
+  // Left: signed settled response — polarity is real information.
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 12px ${mono}`;
+  ctx.fillText('SETTLED RESPONSE', 44, 512);
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `400 10px ${sans}`;
+  ctx.fillText('teal = reducing · amber = oxidising', 44, 528);
+
+  const trackX = 112, trackW = 310, valX = 470;
+  const zx = trackX + trackW / 2;
+  const rowH = Math.min(27, 156 / Math.max(1, values.length));
+  for (let i = 0; i < values.length; i++) {
+    const y = 548 + i * rowH;
+    const label = (card.channels[i] || `CH${i + 1}`);
+    const v = values[i];
+    ctx.fillStyle = '#3a342c';
+    ctx.font = `500 11px ${mono}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(label.slice(0, 10), 44, y);
+
+    ctx.strokeStyle = '#eee5d5';
+    ctx.beginPath();
+    ctx.moveTo(trackX, y);
+    ctx.lineTo(trackX + trackW, y);
+    ctx.stroke();
+    ctx.strokeStyle = '#cfc3ab';
+    ctx.beginPath();
+    ctx.moveTo(zx, y - 7);
+    ctx.lineTo(zx, y + 7);
+    ctx.stroke();
+
+    if (Number.isFinite(v)) {
+      const w = Math.min(Math.abs(v) / max, 1) * (trackW / 2);
+      ctx.fillStyle = v < 0 ? '#b45309' : '#0f6f86';
+      if (v < 0) ctx.fillRect(zx - w, y - 5, w, 10);
+      else ctx.fillRect(zx, y - 5, w, 10);
+    }
+
+    ctx.fillStyle = Number.isFinite(v) ? '#3a342c' : '#a99e8b';
+    ctx.font = `500 10px ${mono}`;
+    ctx.textAlign = 'right';
+    ctx.fillText(Number.isFinite(v) ? `${(v * 100).toFixed(0)}%` : 'n/a', valX, y);
+  }
+
+  // Right: what the picture means. The caveat is part of the artifact.
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+  ctx.fillStyle = '#1d1a16';
+  ctx.font = `600 12px ${mono}`;
+  ctx.fillText('WHAT THIS IS', 540, 512);
+  ctx.fillStyle = '#3a342c';
+  ctx.font = `500 13px ${sans}`;
+  ctx.fillText(smellSource(card), 540, 538);
+  ctx.fillStyle = '#6b6152';
+  ctx.font = `400 11px ${sans}`;
+  const notes = [
+    "One axis is one sensor's mean settled response.",
+    'The pattern across channels is the fingerprint.',
+    'Teal = reducing, amber = oxidising. Hollow = no signal.',
+    'Different arrays give different fingerprints; never blend them.',
+    'A measurement of this array, not a chemical identification.',
+  ];
+  notes.forEach((line, i) => ctx.fillText(line, 540, 562 + i * 20));
+
+  ctx.strokeStyle = '#e4dac6';
+  ctx.beginPath();
+  ctx.moveTo(44, 706);
+  ctx.lineTo(W - 44, 706);
+  ctx.stroke();
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = `400 10px ${mono}`;
+  ctx.fillText(`mean of ${used} recording${used === 1 ? '' : 's'} · baseline-relative ΔR/R0`, 44, 730);
+  ctx.textAlign = 'right';
+  ctx.fillText('OSMOGRAPH', W - 44, 730);
+  return c;
+}
+
+async function exportSmellCard(card: SmellCardData): Promise<void> {
+  // The gallery fills lazily; a save click can land before the first paint.
+  // Load the same dominant-array mean the card shows instead of failing.
+  const fp = await ensureMean(card);
+  if (!fp || !fp.values.some(Number.isFinite)) {
+    await flashStatus('smellsSub', 'This smell has no usable channel series to export.');
+    return;
+  }
+  const safe = card.substance.replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+  await exportCanvasPng(drawSmellCardCanvas(card), `osmograph-smell-${safe}.png`);
+}
+
+// The single translation from the Rust session index to UI records. Both the
+// library load and the Train-tab refresh must go through it — assigning the raw
+// index straight into `sessions` silently drops `time`/`path` and leaves the
+// Train table full of "undefined".
+interface RawSessionRecord {
+  file_id: string; substance: string; label: string; timestamp: number;
+  duration_sec: number; sensor_count: number; quality: number; csv_path: string;
+  quality_report: string | null;
+}
+
+function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
+  return records.map(r => {
+    let report: QualityReport | null = null;
+    if (r.quality_report) {
+      try { report = JSON.parse(r.quality_report) as QualityReport; } catch { /* provisional */ }
+    }
+    // Prefer the full analyzed score when available; fall back to the
+    // provisional heuristic only when no real report exists yet.
+    let quality = r.quality;
+    if (report && typeof report.total === 'number') quality = Math.round(report.total);
+    return {
+      id: `s-${r.file_id}`,
+      time: fmtLibTime(r.timestamp),
+      substance: r.substance === 'unknown' ? 'Unknown' : r.substance,
+      label: r.label,
+      format: 'CSV',
+      duration: `${Math.round(r.duration_sec)}s`,
+      sensors: r.sensor_count,
+      quality,
+      path: r.csv_path,
+      file_id: r.file_id,
+      quality_report: report,
+    };
+  });
+}
+
 async function reloadLibrary() {
   try {
     compareSeriesCache.clear();
+    rigHealthCache.clear();
+    smellCacheGen++;
+    smellFpCache.clear();
+    smellFpPending.clear();
+    smellRepCache.clear();
     await invoke('import_recordings');
-    const records = await invoke<Array<{
-      file_id: string; substance: string; label: string; timestamp: number;
-      duration_sec: number; sensor_count: number; quality: number; csv_path: string;
-      quality_report: string | null;
-    }>>('get_session_index');
-    sessions = records.map(r => {
-      let report: QualityReport | null = null;
-      if (r.quality_report) {
-        try { report = JSON.parse(r.quality_report) as QualityReport; } catch {}
-      }
-      // Prefer the full analyzed score when available; fall back to the
-      // provisional heuristic only when no real report exists yet.
-      let quality = r.quality;
-      if (report && typeof report.total === 'number') quality = Math.round(report.total);
-      return {
-        id: `s-${r.file_id}`,
-        time: fmtLibTime(r.timestamp),
-        substance: r.substance === 'unknown' ? 'Unknown' : r.substance,
-        label: r.label,
-        format: 'CSV',
-        duration: `${Math.round(r.duration_sec)}s`,
-        sensors: r.sensor_count,
-        quality,
-        path: r.csv_path,
-        file_id: r.file_id,
-        quality_report: report,
-      };
-    });
+    sessions = mapIndexRecords(await invoke<RawSessionRecord[]>('get_session_index'));
   } catch (e) {
     console.error('Library reload failed:', e);
   }
   renderLibrary();
+  renderTrain();
+  if (document.getElementById('src-smells')?.classList.contains('active')) void renderSmellGallery();
+  if (document.getElementById('src-check')?.classList.contains('active')) void renderCheckView(true);
+  autoInspectOwnRig();
 }
 
 // Recover recordings that were interrupted before save (a crash left a
@@ -3349,7 +8490,7 @@ async function checkRecoveredSessions() {
     }>>('recover_phase_sessions');
     if (!leftover.length) return;
     const ok = window.confirm(
-      `Smellholt found ${leftover.length} recording${leftover.length === 1 ? '' : 's'} that ${leftover.length === 1 ? 'was' : 'were'} interrupted before saving (e.g. a crash). ` +
+      `Osmograph found ${leftover.length} recording${leftover.length === 1 ? '' : 's'} that ${leftover.length === 1 ? 'was' : 'were'} interrupted before saving (e.g. a crash). ` +
       `Recover ${leftover.length} session${leftover.length === 1 ? '' : 's'} so nothing is lost?`
     );
     if (!ok) return;
@@ -3363,7 +8504,7 @@ async function checkRecoveredSessions() {
       }
     }
     if (recovered > 0) {
-      showToast(`Recovered ${recovered} interrupted session${recovered === 1 ? '' : 's'} — check the Library.`);
+      showToast(`Recovered ${recovered} interrupted session${recovered === 1 ? '' : 's'} — check Explore.`);
       await reloadLibrary();
       await refreshTrainLibrary();
     }
@@ -3802,6 +8943,19 @@ function esc(s: string): string {
 
 // === Train Tab listeners ===
 document.getElementById('trainBtn')!.addEventListener('click', trainClassifier);
+document.getElementById('trainStarter')?.addEventListener('click', async () => {
+  const starter = document.getElementById('trainStarter') as HTMLButtonElement;
+  if (selectStarterTrainingSet() < 2) return;
+  const nameEl = document.getElementById('trainName') as HTMLInputElement;
+  if (!nameEl.value.trim()) nameEl.value = 'starter_smells';
+  renderTrain();
+  starter.disabled = true;
+  try {
+    await trainClassifier();
+  } finally {
+    starter.disabled = false;
+  }
+});
 document.getElementById('trainRefresh')!.addEventListener('click', refreshTrainLibrary);
 document.getElementById('trainName')!.addEventListener('input', () => {
   const btn = document.getElementById('trainBtn') as HTMLButtonElement;
@@ -3815,6 +8969,11 @@ document.getElementById('fleetScan')!.addEventListener('click', async () => {
     fleetDevices = await invoke<FleetDevice[]>('fleet_scan');
     renderFleet();
   } catch { renderFleet(); }
+});
+document.getElementById('fleetGrid')?.addEventListener('click', (ev) => {
+  const t = ev.target as HTMLElement;
+  if (t.id === 'fleetEmptyScan') document.getElementById('fleetScan')?.click();
+  else if (t.id === 'fleetEmptySmells') document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
 });
 
 // OLED + Buzzer: conditional (only if the user actually has the peripheral
@@ -4135,7 +9294,17 @@ function addPhaseToLibrary(summary: PhaseRecordingSummary) {
     path: summary.path,
     file_id: summary.file_id,
   });
+  // A new replicate changes the fingerprint and the confusability verdict.
+  // Invalidate the derived caches and refresh the front door if it is visible,
+  // so recording a second sample has a visible effect immediately.
+  smellCacheGen++;
+  smellFpCache.clear();
+  smellFpPending.clear();
+  smellRepCache.clear();
+  rigHealthCache.clear();
   renderLibrary();
+  if (document.getElementById('src-smells')?.classList.contains('active')) void renderSmellGallery();
+  if (document.getElementById('src-check')?.classList.contains('active')) void renderCheckView(true);
 }
 
 async function stopPhaseRecordingFromUI() {
@@ -4483,46 +9652,270 @@ async function refreshPlugins() {
 // the source's own terms. This is the honest, "no invented numbers" way to bring real
 // data into the workspace, and it covers multiple sensor types so profiles are shaped
 // by reality (see private/DATA_AND_LICENSING.md).
-function dsBadgeLabel(c: DatasetCommercial): string {
-  return c === 'yes' ? 'commercial ok'
-    : c === 'check' ? 'check license'
-    : c === 'no' ? 'link only'
-    : 'api';
+function dsFormatLabel(f: DatasetFormat): string {
+  return f === 'ready' ? 'Osmograph-ready'
+    : f === 'converts' ? 'Opens in the app'
+    : 'Needs setup';
 }
 
 function renderDatasetCatalog() {
   const el = document.getElementById('datasetCatalog');
   if (!el) return;
   const q = (document.getElementById('dsFilter') as HTMLInputElement | null)?.value.trim().toLowerCase() || '';
-  const filt = (document.getElementById('dsCommercial') as HTMLSelectElement | null)?.value || 'all';
   const rows = DATASET_CATALOG.filter((d) =>
-    (filt === 'all' || d.commercial === filt) &&
-    (!q || `${d.name} ${d.sensors} ${d.license} ${d.note}`.toLowerCase().includes(q)));
+    !q || `${d.name} ${d.what} ${d.sensors} ${d.license} ${d.note}`.toLowerCase().includes(q));
   if (!rows.length) {
     el.innerHTML = '<div class="hint" style="grid-column:1/-1">No datasets match.</div>';
     return;
   }
-  el.innerHTML = rows.map((d) => `
+  const starterLoaded = sessions.some(s => (s.path || '').includes('/SmellNet/'));
+  el.innerHTML = rows.map((d) => {
+    const chips = [
+      d.sensors,
+      d.channels ? `${d.channels} channels` : '',
+      d.smells ? `${d.smells} smells` : '',
+      d.labeled ? 'labelled' : 'unlabelled',
+    ].filter(Boolean)
+      .map((c) => `<span class="ds-chip">${esc(c)}</span>`).join('');
+    const starter = d.id === 'smellnet' && starterLoaded;
+    const formatClass = starter ? 'ready' : d.format;
+    const formatLabel = starter ? 'Starter loaded' : dsFormatLabel(d.format);
+    return `
     <div class="ds-card">
       <div class="ds-card-head">
         <span class="ds-card-name">${esc(d.name)}</span>
-        <span class="ds-badge ${d.commercial}">${dsBadgeLabel(d.commercial)}</span>
+        <span class="ds-format ${formatClass}">${formatLabel}</span>
       </div>
-      <div class="ds-meta">${esc(d.sensors)} · ${esc(d.size)}</div>
-      <div class="ds-meta">License: ${esc(d.license)}</div>
+      <div class="ds-what">${esc(d.what)}</div>
+      <div class="ds-chips">${chips}</div>
       <div class="ds-note">${esc(d.note)}</div>
-      <div class="ds-meta">Credit: ${esc(d.credit)}</div>
       <div class="ds-actions">
-        <button class="mini-btn ds-open" data-url="${esc(d.url)}">Open source</button>
-        <button class="mini-btn ds-cite" data-name="${esc(d.name)}" data-credit="${esc(d.credit)}" data-url="${esc(d.url)}">Copy credit</button>
+        ${d.download ? `<button class="mini-btn ds-download" data-id="${esc(d.id)}">Play ▶</button>` : ''}
+        <button class="mini-btn ds-source" data-url="${esc(d.url)}">Source ↗</button>
+        <span class="ds-license" title="${esc(d.credit)}">${esc(d.license)} · ${esc(d.credit)}</span>
       </div>
-    </div>`).join('');
+    </div>`;
+  }).join('');
+}
+
+// === Global download dock ===
+// A side panel showing every in-flight fetch: real byte progress, speed/ETA, and
+// Pause / Resume / Cancel. It lives at app level (not inside a card) so a running
+// download is always visible and controllable, wherever you are in the app.
+interface DlJob { el: HTMLElement; bar: HTMLElement; pct: HTMLElement; meta: HTMLElement; pause: HTMLButtonElement; d: DatasetEntry; }
+
+function dlFmt(n: number): string {
+  if (!isFinite(n) || n <= 0) return '0 KB';
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
+}
+
+function dlDock(): HTMLElement {
+  let dock = document.getElementById('dlDock');
+  if (dock) return dock;
+  dock = document.createElement('div');
+  dock.id = 'dlDock';
+  dock.className = 'dl-dock';
+  dock.innerHTML = '<div class="dl-dock-head"><span>Downloads</span><button id="dlDockClear" class="mini-btn">Clear</button></div><div id="dlList" class="dl-list"></div>';
+  document.body.appendChild(dock);
+  dock.querySelector('#dlDockClear')!.addEventListener('click', () => {
+    dock!.querySelectorAll('.dl-item.done, .dl-item.failed').forEach((el) => el.remove());
+    if (!dock!.querySelector('.dl-item')) dock!.style.display = 'none';
+  });
+  return dock;
+}
+
+function dlNewJob(d: DatasetEntry): DlJob {
+  const dock = dlDock();
+  dock.style.display = 'flex';
+  const list = dock.querySelector('#dlList') as HTMLElement;
+  const el = document.createElement('div');
+  el.className = 'dl-item';
+  el.innerHTML = `
+    <div class="dl-item-head"><span class="dl-name">${esc(d.name)}</span><span class="dl-pct">0%</span></div>
+    <div class="progress-track"><div class="progress-fill"></div></div>
+    <div class="dl-meta">Contacting source…</div>
+    <div class="dl-actions">
+      <button class="mini-btn dl-pause">Pause</button>
+      <button class="mini-btn dl-cancel">Cancel</button>
+    </div>`;
+  list.appendChild(el);
+
+  const job: DlJob = {
+    el,
+    bar: el.querySelector('.progress-fill') as HTMLElement,
+    pct: el.querySelector('.dl-pct') as HTMLElement,
+    meta: el.querySelector('.dl-meta') as HTMLElement,
+    pause: el.querySelector('.dl-pause') as HTMLButtonElement,
+    d,
+  };
+  const filename = d.download!.filename;
+  job.pause.addEventListener('click', () => {
+    const nowPaused = !job.pause.classList.contains('paused');
+    job.pause.classList.toggle('paused', nowPaused);
+    job.pause.textContent = nowPaused ? 'Resume' : 'Pause';
+    void invoke('dataset_control', { filename, action: nowPaused ? 'pause' : 'resume' });
+  });
+  (el.querySelector('.dl-cancel') as HTMLButtonElement).addEventListener('click', () => {
+    void invoke('dataset_control', { filename, action: 'cancel' });
+  });
+  return job;
+}
+
+function dlDone(job: DlJob, text: string, opts: { failed?: boolean; actions?: Array<[string, () => void]> } = {}) {
+  job.el.classList.add('done');
+  if (opts.failed) job.el.classList.add('failed');
+  job.meta.textContent = text;
+  job.pause.remove();
+  job.el.querySelector('.dl-cancel')?.remove();
+  if (opts.actions?.length) {
+    const row = document.createElement('div');
+    row.className = 'dl-actions';
+    for (const [label, fn] of opts.actions) {
+      const b = document.createElement('button');
+      b.className = 'mini-btn';
+      b.textContent = label;
+      b.addEventListener('click', fn);
+      row.appendChild(b);
+    }
+    job.el.appendChild(row);
+  }
+}
+
+/** Load an imported session onto the live dashboard so it actually plays there.
+ * The dashboard is the surface people value and tinker on; a dataset should end up
+ * on it, not in an orphan list (see FOUNDER_STRATEGY_DUMP.md). */
+async function playSessionInDashboard(fileId: string, label: string) {
+  const series = await invoke<SessionSeries>('load_session_series', { fileId });
+  const nCh = series.channels.length;
+  const nS = series.time.length;
+  if (!nCh || !nS) throw new Error('session has no samples');
+  setChannelCount(nCh, series.channels);
+  for (let i = 0; i < nS; i++) {
+    for (let c = 0; c < nCh; c++) {
+      const v = series.values[c]?.[i] ?? 0;
+      traceData[c]?.push(v);
+      historyData[c]?.push(v);
+    }
+  }
+  livePaused = false;
+  frozenTrace = [];
+  liveScrollSeek = 0;
+  isLiveScrubbing = false;
+  liveWindowSamples = Math.min(MAX_HISTORY, Math.max(2, nS));
+  traceDirty = true;
+  const cm = document.getElementById('connMsg');
+  if (cm) { cm.textContent = `Showing “${label}” — ${nS} samples · ${nCh} channels`; cm.style.color = 'var(--text-3)'; }
+  (document.querySelector('.tab-btn[data-tab="dashboard"]') as HTMLElement | null)?.click();
+  requestAnimationFrame(() => {
+    resizeTraces();
+    drawTraces();
+    updateScrubber();
+    updateTransportUI();
+    const ps = document.getElementById('plotSamples');
+    if (ps) ps.textContent = `${nS} SAMP`;
+  });
+}
+
+async function downloadDatasetRow(d: DatasetEntry) {
+  const dl = d.download;
+  if (!dl) return;
+  const cardBtn = document.querySelector(`.ds-download[data-id="${d.id}"]`) as HTMLButtonElement | null;
+  const setCard = (text: string, disabled = true) => { if (cardBtn) { cardBtn.textContent = text; cardBtn.disabled = disabled; } };
+  setCard('Opening…');
+
+  const job = dlNewJob(d);
+  let total: number | null = null;
+  let received = 0;
+  let speed = 0;
+  let lastT = performance.now();
+  let lastB = 0;
+
+  const unlisten = await listen<{ filename: string; received: number; total: number | null; paused: boolean }>(
+    'dataset-download-progress',
+    (e) => {
+      if (e.payload.filename !== dl.filename) return;
+      received = e.payload.received;
+      total = e.payload.total;
+      const now = performance.now();
+      if (now - lastT > 400) {
+        speed = (received - lastB) / ((now - lastT) / 1000);
+        lastT = now;
+        lastB = received;
+      }
+      const pctVal = total ? (received / total) * 100 : 0;
+      job.bar.style.width = total ? `${pctVal.toFixed(1)}%` : '100%';
+      job.pct.textContent = total ? `${pctVal.toFixed(0)}%` : dlFmt(received);
+      const eta = total && speed > 0 && !e.payload.paused ? ` · ~${Math.round((total - received) / speed)}s left` : '';
+      job.meta.textContent = e.payload.paused
+        ? `Paused — ${dlFmt(received)}${total ? ` / ${dlFmt(total)}` : ''}`
+        : total
+          ? `${dlFmt(received)} / ${dlFmt(total)} · ${dlFmt(speed)}/s${eta}`
+          : `${dlFmt(received)} · ${dlFmt(speed)}/s`;
+    },
+  );
+
+  try {
+    const out = await invoke<{ path: string; filename: string; bytes: number; cancelled: boolean; cached?: boolean }>(
+      'dataset_download',
+      { url: dl.url, filename: dl.filename },
+    );
+    await unlisten();
+
+    if (out.cancelled) {
+      dlDone(job, 'Cancelled — partial file removed.', { failed: true });
+      setCard('Play ▶', false);
+      return;
+    }
+
+    let paths = [out.path];
+    if (dl.archive) {
+      job.meta.textContent = 'Extracting…';
+      paths = await invoke<string[]>('dataset_extract', { path: out.path });
+    }
+    if (!paths.length) {
+      dlDone(job, `Downloaded ${dlFmt(out.bytes)} — no CSV inside.`, {
+        actions: [['Open folder', () => void invoke('open_path', { path: out.path })]],
+      });
+      setCard('Ready ✓', false);
+      return;
+    }
+
+    job.meta.textContent = `Importing ${paths.length} file${paths.length > 1 ? 's' : ''}…`;
+    const imported = await invoke<SessionRecord[]>('import_paths', { paths });
+    await reloadLibrary();
+    const target = imported[0] ?? sessions.find((s) => s.path && paths.includes(s.path));
+    if (target?.file_id) {
+      job.meta.textContent = 'Opening on the dashboard…';
+      await playSessionInDashboard(target.file_id, target.substance || d.name);
+      dlDone(job, `Playing “${target.substance || d.name}”`, {
+        actions: [['Back to data', () => (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click()]],
+      });
+    } else {
+      dlDone(job, `Ready — ${paths.length} session${paths.length > 1 ? 's' : ''} in Sources`, {
+        actions: [['View sessions', () => (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click()]],
+      });
+    }
+    setCard('Ready ✓', false);
+  } catch (e) {
+    await unlisten();
+    dlDone(job, `Failed: ${e}`, { failed: true });
+    setCard('Retry', false);
+  }
 }
 
 function initDatasetCatalog() {
   renderDatasetCatalog();
   document.getElementById('dsFilter')?.addEventListener('input', renderDatasetCatalog);
-  document.getElementById('dsCommercial')?.addEventListener('change', renderDatasetCatalog);
+  void (async () => {
+    try {
+      const dir = await invoke<string>('dataset_dir');
+      const el = document.getElementById('dsStoragePath');
+      if (el) { el.textContent = dir; el.title = dir; }
+    } catch { /* non-fatal */ }
+  })();
+  document.getElementById('dsOpenFolder')?.addEventListener('click', async () => {
+    try { await invoke('open_path', { path: await invoke<string>('dataset_dir') }); } catch { /* ignore */ }
+  });
   document.getElementById('dsImport')?.addEventListener('click', async () => {
     try {
       const { open } = await import('@tauri-apps/plugin-dialog');
@@ -4536,7 +9929,6 @@ function initDatasetCatalog() {
       if (!list.length) return;
       await invoke('import_paths', { paths: list });
       await reloadLibrary();
-      void trackDesktop('session_imported', { source_kind: 'file' });
       (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
     } catch (e) {
       console.error('Dataset import failed:', e);
@@ -4548,16 +9940,11 @@ function initDatasetCatalog() {
   el.addEventListener('click', async (ev) => {
     const btn = (ev.target as HTMLElement).closest('button');
     if (!btn) return;
-    if (btn.classList.contains('ds-open')) {
+    if (btn.classList.contains('ds-download')) {
+      const d = DATASET_CATALOG.find((x) => x.id === btn.dataset.id);
+      if (d) void downloadDatasetRow(d);
+    } else if (btn.classList.contains('ds-source')) {
       await invoke('open_release_page', { url: btn.dataset.url });
-    } else if (btn.classList.contains('ds-cite')) {
-      const text = `Dataset: ${btn.dataset.name}\nCredit: ${btn.dataset.credit}\nSource: ${btn.dataset.url}`;
-      try {
-        await navigator.clipboard.writeText(text);
-        const orig = btn.textContent;
-        btn.textContent = 'Copied ✓';
-        setTimeout(() => { btn.textContent = orig; }, 1200);
-      } catch { /* clipboard may be unavailable; stay silent */ }
     }
   });
 }
@@ -4568,7 +9955,15 @@ function initDatasetCatalog() {
 // is a named op from the catalog (no invented numbers — see SMELL_OPERATIONS.md).
 interface RecipeStep { op: string; channel?: number | null; params: Record<string, number>; }
 interface Recipe { id: string; name: string; version: string; source: string; steps: RecipeStep[]; notes: string; }
-interface OpInfo { op: string; intent: string; status: string; }
+interface OpInfo { op: string; intent: string; status: string; implemented: boolean; }
+interface RecipeRun {
+  channels: string[];
+  units: string[];
+  time: number[];
+  values: (number | null)[][];
+  applied: string[];
+  warnings: string[];
+}
 
 let recipeOpsCache: OpInfo[] = [];
 let currentEditingId: string | null = null;
@@ -4578,13 +9973,18 @@ function recipeSlug(name: string): string {
 }
 
 function recipeStepRow(op = '', channel: number | string = '', params = ''): string {
+  const initial = op || recipeOpsCache.find((o) => o.implemented)?.op || '';
   const opts = recipeOpsCache
-    .map((o) => `<option value="${esc(o.op)}"${o.op === op ? ' selected' : ''}>${esc(o.op)}</option>`)
+    .map((o) => {
+      const selected = o.op === initial ? ' selected' : '';
+      const disabled = o.implemented ? '' : ' disabled';
+      return `<option value="${esc(o.op)}"${selected}${disabled}>${esc(o.op)}${o.implemented ? '' : ' (planned)'}</option>`;
+    })
     .join('');
   return `<div class="rec-step">
-    <select class="stepOp">${opts}</select>
-    <input class="stepChannel" type="number" min="0" placeholder="ch" value="${channel}" />
-    <input class="stepParams" placeholder="k=v,k=v" value="${esc(params)}" />
+    <select class="stepOp" title="Named transform">${opts}</select>
+    <input class="stepChannel" type="number" min="0" placeholder="ch" title="Target channel; blank = all" value="${channel}" />
+    <input class="stepParams" placeholder="window=5" title="Parameters" value="${esc(params)}" />
     <button class="mini-btn stepDel" type="button">&times;</button>
   </div>`;
 }
@@ -4615,11 +10015,14 @@ function renderRecipeList(list: Recipe[]) {
 function renderRecipeOps(ops: OpInfo[]) {
   const el = document.getElementById('recipeOps');
   if (!el) return;
-  el.innerHTML = ops
+  const runnable = ops.filter(o => o.implemented);
+  el.innerHTML = runnable
     .map(
-      (o) => `<div class="op-row"><span class="op-name">${esc(o.op)}</span><span class="op-intent">${esc(o.intent)}</span><span class="op-status ${esc(o.status)}">${esc(o.status)}</span></div>`
+      (o) => `<div class="op-row"><span class="op-name">${esc(o.op)}</span><span class="op-intent">${esc(o.intent)}</span>
+        <span class="op-status ${esc(o.status)}">${esc(o.status)}</span>
+        <span class="op-status core">runnable</span></div>`
     )
-    .join('');
+    .join('') + '<div class="hint" style="font-size:10px;margin-top:6px">Only runnable steps are listed. Planned transforms are not exposed as if they work.</div>';
 }
 
 async function refreshRecipes() {
@@ -4637,10 +10040,43 @@ async function refreshRecipes() {
   }
 }
 
+function populateRecipeSources(selected?: string) {
+  const sel = document.getElementById('recSourceSel') as HTMLSelectElement | null;
+  if (!sel) return;
+  const list = sessions.filter((s) => !!s.file_id);
+  const opts: string[] = [];
+  if (selected && !list.some((s) => s.file_id === selected)) {
+    opts.push(`<option value="${esc(selected)}" selected>Unavailable source · ${esc(selected)}</option>`);
+  }
+  for (const s of list.slice(0, 200)) {
+    const name = (s.substance && s.substance !== 'unknown' ? s.substance : s.label) || 'recording';
+    const meta = [s.time, s.file_id!.slice(0, 8)].filter(Boolean).join(' · ');
+    opts.push(`<option value="${esc(s.file_id!)}"${s.file_id === selected ? ' selected' : ''}>${esc(name)}${meta ? ` · ${meta}` : ''}</option>`);
+  }
+  if (!opts.length) opts.push('<option value="">No recordings — import one first</option>');
+  sel.innerHTML = opts.join('');
+  const hint = document.getElementById('recSourceHint');
+  if (hint) {
+    hint.textContent = list.length
+      ? `${list.length} indexed recording${list.length === 1 ? '' : 's'}. Run reads this file; nothing is overwritten.`
+      : 'Import a CSV or .osmell first.';
+  }
+}
+
+async function ensureRecipeOps() {
+  if (!recipeOpsCache.length) await refreshRecipes();
+}
+
 function openRecipeEditor(r?: Recipe) {
   document.getElementById('recipeEditor')!.style.display = 'block';
-  (document.getElementById('recName') as HTMLInputElement).value = r?.name || '';
-  (document.getElementById('recSource') as HTMLInputElement).value = r?.source || '';
+  hideRecipeResult();
+  const sourceId = r?.source?.startsWith('osmell:') ? r.source.slice('osmell:'.length) : (r?.source || sessions.find((s) => !!s.file_id)?.file_id || '');
+  populateRecipeSources(sourceId);
+  const srcRec = sessions.find((s) => s.file_id === sourceId);
+  const suggested = srcRec
+    ? `${srcRec.substance && srcRec.substance !== 'unknown' ? srcRec.substance : srcRec.label || 'Recording'} response`
+    : 'Untitled response';
+  (document.getElementById('recName') as HTMLInputElement).value = r?.name || suggested;
   (document.getElementById('recVersion') as HTMLInputElement).value = r?.version || '1.0.0';
   const steps = document.getElementById('recSteps')!;
   steps.innerHTML = '';
@@ -4652,19 +10088,20 @@ function openRecipeEditor(r?: Recipe) {
       )
     );
   } else {
-    steps.insertAdjacentHTML('beforeend', recipeStepRow());
+    steps.insertAdjacentHTML('beforeend', recipeStepRow('smooth.movavg', '', 'window=5'));
+    steps.insertAdjacentHTML('beforeend', recipeStepRow('response.ratio'));
   }
   currentEditingId = r?.id || null;
   const msg = document.getElementById('recMsg')!;
   msg.style.color = 'var(--text-3)';
-  msg.textContent = r ? `Editing ${r.id}` : 'New recipe';
+  msg.textContent = r
+    ? `Editing ${r.id}`
+    : 'New recipe — source and two steps are prefilled. Press Run.';
 }
 
-function collectRecipe(): Recipe {
-  const name = (document.getElementById('recName') as HTMLInputElement).value.trim();
-  const source = (document.getElementById('recSource') as HTMLInputElement).value.trim();
-  const version = (document.getElementById('recVersion') as HTMLInputElement).value.trim() || '1.0.0';
+function collectSteps(): RecipeStep[] {
   const steps: RecipeStep[] = [];
+  const bad: string[] = [];
   document.querySelectorAll('#recSteps .rec-step').forEach((row) => {
     const op = (row.querySelector('.stepOp') as HTMLSelectElement).value;
     const chRaw = (row.querySelector('.stepChannel') as HTMLInputElement).value.trim();
@@ -4675,18 +10112,35 @@ function collectRecipe(): Recipe {
       .filter(Boolean)
       .forEach((pair) => {
         const [k, v] = pair.split('=').map((s) => s.trim());
+        if (!k || v === undefined) { bad.push(pair); return; }
         const n = Number(v);
-        if (k && v !== undefined && !Number.isNaN(n)) params[k] = n;
+        if (Number.isNaN(n)) bad.push(pair); else params[k] = n;
       });
     steps.push({ op, channel: chRaw === '' ? null : Number(chRaw), params });
   });
-  return { id: currentEditingId || recipeSlug(name), name, version, source, steps, notes: '' };
+  if (bad.length) throw new Error(`Bad parameter${bad.length === 1 ? '' : 's'}: ${bad.join(', ')} (use key=number)`);
+  return steps;
+}
+
+function collectRecipe(): Recipe {
+  const name = (document.getElementById('recName') as HTMLInputElement).value.trim();
+  const sourceId = (document.getElementById('recSourceSel') as HTMLSelectElement | null)?.value || '';
+  const source = sourceId ? (sourceId.includes(':') ? sourceId : `osmell:${sourceId}`) : '';
+  const version = (document.getElementById('recVersion') as HTMLInputElement).value.trim() || '1.0.0';
+  return {
+    id: currentEditingId || recipeSlug(name || 'recipe'),
+    name,
+    version,
+    source,
+    steps: collectSteps(),
+    notes: '',
+  };
 }
 
 async function saveRecipe() {
   const msg = document.getElementById('recMsg')!;
-  const recipe = collectRecipe();
   try {
+    const recipe = collectRecipe();
     await invoke('recipe_save', { recipe });
     msg.style.color = 'var(--green)';
     msg.textContent = `Saved ${recipe.id}.`;
@@ -4699,22 +10153,218 @@ async function saveRecipe() {
   }
 }
 
+let lastRecipeRun: RecipeRun | null = null;
+
+function hideRecipeResult() {
+  lastRecipeRun = null;
+  const el = document.getElementById('recipeResult');
+  if (el) el.style.display = 'none';
+  const msg = document.getElementById('recipeResultMsg');
+  if (msg) msg.textContent = '';
+}
+
+function renderRecipeRun(run: RecipeRun) {
+  lastRecipeRun = run;
+  const card = document.getElementById('recipeResult')!;
+  card.style.display = 'block';
+  card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  const n = run.values[0]?.length ?? 0;
+  const dur = run.time.length > 1 ? run.time[run.time.length - 1] - run.time[0] : 0;
+  document.getElementById('recipeResultMeta')!.textContent =
+    `${run.channels.length} channel${run.channels.length === 1 ? '' : 's'} · ${n} samples · ${dur.toFixed(1)} s`;
+  document.getElementById('recipeResultSteps')!.innerHTML =
+    run.applied.map((a) => `<span class="recipe-tag">${esc(a)}</span>`).join('');
+  const warn = document.getElementById('recipeResultWarn')!;
+  warn.textContent = run.warnings.length ? run.warnings.join(' · ') : '';
+  const out = document.getElementById('recipeResultMsg')!;
+  out.textContent = '';
+  out.style.color = 'var(--text-3)';
+  requestAnimationFrame(() => drawRecipeChart(run));
+}
+
+function drawRecipeChart(run: RecipeRun) {
+  const canvas = document.getElementById('recipeChart') as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(320, canvas.clientWidth || 600);
+  const h = 230;
+  canvas.width = Math.round(w * dpr);
+  canvas.height = Math.round(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const padL = 86, padR = 10, padT = 6, padB = 4;
+  const n = Math.max(1, run.channels.length);
+  const laneH = (h - padT - padB) / n;
+  for (let ci = 0; ci < run.channels.length; ci++) {
+    const top = padT + ci * laneH;
+    if (ci > 0) {
+      ctx.strokeStyle = 'rgba(8,8,12,0.06)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, top);
+      ctx.lineTo(w, top);
+      ctx.stroke();
+    }
+    const vals = run.values[ci].map((v) => (v === null ? NaN : v));
+    const finite = vals.filter(Number.isFinite);
+    ctx.fillStyle = '#3a3630';
+    ctx.font = '600 10px -apple-system, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(run.channels[ci], 4, top + laneH / 2 - 4);
+    ctx.fillStyle = '#8a7f6c';
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.fillText(run.units[ci] || 'raw', 4, top + laneH / 2 + 7);
+    if (!finite.length) {
+      ctx.fillStyle = '#8a7f6c';
+      ctx.font = '9px -apple-system, sans-serif';
+      ctx.fillText('n/a', padL + 4, top + laneH / 2);
+      continue;
+    }
+    let lo = Math.min(...finite), hi = Math.max(...finite);
+    if (!(hi - lo > 1e-12)) { lo -= 0.5; hi += 0.5; }
+    const pad = (hi - lo) * 0.08;
+    lo -= pad; hi += pad;
+    const py = (v: number) => top + 4 + (1 - (v - lo) / (hi - lo)) * (laneH - 8);
+    if (lo < 0 && hi > 0) {
+      ctx.setLineDash([2, 3]);
+      ctx.strokeStyle = 'rgba(8,8,12,0.18)';
+      ctx.beginPath();
+      ctx.moveTo(padL, py(0));
+      ctx.lineTo(w - padR, py(0));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.strokeStyle = CHART_COLORS[ci % CHART_COLORS.length];
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < vals.length; i++) {
+      if (!Number.isFinite(vals[i])) { started = false; continue; }
+      const px = padL + (vals.length <= 1 ? 0 : (i / (vals.length - 1)) * (w - padL - padR));
+      const yy = py(vals[i]);
+      if (!started) { ctx.moveTo(px, yy); started = true; } else { ctx.lineTo(px, yy); }
+    }
+    ctx.stroke();
+  }
+}
+
+function recipeRunInput(): { fileId: string; steps: RecipeStep[] } | null {
+  const msg = document.getElementById('recMsg')!;
+  const fileId = (document.getElementById('recSourceSel') as HTMLSelectElement | null)?.value || '';
+  if (!fileId || !sessions.some((s) => s.file_id === fileId)) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Pick an indexed recording as the source.';
+    return null;
+  }
+  let steps: RecipeStep[];
+  try {
+    steps = collectSteps();
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = String(e);
+    return null;
+  }
+  if (!steps.length) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = 'Add at least one step.';
+    return null;
+  }
+  const planned = steps.filter((s) => !recipeOpsCache.find((o) => o.op === s.op)?.implemented);
+  if (planned.length) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = `Not runnable yet: ${planned.map((s) => s.op).join(', ')}. Replace with a runnable op.`;
+    return null;
+  }
+  return { fileId, steps };
+}
+
+async function runRecipe() {
+  const msg = document.getElementById('recMsg')!;
+  const input = recipeRunInput();
+  if (!input) return;
+  msg.style.color = 'var(--text-3)';
+  msg.textContent = 'Running…';
+  try {
+    const run = await invoke<RecipeRun>('recipe_run', { fileId: input.fileId, steps: input.steps });
+    renderRecipeRun(run);
+    msg.style.color = 'var(--green)';
+    msg.textContent = `Ran ${input.steps.length} step${input.steps.length === 1 ? '' : 's'} on ${run.channels.length} channels.`;
+  } catch (e) {
+    msg.style.color = 'var(--red)';
+    msg.textContent = String(e);
+  }
+}
+
+async function saveRecipeResult() {
+  const input = recipeRunInput();
+  if (!input) return;
+  const out = document.getElementById('recipeResultMsg')!;
+  let recipe: Recipe;
+  try {
+    recipe = collectRecipe();
+  } catch (e) {
+    out.style.color = 'var(--red)';
+    out.textContent = String(e);
+    return;
+  }
+  out.style.color = 'var(--text-3)';
+  out.textContent = 'Saving…';
+  try {
+    const dir = await invoke<string>('get_recordings_dir');
+    const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+    const path = `${dir}/Derived/${stamp}_${recipeSlug(recipe.name)}.osmell`;
+    const saved = await invoke<string>('recipe_export_osmell', {
+      fileId: input.fileId,
+      steps: input.steps,
+      outputPath: path,
+      recipeId: recipe.id,
+      recipeName: recipe.name,
+      recipeVersion: recipe.version,
+    });
+    await invoke('import_paths', { paths: [path] });
+    await reloadLibrary();
+    out.style.color = 'var(--green)';
+    out.textContent = `${saved} · added to your Smell library.`;
+  } catch (e) {
+    out.style.color = 'var(--red)';
+    out.textContent = `Save failed: ${e}`;
+  }
+}
+
 function initRecipes() {
   refreshRecipes();
-  document.getElementById('recipeNew')?.addEventListener('click', () => openRecipeEditor());
+  document.getElementById('recipeNew')?.addEventListener('click', async () => {
+    await ensureRecipeOps();
+    openRecipeEditor();
+  });
   document.getElementById('recipeRefresh')?.addEventListener('click', refreshRecipes);
-  document.getElementById('recAddStep')?.addEventListener('click', () =>
-    document.getElementById('recSteps')!.insertAdjacentHTML('beforeend', recipeStepRow())
-  );
+  document.getElementById('recAddStep')?.addEventListener('click', () => {
+    hideRecipeResult();
+    document.getElementById('recSteps')!.insertAdjacentHTML('beforeend', recipeStepRow());
+  });
+  document.getElementById('recRun')?.addEventListener('click', runRecipe);
+  document.getElementById('recSaveResult')?.addEventListener('click', saveRecipeResult);
   document.getElementById('recSave')?.addEventListener('click', saveRecipe);
+  document.getElementById('recSourceSel')?.addEventListener('change', hideRecipeResult);
+  document.getElementById('recSteps')?.addEventListener('input', hideRecipeResult);
   document.getElementById('recCancel')?.addEventListener('click', () => {
     document.getElementById('recipeEditor')!.style.display = 'none';
+    hideRecipeResult();
     currentEditingId = null;
+  });
+  window.addEventListener('resize', () => {
+    if (lastRecipeRun) requestAnimationFrame(() => drawRecipeChart(lastRecipeRun!));
   });
 
   document.getElementById('recSteps')!.addEventListener('click', (ev) => {
     const btn = (ev.target as HTMLElement).closest('.stepDel');
-    if (btn) (btn.closest('.rec-step') as HTMLElement)?.remove();
+    if (btn) {
+      (btn.closest('.rec-step') as HTMLElement)?.remove();
+      hideRecipeResult();
+    }
   });
 
   document.getElementById('recipeList')!.addEventListener('click', async (ev) => {
@@ -4723,6 +10373,7 @@ function initRecipes() {
     const id = btn.getAttribute('data-id') || '';
     if (btn.classList.contains('recEdit')) {
       try {
+        await ensureRecipeOps();
         const r = await invoke<Recipe>('recipe_load', { id });
         openRecipeEditor(r);
       } catch { /* ignore */ }
@@ -5764,6 +11415,17 @@ function updateTransportUI() {
 }
 document.getElementById('livePlayPause')!.addEventListener('click', toggleLivePause);
 document.getElementById('liveClear')!.addEventListener('click', clearLiveView);
+document.getElementById('dashExplore')?.addEventListener('click', () => {
+  showWorkspaceView('smells');
+});
+document.getElementById('dashCompare')?.addEventListener('click', () => {
+  showWorkspaceView('compare');
+  window.setTimeout(() => { void tryStarterCompare(); }, 80);
+});
+document.getElementById('dashConnect')?.addEventListener('click', () => {
+  showWorkspaceView('system');
+  document.querySelector<HTMLElement>('.sys-nav-item[data-sys="connection"]')?.click();
+});
 (document.getElementById('liveRev') as HTMLButtonElement | null)?.addEventListener('click', (e) => {
   if (e.altKey) setLiveSeek(liveMaxSeek()); else stepLiveBack();
 });
@@ -5964,7 +11626,7 @@ function cssVarColor(name: string): string {
   return v || '#888';
 }
 
-function drawPhenoBars(fp: number[], validGeometry: boolean) {
+function drawPhenoBars(values: number[], validGeometry: boolean) {
   const canvas = document.getElementById('phenoBars') as HTMLCanvasElement | null;
   if (!canvas) return;
   const dpr = window.devicePixelRatio || 1;
@@ -5979,24 +11641,39 @@ function drawPhenoBars(fp: number[], validGeometry: boolean) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   ctx.clearRect(0, 0, pw, ph);
-  if (fp.length === 0) {
+  if (values.length === 0) {
     ctx.fillStyle = cssVarColor('--text-3');
     ctx.globalAlpha = 0.7;
-    ctx.font = `${Math.max(8, Math.round(h * 0.24))}px monospace`;
+    ctx.font = `${Math.max(8, Math.round(h * 0.24 * dpr))}px monospace`;
     ctx.textBaseline = 'middle';
-    ctx.fillText('no fingerprint', 4, h / 2);
+    ctx.fillText('no fingerprint', 4 * dpr, ph / 2);
     ctx.globalAlpha = 1;
     return;
   }
-  const cry = cssVarColor(validGeometry ? '--cyan' : '--text-3');
-  const maxV = Math.max(...fp, 0.001);
+  const maxAbs = Math.max(...values.map(v => Math.abs(v)), 0.001);
   const pad = 2 * dpr;
-  const bw = (pw - pad * 2) / fp.length;
-  for (let i = 0; i < fp.length; i++) {
-    const bh = Math.max(1.5 * dpr, (fp[i] / maxV) * (ph - pad * 2));
-    ctx.fillStyle = cry;
-    ctx.globalAlpha = validGeometry ? 0.85 : 0.45;
-    ctx.fillRect(pad + i * bw, ph - pad - bh, Math.max(1, bw - dpr), bh);
+  const bw = (pw - pad * 2) / values.length;
+  const mid = ph / 2;
+  // Signed profile: the live monitor must not collapse reducing and oxidising
+  // into the same magnitude bar. Green = reducing, amber = oxidising.
+  ctx.strokeStyle = cssVarColor('--border');
+  ctx.lineWidth = 1;
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  ctx.moveTo(pad, mid);
+  ctx.lineTo(pw - pad, mid);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  const reducing = cssVarColor('--green');
+  const oxidizing = cssVarColor('--yellow');
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v) || Math.abs(v) < 1e-12) continue;
+    const bh = Math.max(1.5 * dpr, (Math.abs(v) / maxAbs) * (ph / 2 - pad));
+    ctx.fillStyle = v < 0 ? reducing : oxidizing;
+    ctx.globalAlpha = validGeometry ? 0.9 : 0.6;
+    if (v < 0) ctx.fillRect(pad + i * bw, mid, Math.max(1, bw - dpr), bh);
+    else ctx.fillRect(pad + i * bw, mid - bh, Math.max(1, bw - dpr), bh);
   }
   ctx.globalAlpha = 1;
 }
@@ -6072,8 +11749,8 @@ function renderPhenotype(p: PhenotypeReport) {
     setVal('phenoA3Sub', phenoA3Reason(p.a3.reason));
   }
   const cap = document.getElementById('phenoA3Cap');
-  if (cap) cap.textContent = `${p.a3.fingerprint.length} channels · ${p.a3.reason}`;
-  drawPhenoBars(p.a3.fingerprint, p.reference_geometry);
+  if (cap) cap.textContent = `${p.per_channel.length} channels · signed ΔR/R0 · ${p.a3.reason}`;
+  drawPhenoBars(p.per_channel.map(c => c.delta), p.reference_geometry);
 
   // A2 — live kinetic binding (rise / recovery shape), mirroring phenotype.py.
   // Rise is computed live from the window shape; recovery is honest "unknown"
@@ -6715,7 +12392,7 @@ updateBuzzerPreviews();
 updateOledPreview();
 renderFleet();
 refreshToolchain();
-refreshTrainLibrary();
+setPlotLink(false);
 renderLiveState();
 loadChangeLog();
 renderChangeLog();
@@ -6724,9 +12401,28 @@ initRecipes();
 refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
-reloadLibrary();
+// Populate first, then paint: the library must never render as an empty state
+// on a machine that has the starter pack available.
+// Populate first, then paint: the library must never render as an empty state
+// on a machine that has the starter pack available.
+ensureStarterLibrary()
+  .catch(() => { /* optional */ })
+  .then(() => reloadLibrary())
+  .then(() => landOnWork())
+  .catch((e) => console.error('Boot chain failed:', e));
+
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
 checkRecoveredSessions();
+
+// Land where there is something to do. With a device link the live dashboard is
+// the right home; with no link it is an empty cockpit, so open the library —
+// which now holds the starter pack — instead of a blank instrument panel.
+function landOnWork(): void {
+  if (connected) return;
+  if (!sessions.length) return;
+  const onDashboard = document.querySelector('.tab-btn[data-tab="dashboard"]')?.classList.contains('active');
+  if (onDashboard) (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+}
 
 // Fit the window to the screen: never let it overstretch past the monitor's
 // work area. Degrades silently when the core doesn't grant window sizing.

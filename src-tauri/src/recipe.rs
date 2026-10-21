@@ -84,6 +84,21 @@ pub struct OpInfo {
     pub intent: &'static str,
     /// `core` = must ship v1, `next` = v1.1+, `research` = needs our own R&D.
     pub status: &'static str,
+    /// Whether [`run_pipeline`] can execute it today. The catalog keeps planned
+    /// ops visible, but the editor must not offer a step that cannot run.
+    pub implemented: bool,
+}
+
+/// The result of running a pipeline: transformed series, per-channel units, the
+/// exact steps applied, and any honest warnings (masked samples, bad baselines).
+#[derive(Debug, Clone, Serialize)]
+pub struct RecipeRun {
+    pub channels: Vec<String>,
+    pub units: Vec<String>,
+    pub time: Vec<f64>,
+    pub values: Vec<Vec<Option<f64>>>,
+    pub applied: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 /// The v1 op catalog — the `[core]` subset of the taxonomy in SMELL_OPERATIONS.md §3.
@@ -136,7 +151,371 @@ pub fn known_ops() -> Vec<OpInfo> {
         ("export.csv", "Export CSV", "core"),
         ("export.osmell", "Export a .osmell bundle", "core"),
     ];
-    OPS.iter().map(|(op, intent, status)| OpInfo { op, intent, status }).collect()
+    OPS.iter()
+        .map(|(op, intent, status)| OpInfo {
+            op,
+            intent,
+            status,
+            implemented: is_runnable(op),
+        })
+        .collect()
+}
+
+/// Ops the executor understands today. Everything else stays in the catalog as
+/// a labelled plan rather than a silent no-op.
+pub fn is_runnable(op: &str) -> bool {
+    matches!(
+        op,
+        "missing.fill"
+            | "outlier.remove"
+            | "smooth.ema"
+            | "smooth.movavg"
+            | "detrend.linear"
+            | "baseline.select"
+            | "response.ratio"
+            | "normalize.r0"
+            | "scale.minmax"
+            | "scale.zscore"
+    )
+}
+
+fn param(step: &RecipeStep, key: &str, default: f64) -> f64 {
+    step.params.get(key).copied().filter(|v| v.is_finite()).unwrap_or(default)
+}
+
+fn step_label(step: &RecipeStep) -> String {
+    let mut s = step.op.clone();
+    if !step.params.is_empty() {
+        let ps: Vec<String> = step.params.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        s.push_str(&format!("({})", ps.join(",")));
+    }
+    match step.channel {
+        Some(ci) => s.push_str(&format!(" → ch{ci}")),
+        None => s.push_str(" → all channels"),
+    }
+    s
+}
+
+fn mean_first(v: &[f64], n: usize) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for &x in v.iter().take(n) {
+        if x.is_finite() {
+            sum += x;
+            count += 1;
+        }
+    }
+    (count > 0).then_some(sum / count as f64)
+}
+
+fn mean_window(v: &[f64], time: &[f64], start: f64, end: f64) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut count = 0usize;
+    for (i, &x) in v.iter().enumerate() {
+        let t = time.get(i).copied().unwrap_or(i as f64);
+        if t >= start && t <= end && x.is_finite() {
+            sum += x;
+            count += 1;
+        }
+    }
+    (count > 0).then_some(sum / count as f64)
+}
+
+fn movavg(v: &[f64], window: usize) -> Vec<f64> {
+    let w = window.max(1);
+    let half = w / 2;
+    (0..v.len())
+        .map(|i| {
+            let lo = i.saturating_sub(half);
+            let hi = (i + half).min(v.len().saturating_sub(1));
+            let mut sum = 0.0;
+            let mut count = 0usize;
+            for &x in &v[lo..=hi] {
+                if x.is_finite() {
+                    sum += x;
+                    count += 1;
+                }
+            }
+            if count > 0 { sum / count as f64 } else { f64::NAN }
+        })
+        .collect()
+}
+
+fn ema(v: &[f64], alpha: f64) -> Vec<f64> {
+    let a = alpha.clamp(0.0, 1.0);
+    let mut prev = f64::NAN;
+    v.iter()
+        .map(|&x| {
+            if x.is_finite() {
+                prev = if prev.is_finite() { a * x + (1.0 - a) * prev } else { x };
+                prev
+            } else {
+                prev
+            }
+        })
+        .collect()
+}
+
+fn detrend(v: &[f64]) -> Vec<f64> {
+    let pts: Vec<(f64, f64)> = v
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &x)| x.is_finite().then_some((i as f64, x)))
+        .collect();
+    if pts.len() < 2 {
+        return v.to_vec();
+    }
+    let n = pts.len() as f64;
+    let mx = pts.iter().map(|p| p.0).sum::<f64>() / n;
+    let my = pts.iter().map(|p| p.1).sum::<f64>() / n;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (x, y) in &pts {
+        num += (x - mx) * (y - my);
+        den += (x - mx) * (x - mx);
+    }
+    let b = if den > 1e-12 { num / den } else { 0.0 };
+    let a = my - b * mx;
+    v.iter()
+        .enumerate()
+        .map(|(i, &x)| if x.is_finite() { x - (a + b * i as f64) } else { f64::NAN })
+        .collect()
+}
+
+fn fill_linear(v: &[f64]) -> Vec<f64> {
+    let mut out = v.to_vec();
+    let n = out.len();
+    let mut i = 0;
+    while i < n {
+        if out[i].is_finite() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && !out[i].is_finite() {
+            i += 1;
+        }
+        let end = i;
+        let prev = if start > 0 { out[start - 1] } else { f64::NAN };
+        let next = if end < n { out[end] } else { f64::NAN };
+        for j in start..end {
+            out[j] = if prev.is_finite() && next.is_finite() {
+                let f = (j - start + 1) as f64 / (end - start + 1) as f64;
+                prev + (next - prev) * f
+            } else if prev.is_finite() {
+                prev
+            } else {
+                next
+            };
+        }
+    }
+    out
+}
+
+fn fill_locf(v: &[f64]) -> Vec<f64> {
+    let mut last = f64::NAN;
+    v.iter()
+        .map(|&x| {
+            if x.is_finite() {
+                last = x;
+                x
+            } else {
+                last
+            }
+        })
+        .collect()
+}
+
+fn minmax(v: &[f64]) -> Vec<f64> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for &x in v.iter().filter(|x| x.is_finite()) {
+        lo = lo.min(x);
+        hi = hi.max(x);
+    }
+    if !(hi - lo > 1e-12) {
+        return v.iter().map(|x| if x.is_finite() { 0.0 } else { f64::NAN }).collect();
+    }
+    v.iter()
+        .map(|&x| if x.is_finite() { (x - lo) / (hi - lo) } else { f64::NAN })
+        .collect()
+}
+
+fn zscore(v: &[f64]) -> Vec<f64> {
+    let finite: Vec<f64> = v.iter().copied().filter(|x| x.is_finite()).collect();
+    if finite.is_empty() {
+        return v.to_vec();
+    }
+    let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+    let var = finite.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / finite.len() as f64;
+    let sd = var.sqrt();
+    if !(sd > 1e-12) {
+        return v.iter().map(|x| if x.is_finite() { 0.0 } else { f64::NAN }).collect();
+    }
+    v.iter()
+        .map(|&x| if x.is_finite() { (x - mean) / sd } else { f64::NAN })
+        .collect()
+}
+
+/// Execute a pipeline over one session. Returns the transformed series plus the
+/// exact steps and warnings, so a result is reproducible rather than a screenshot.
+pub fn run_pipeline(
+    channels: &[String],
+    time: &[f64],
+    values: &[Vec<f64>],
+    steps: &[RecipeStep],
+) -> Result<RecipeRun, String> {
+    if steps.is_empty() {
+        return Err("a recipe needs at least one step".into());
+    }
+    let mut data: Vec<Vec<f64>> = values.to_vec();
+    let mut units = vec!["raw".to_string(); channels.len()];
+    let mut baseline: Option<Vec<f64>> = None;
+    let mut applied = Vec::new();
+    let mut warnings = Vec::new();
+
+    for (i, step) in steps.iter().enumerate() {
+        if !is_runnable(&step.op) {
+            return Err(format!(
+                "step {}: `{}` is in the catalog but not runnable yet",
+                i + 1,
+                step.op
+            ));
+        }
+        let targets: Vec<usize> = match step.channel {
+            Some(ci) if ci < data.len() => vec![ci],
+            Some(ci) => {
+                return Err(format!(
+                    "step {}: channel {} is out of range ({} channels)",
+                    i + 1,
+                    ci,
+                    data.len()
+                ))
+            }
+            None => (0..data.len()).collect(),
+        };
+
+        match step.op.as_str() {
+            "baseline.select" => {
+                let start = param(step, "start", 0.0);
+                let end = param(step, "end", f64::INFINITY);
+                let mut picked = vec![f64::NAN; data.len()];
+                for ci in 0..data.len() {
+                    picked[ci] = mean_window(&data[ci], time, start, end)
+                        .or_else(|| mean_first(&data[ci], 15))
+                        .unwrap_or(f64::NAN);
+                }
+                baseline = Some(picked);
+            }
+            "response.ratio" | "normalize.r0" => {
+                let base = baseline.clone().unwrap_or_else(|| {
+                    data.iter().map(|v| mean_first(v, 15).unwrap_or(f64::NAN)).collect()
+                });
+                for &ci in &targets {
+                    let r0 = base.get(ci).copied().unwrap_or(f64::NAN);
+                    if !r0.is_finite() || r0.abs() < 1e-12 {
+                        warnings.push(format!(
+                            "{} has no usable baseline; its response is undefined",
+                            channels.get(ci).cloned().unwrap_or_else(|| format!("ch{ci}"))
+                        ));
+                        data[ci] = vec![f64::NAN; data[ci].len()];
+                        continue;
+                    }
+                    data[ci] = data[ci]
+                        .iter()
+                        .map(|&x| {
+                            if !x.is_finite() {
+                                f64::NAN
+                            } else if step.op == "response.ratio" {
+                                (x - r0) / r0
+                            } else {
+                                x / r0
+                            }
+                        })
+                        .collect();
+                    units[ci] = if step.op == "response.ratio" { "ΔR/R0" } else { "R/R0" }.to_string();
+                }
+            }
+            "smooth.movavg" => {
+                let w = param(step, "window", 5.0).round().max(1.0) as usize;
+                for &ci in &targets {
+                    data[ci] = movavg(&data[ci], w);
+                }
+            }
+            "smooth.ema" => {
+                let a = param(step, "alpha", 0.3);
+                for &ci in &targets {
+                    data[ci] = ema(&data[ci], a);
+                }
+            }
+            "detrend.linear" => {
+                for &ci in &targets {
+                    data[ci] = detrend(&data[ci]);
+                }
+            }
+            "missing.fill" => {
+                let locf = param(step, "method", 0.0) >= 1.0;
+                for &ci in &targets {
+                    data[ci] = if locf { fill_locf(&data[ci]) } else { fill_linear(&data[ci]) };
+                }
+            }
+            "outlier.remove" => {
+                let z = param(step, "z", 3.0).abs().max(1.0);
+                for &ci in &targets {
+                    let finite: Vec<f64> = data[ci].iter().copied().filter(|x| x.is_finite()).collect();
+                    if finite.len() < 3 {
+                        continue;
+                    }
+                    let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+                    let var = finite.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / finite.len() as f64;
+                    let sd = var.sqrt();
+                    if !(sd > 1e-12) {
+                        continue;
+                    }
+                    let mut masked = 0usize;
+                    for x in data[ci].iter_mut() {
+                        if x.is_finite() && (*x - mean).abs() > z * sd {
+                            *x = f64::NAN;
+                            masked += 1;
+                        }
+                    }
+                    if masked > 0 {
+                        warnings.push(format!(
+                            "{} outlier(s) masked on {}; add missing.fill to interpolate",
+                            masked,
+                            channels.get(ci).cloned().unwrap_or_else(|| format!("ch{ci}"))
+                        ));
+                    }
+                }
+            }
+            "scale.minmax" => {
+                for &ci in &targets {
+                    data[ci] = minmax(&data[ci]);
+                    units[ci] = "min–max".into();
+                }
+            }
+            "scale.zscore" => {
+                for &ci in &targets {
+                    data[ci] = zscore(&data[ci]);
+                    units[ci] = "z-score".into();
+                }
+            }
+            _ => unreachable!("is_runnable admitted an unknown op"),
+        }
+        applied.push(step_label(step));
+    }
+
+    Ok(RecipeRun {
+        channels: channels.to_vec(),
+        units,
+        time: time.to_vec(),
+        values: data
+            .into_iter()
+            .map(|v| v.into_iter().map(|x| x.is_finite().then_some(x)).collect())
+            .collect(),
+        applied,
+        warnings,
+    })
 }
 
 /// The default location for saved recipes: `<config>/Osmograph/recipes`.
@@ -403,5 +782,60 @@ mod tests {
         assert_eq!(p.software.name, "Osmograph");
         assert_eq!(p.content_hash, content_hash(b"data"));
         assert!(p.recipe.is_none());
+    }
+
+    fn step(op: &str) -> RecipeStep {
+        RecipeStep { op: op.into(), channel: None, params: BTreeMap::new() }
+    }
+
+    #[test]
+    fn response_ratio_uses_the_selected_baseline() {
+        let channels = vec!["CO".to_string()];
+        let time = vec![0.0, 1.0, 2.0, 3.0];
+        let values = vec![vec![2.0, 2.0, 4.0, 6.0]];
+        let mut base = step("baseline.select");
+        base.params.insert("start".into(), 0.0);
+        base.params.insert("end".into(), 1.0);
+        let run = run_pipeline(&channels, &time, &values, &[base, step("response.ratio")]).unwrap();
+        assert_eq!(run.units[0], "ΔR/R0");
+        let out: Vec<f64> = run.values[0].iter().map(|v| v.unwrap()).collect();
+        assert_eq!(out, vec![0.0, 0.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn a_channel_target_leaves_other_channels_alone() {
+        let channels = vec!["A".to_string(), "B".to_string()];
+        let time = vec![0.0, 1.0, 2.0, 3.0];
+        let values = vec![vec![2.0, 2.0, 4.0, 6.0], vec![10.0, 10.0, 20.0, 30.0]];
+        let mut ratio = step("response.ratio");
+        ratio.channel = Some(0);
+        let run = run_pipeline(&channels, &time, &values, &[ratio]).unwrap();
+        assert_eq!(run.units[0], "ΔR/R0");
+        assert_eq!(run.units[1], "raw");
+        let b: Vec<f64> = run.values[1].iter().map(|v| v.unwrap()).collect();
+        assert_eq!(b, vec![10.0, 10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn moving_average_smooths_without_shifting_the_edges() {
+        let channels = vec!["CO".to_string()];
+        let time = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let values = vec![vec![0.0, 0.0, 3.0, 0.0, 0.0]];
+        let mut smooth = step("smooth.movavg");
+        smooth.params.insert("window".into(), 3.0);
+        let run = run_pipeline(&channels, &time, &values, &[smooth]).unwrap();
+        let out: Vec<f64> = run.values[0].iter().map(|v| v.unwrap()).collect();
+        assert_eq!(out, vec![0.0, 1.0, 1.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn planned_ops_fail_loudly_instead_of_silently_doing_nothing() {
+        let channels = vec!["CO".to_string()];
+        let time = vec![0.0, 1.0];
+        let values = vec![vec![1.0, 2.0]];
+        let err = run_pipeline(&channels, &time, &values, &[step("feature.auc")]).unwrap_err();
+        assert!(err.contains("not runnable"));
+        assert!(!is_runnable("feature.auc"));
+        assert!(is_runnable("response.ratio"));
     }
 }

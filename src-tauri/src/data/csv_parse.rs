@@ -54,7 +54,7 @@ fn parse_row(raw: &str, delim: char) -> Vec<String> {
 }
 
 /// Python `csv.py::_detect_time_column_info`: returns `(name, "ms"|"s")`.
-fn detect_time_column_info(header: &[String]) -> Option<(String, String)> {
+pub fn detect_time_column_info(header: &[String]) -> Option<(String, String)> {
     for raw in header {
         let n: String = raw
             .to_lowercase()
@@ -91,7 +91,7 @@ fn detect_delimiter(sample_line: &str) -> char {
 }
 
 /// Python `csv.py::is_context_column`.
-fn is_context_column(name: &str) -> bool {
+pub fn is_context_column(name: &str) -> bool {
     let n = name.to_lowercase();
     CONTEXT_COLUMN_HINTS.iter().any(|hint| n.contains(hint))
 }
@@ -239,19 +239,37 @@ pub fn parse_session_csv(text: &str) -> Result<ParsedSession, String> {
 
     // First pass: columns with at least one numeric cell become channels.
     let mut numeric: BTreeMap<String, usize> = BTreeMap::new();
+    let mut placeholder: BTreeMap<String, usize> = BTreeMap::new();
     for r in rows.iter().skip(1) {
         let cells = parse_row(r, delim);
         for c in &sensor_candidates {
             if let Some(idx) = header.iter().position(|h| h == c) {
-                if idx < cells.len() && safe_float(cells[idx].as_str()).is_some() {
-                    *numeric.entry(c.clone()).or_insert(0) += 1;
+                if idx < cells.len() {
+                    if let Some(v) = safe_float(cells[idx].as_str()) {
+                        *numeric.entry(c.clone()).or_insert(0) += 1;
+                        if is_placeholder(v) {
+                            *placeholder.entry(c.clone()).or_insert(0) += 1;
+                        }
+                    }
                 }
             }
         }
     }
+    let placeholder_cols: Vec<String> = sensor_candidates
+        .iter()
+        .filter(|c| placeholder.get(*c).map(|n| *n > 0).unwrap_or(false))
+        .cloned()
+        .collect();
+    if !placeholder_cols.is_empty() {
+        warnings.push(format!(
+            "Dropped sensor column(s) containing device placeholder values (e.g. 4294967295): {}. They are not measurements.",
+            placeholder_cols.join(", ")
+        ));
+    }
     let channel_ids: Vec<String> = sensor_candidates
         .iter()
         .filter(|c| numeric.get(*c).map(|n| *n > 0).unwrap_or(false))
+        .filter(|c| !placeholder_cols.contains(*c))
         .cloned()
         .collect();
     if channel_ids.is_empty() {
@@ -260,6 +278,7 @@ pub fn parse_session_csv(text: &str) -> Result<ParsedSession, String> {
     let skipped: Vec<String> = sensor_candidates
         .iter()
         .filter(|c| !channel_ids.contains(*c))
+        .filter(|c| !placeholder_cols.contains(*c))
         .cloned()
         .collect();
     if !skipped.is_empty() {
@@ -406,6 +425,14 @@ pub fn parse_session_csv(text: &str) -> Result<ParsedSession, String> {
     })
 }
 
+/// Firmware/exporters sometimes write integer sentinels into a channel that is
+/// not wired: `u32::MAX` ("no reading"), `i32::MIN`, or absurd magnitudes no
+/// ADC can produce. Leaving them in does not just add noise — it invents
+/// enormous "responses" and can dominate a classifier.
+fn is_placeholder(v: f64) -> bool {
+    v == 4_294_967_295.0 || v == 4_294_967_296.0 || v == -2_147_483_648.0 || v.abs() >= 1e12
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +544,20 @@ mod tests {
             .iter()
             .any(|w| w.contains("context column(s)") && w.contains("Temperature, Humidity")));
         assert!(p.channels.iter().all(|(c, _)| c != "Temperature"));
+    }
+
+    #[test]
+    fn placeholder_column_dropped_not_invented() {
+        let csv = "timestamp_ms,VOC,CO,Benzene\n0,1.0,2.0,4294967295\n100,3.0,4.0,4294967295\n";
+        let p = parse_session_csv(csv).unwrap();
+        assert_eq!(p.channels.len(), 2);
+        assert!(!p.channels.iter().any(|(id, _)| id == "Benzene"));
+        assert!(p.warnings.iter().any(|w| w.contains("placeholder")));
+
+        // A partly-valid column is still untrustworthy: one sentinel poisons it.
+        let mixed = "timestamp_ms,VOC,Benzene\n0,1.0,7\n100,3.0,4294967295\n";
+        let p = parse_session_csv(mixed).unwrap();
+        assert_eq!(p.channels.len(), 1);
     }
 
     #[test]

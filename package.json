@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "validate:vial": "node scripts/validate-vial.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

@@ -41,3 +41,8 @@ urlencoding = "2"
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# The dev box is RAM-tight; full debug info made the final link step OOM.
+# Keep just enough for line numbers in backtraces.
+[profile.dev]
+debug = "line-tables-only"

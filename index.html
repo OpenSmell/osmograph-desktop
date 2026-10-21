@@ -423,6 +423,12 @@
       font-size: 10px;
     }
 
+    /* The rig controls belong to the rig. On content-first workspaces the
+       titlebar stays quiet; connection state is still one tap away in Rig. */
+    body:not([data-workspace="dashboard"]):not([data-workspace="rig"]) .connection-group {
+      display: none;
+    }
+
     /* === Tab Bar === */
     .tabbar {
       background: var(--bg-1);
@@ -479,10 +485,6 @@
     .tab-panel.active { display: flex; }
 
     /* === Dashboard Tab === */
-    .sample-card{display:flex;align-items:center;gap:12px;margin:10px 14px 0;padding:10px 14px;border:1px solid var(--border);border-left:3px solid var(--green);border-radius:8px}
-    .sample-card-text{flex:1;min-width:0}
-    .sample-card-title{font-weight:700;font-size:13px}
-    .sample-card-sub{color:var(--text-3);font-size:12px;margin-top:2px}
     .wizard{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)}
     .wizard-card{width:440px;max-width:92vw;border:1px solid var(--border);border-radius:12px;background:var(--bg,#0f1115);padding:18px}
     .wizard-dots{display:flex;gap:6px;margin-bottom:10px}
@@ -494,11 +496,14 @@
     .wslide p{color:var(--text-2);font-size:13px;margin:0}
     .wizard-actions{display:flex;align-items:center;gap:8px;margin-top:16px}
     .wizard-fill{flex:1}
-    .wizard-consent{display:flex;gap:8px;align-items:center;margin-top:12px;font-size:12px;color:var(--text-3)}
-    /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
+        /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
     #panel-dashboard.tab-panel { flex-direction: column; }
     /* The library tab stacks the session-library grid and the replay strip vertically. */
     #panel-library.tab-panel { flex-direction: column; }
+    /* Recipe is a scrollable column in the primary flow. */
+    #panel-recipe.tab-panel { flex-direction: column; }
+    .recipe-pane { padding: 16px; overflow-y: auto; height: 100%; }
+    .recipe-pane h2 { font-size: 16px; font-weight: 600; color: var(--text-0); margin-bottom: 12px; }
     #panel-dashboard .dashboard {
       flex: 1 1 auto;
       min-height: 0;
@@ -640,6 +645,22 @@
     }
     canvas#traces.tl-panning { cursor: grabbing; }
     canvas#traces.tl-boxing { cursor: crosshair; }
+    /* When no rig is connected the live canvas is an empty cockpit. Give the
+       person something real to do instead of a blank grid. */
+    .canvas-empty {
+      position: absolute; inset: 0; z-index: 3;
+      display: none; align-items: center; justify-content: center;
+      background: color-mix(in srgb, var(--bg-0) 78%, transparent);
+    }
+    .canvas-empty.show { display: flex; }
+    .canvas-empty-card {
+      max-width: 430px; padding: 20px 22px; text-align: center;
+      background: var(--bg-0); border: 1px solid var(--border);
+      box-shadow: 0 10px 40px rgba(29,26,22,0.06);
+    }
+    .canvas-empty-card b { display: block; font-size: 15px; color: var(--text-0); margin-bottom: 5px; }
+    .canvas-empty-card p { font-size: 11px; line-height: 1.5; color: var(--text-2); margin: 0 0 12px; }
+    .canvas-empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
     /* Subtle retro-scanline texture — cyberpunk HUD layer kept barely-there so
        the warm paper reads clearly underneath. */
     .canvas-wrap::after {
@@ -739,7 +760,7 @@
       flex-direction: column;
       flex-shrink: 0;
       height: 200px;
-      border: var(--hairline) dashed var(--border-strong);
+      border: var(--hairline) solid var(--border);
       border-radius: var(--radius-sm);
       background: color-mix(in srgb, var(--bg-1) 72%, transparent);
       overflow: hidden;
@@ -755,7 +776,7 @@
       letter-spacing: 0.14em;
       color: var(--text-3);
       text-transform: uppercase;
-      border-bottom: 1px dashed var(--border);
+      border-bottom: 1px solid var(--border);
     }
     .dock-fill { flex: 1; }
     .dock-toggle {
@@ -815,13 +836,20 @@
       letter-spacing: 0.12em;
       color: var(--text-3);
       text-transform: uppercase;
-      border-bottom: 1px dashed var(--border);
+      border-bottom: 1px solid var(--border);
       padding-bottom: 3px;
     }
     .fp-hint {
       cursor: help;
       color: var(--cyan);
       margin-left: 4px;
+    }
+    button.fp-save {
+      float: right;
+      display: inline-flex;
+      align-items: center;
+      padding: 2px 6px;
+      line-height: 0;
     }
     .pheno-val {
       font-family: var(--font-mono);
@@ -1133,8 +1161,765 @@
     .src-subnav-btn.active { color: var(--green); border-color: var(--green); }
     .src-view { display: none; flex: 1; min-height: 0; }
     .src-view.active { display: flex; flex-direction: column; }
+
+    /* Job-level workspaces. A workspace is a container for the views that
+       answer one question; the old top-level panels are moved inside these
+       shells at boot, so their IDs and handlers remain stable. */
+    #panel-explore.tab-panel,
+    #panel-decide.tab-panel,
+    #panel-vials.tab-panel,
+    #panel-data.tab-panel,
+    #panel-rig.tab-panel { flex-direction: column; }
+    .workspace-subnav {
+      display: flex; gap: 4px; padding: 10px 14px 0; flex: 0 0 auto;
+      background: var(--bg-1); border-bottom: 1px solid var(--border);
+    }
+    .workspace-subnav .src-subnav-btn { margin-bottom: -1px; }
+    .workspace-body { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+    .workspace-view { display: none; flex: 1; min-height: 0; flex-direction: column; }
+    .workspace-view.active { display: flex; }
     .src-pane { padding: 16px; overflow-y: auto; flex: 1; }
     .src-pane h2 { font-size: 16px; font-weight: 600; color: var(--text-0); margin-bottom: 12px; }
+    /* Smells gallery — the front door */
+    .smells-pane { padding: 14px 16px; overflow-y: auto; flex: 1; }
+    .smells-head { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
+    .smells-head h2 { font-size: 16px; font-weight: 600; color: var(--text-0); margin: 0; }
+    .smells-head .hint { margin: 2px 0 0; }
+    .smells-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+    .smells-actions-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+    /* The front door is a place to work, not a wall of thumbnails. */
+    .smells-toolbar {
+      display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+      margin: 0 0 10px; padding: 7px 8px;
+      border: 1px solid var(--border); border-radius: 7px; background: var(--bg-0, #fff);
+    }
+    .smells-search {
+      flex: 1 1 200px; min-width: 150px; max-width: 300px; padding: 5px 9px;
+      border: 1px solid var(--border); border-radius: 5px; background: var(--bg-1);
+      color: var(--text-0); font-size: 12px;
+    }
+    .smells-search:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 2px rgba(29,126,95,.12); }
+    .smell-chips { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; }
+    .smell-chip {
+      padding: 4px 8px; border: 1px solid transparent; border-radius: 4px;
+      background: transparent; color: var(--text-3); font-size: 10px;
+      letter-spacing: .25px; cursor: pointer;
+    }
+    .smell-chip:hover { color: var(--text-1); background: var(--bg-1); }
+    .smell-chip.active { color: var(--green); border-color: var(--green); background: var(--bg-1); }
+    .smells-sort {
+      padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px;
+      background: var(--bg-1); color: var(--text-1); font-size: 10px;
+    }
+    #smellResultStamp { margin-left: auto; }
+    .discovery-strip {
+      display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+      margin: 0 0 10px; padding: 7px 9px;
+      border: 1px solid #c9d9d2; border-radius: 7px;
+      background: linear-gradient(90deg, rgba(29,126,95,.06), rgba(14,116,144,.035));
+    }
+    .discovery-strip[hidden] { display: none; }
+    .discovery-label {
+      flex: 0 0 auto; font-size: 9px; font-weight: 700; letter-spacing: .9px;
+      text-transform: uppercase; color: var(--green);
+    }
+    .discovery-btn {
+      display: inline-flex; align-items: baseline; gap: 5px; max-width: 100%;
+      padding: 4px 8px; border: 1px solid #b9ccc4; border-radius: 4px;
+      background: rgba(255,255,255,.65); color: var(--text-1); font-size: 10px;
+      cursor: pointer; text-align: left;
+    }
+    .discovery-btn:hover { border-color: var(--green); color: var(--green); }
+    .discovery-btn b { font-weight: 600; color: var(--text-0); }
+    .discovery-btn:disabled { opacity: .55; cursor: default; }
+    .smells-empty {
+      grid-column: 1 / -1; padding: 26px 18px; border: 1px dashed var(--border);
+      border-radius: 8px; text-align: center; color: var(--text-3); font-size: 12px;
+    }
+    .smells-empty b { display: block; margin-bottom: 4px; color: var(--text-1); font-size: 13px; }
+    .smells-grid {
+      display: grid; gap: 12px;
+      grid-template-columns: repeat(auto-fill, minmax(204px, 1fr));
+    }
+    .smell-card {
+      position: relative; display: flex; flex-direction: column; gap: 5px;
+      padding: 10px 10px 8px; border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-1, #faf7f0); cursor: pointer; text-align: left;
+      transition: border-color .12s ease, box-shadow .12s ease, transform .12s ease;
+    }
+    .smell-card:hover {
+      border-color: var(--green);
+      box-shadow: 0 3px 12px rgba(29,26,22,0.07);
+      transform: translateY(-1px);
+    }
+    .smell-card.selected { border-color: var(--green); box-shadow: inset 0 0 0 1px var(--green); }
+    .smell-card-name { font-size: 13px; font-weight: 600; color: var(--text-0); text-transform: capitalize; }
+    .smell-card-meta { font-size: 10px; color: var(--text-3); letter-spacing: 0.3px; }
+    .smell-card-print {
+      width: 100%; height: 94px; display: block; border-radius: 4px;
+      background: linear-gradient(180deg, rgba(14,116,144,0.025), rgba(255,255,255,0));
+    }
+    .smell-card-foot { display: flex; align-items: center; gap: 6px; margin-top: auto; }
+    .smell-card-save {
+      position: absolute; top: 6px; right: 6px; width: 22px; height: 22px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--border); border-radius: 5px;
+      background: var(--bg-0, #fff); color: var(--text-3);
+      font-size: 11px; cursor: pointer; opacity: 0;
+    }
+    .smell-card:hover .smell-card-save { opacity: 1; }
+    .smell-card-save:hover { color: var(--green); border-color: var(--green); }
+    /* Rig health — per-channel verdict on a saved recording */
+    .rig-body { display: flex; flex-direction: column; gap: 3px; }
+    .rig-row { display: flex; align-items: center; gap: 6px; font-size: 11px; }
+    .rig-name { flex: 0 0 66px; color: var(--text-1); font-family: ui-monospace, monospace; font-size: 10px; }
+    .rig-detail { flex: 1; color: var(--text-3); font-size: 10px; }
+    .rig-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+    .rig-dot.ok { background: var(--green); }
+    .rig-dot.warn { background: #c98a15; }
+    .rig-dot.bad { background: var(--red); }
+    .rig-note { margin-top: 6px; font-size: 10px; color: var(--text-3); line-height: 1.4; }
+    .rig-hint { font-size: 10px; color: var(--text-3); margin-bottom: 6px; line-height: 1.35; }
+    .smells-rig {
+      margin-top: 8px; padding: 7px 10px; border-radius: 6px;
+      border: 1px solid #e3c78a; background: #fdf6e6;
+      font-size: 11px; color: var(--text-1); display: flex; align-items: center; gap: 8px;
+    }
+    .smell-card-pick { width: 13px; height: 13px; accent-color: var(--green); }
+    .smell-card-pick-label { font-size: 10px; color: var(--text-3); }
+
+    /* Smell detail — one smell as an object, with its closest confusable. */
+    .modal-box.smell-detail-box { width: 880px; gap: 8px; }
+    .smell-detail-head { display: flex; align-items: flex-start; gap: 10px; }
+    .smell-detail-head h3 {
+      font-size: 22px; font-weight: 650; text-transform: none; letter-spacing: 0;
+      line-height: 1.1; color: var(--text-0);
+    }
+    .smell-detail-head .mini-btn { margin-left: auto; }
+    .sd-nav { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
+    .sd-nav .mini-btn { margin-left: 0; }
+    .sd-print-wrap {
+      padding: 8px 10px 6px; border: 1px solid var(--border); border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(14,116,144,0.035), rgba(255,255,255,0)),
+        var(--bg-1, #faf7f0);
+    }
+    #sdPrint { width: 100%; height: 190px; display: block; }
+    .sd-print-foot {
+      display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+      font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+      letter-spacing: .06em; color: var(--text-3); margin-top: 3px;
+    }
+    .sd-read-key {
+      font-size: 12px; line-height: 1.5; color: var(--text-2);
+      padding: 7px 10px; border-left: 3px solid var(--cyan);
+      background: rgba(14,116,144,0.05); border-radius: 0 5px 5px 0;
+    }
+    .sd-read-key b { color: var(--text-0); font-weight: 600; }
+    .smell-detail-body { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 18px; }
+    .sd-section-title {
+      font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--text-3); margin-bottom: 5px;
+    }
+    .sd-caption { font-size: 10px; line-height: 1.45; color: var(--text-3); margin-top: 6px; }
+    .sd-caption b { color: var(--text-2); font-weight: 600; }
+    .sd-bars { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+    .sd-bar-row { display: grid; grid-template-columns: 62px 1fr 50px; align-items: center; gap: 6px; font-size: 10px; }
+    .sd-bar-name {
+      font-family: var(--font-mono); color: var(--text-2);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sd-bar-track { position: relative; height: 8px; background: var(--bg-3); border-radius: 2px; }
+    .sd-bar-zero { position: absolute; top: -1px; bottom: -1px; left: 50%; width: 1px; background: var(--border); }
+    .sd-bar-fill { position: absolute; top: 0; bottom: 0; border-radius: 1px; }
+    .sd-bar-val { text-align: right; font-family: var(--font-mono); color: var(--text-3); }
+    .sd-neighbor-name {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-size: 17px; font-weight: 650; color: var(--text-0); margin-bottom: 3px;
+    }
+    .sd-verdict-line { font-size: 12px; line-height: 1.5; color: var(--text-1); margin: 0 0 6px; }
+    .sd-verdict-line b { font-weight: 650; color: var(--text-0); }
+    .sd-action { font-size: 11px; line-height: 1.45; color: var(--text-2); margin: 0 0 8px; }
+    .sd-method { border-top: 1px solid var(--border); padding-top: 7px; margin-top: 8px; }
+    .sd-method > summary {
+      cursor: pointer; font-family: var(--font-mono); font-size: 9px;
+      text-transform: uppercase; letter-spacing: .06em; color: var(--text-3);
+      list-style: none;
+    }
+    .sd-method > summary::-webkit-details-marker { display: none; }
+    .sd-method > summary::before { content: "▸ "; color: var(--cyan); }
+    .sd-method[open] > summary::before { content: "▾ "; }
+    .sd-method > summary:hover { color: var(--text-1); }
+    @media (max-width: 760px) { .smell-detail-body { grid-template-columns: 1fr; } }
+
+    /* Separability advisor — the pre-training answer to "can it tell them apart?" */
+    .sep-panel {
+      margin: 0 0 12px; padding: 10px 12px 8px;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-1, #faf7f0);
+    }
+    .sep-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
+    .sep-title { font-size: 12px; font-weight: 600; color: var(--text-0); }
+    .sep-head .coord-tag { margin-left: auto; }
+    .sep-pairs {
+      display: grid; gap: 8px;
+      grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+    }
+    .sep-pair {
+      border: 1px solid var(--border); border-left: 3px solid var(--text-3);
+      border-radius: 6px; padding: 7px 9px; background: var(--bg-0, #fff);
+    }
+    .sep-pair.separable { border-left-color: var(--green); }
+    .sep-pair.fragile { border-left-color: #c98a15; }
+    .sep-pair.confusable { border-left-color: var(--red); }
+    .sep-pair.insufficient { border-left-color: var(--text-3); }
+    .sep-pair-head { display: flex; align-items: center; gap: 8px; }
+    .sep-names { font-size: 11px; font-weight: 600; color: var(--text-0); text-transform: capitalize; }
+    .sep-badge {
+      margin-left: auto; font-family: var(--font-mono); font-size: 8px;
+      letter-spacing: .08em; text-transform: uppercase;
+      padding: 1px 6px; border-radius: 100px; border: 1px solid transparent;
+    }
+    .sep-badge.separable { color: #fff; background: var(--green); }
+    .sep-badge.fragile { color: #7a5208; background: #f6e3bc; border-color: #e3c78a; }
+    .sep-badge.confusable { color: #fff; background: var(--red); }
+    .sep-badge.insufficient { color: var(--text-3); border-color: var(--border); }
+    .sep-sub { font-size: 10px; color: var(--text-3); margin-top: 2px; }
+    .sep-chans { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 5px; }
+    .sep-ch {
+      font-family: var(--font-mono); font-size: 9px; padding: 1px 5px;
+      border: 1px solid var(--border); border-radius: 3px; color: var(--text-3);
+    }
+    .sep-ch.good { color: #0d6b4f; border-color: #9fceb9; background: #eaf6f0; }
+    .sep-ch.mid { color: #7a5208; border-color: #e3c78a; background: #fdf6e6; }
+    .sep-ch.poor { color: #9b1c2c; border-color: #e6b6bc; background: #fbeff1; }
+    .sep-split { display: flex; gap: 8px; margin: 0 0 5px; font-family: var(--font-mono); font-size: 9px; color: var(--text-3); }
+    .sep-split span { padding: 1px 5px; border-radius: 3px; border: 1px solid var(--border); }
+    .sep-split b { font-weight: 600; }
+    .sep-split .good { color: #0d6b4f; border-color: #9fceb9; background: #eaf6f0; }
+    .sep-split .mid { color: #7a5208; border-color: #e3c78a; background: #fdf6e6; }
+    .sep-split .poor { color: #9b1c2c; border-color: #e6b6bc; background: #fbeff1; }
+    .sep-split .pval { border-style: dashed; color: var(--text-3); background: transparent; }
+    .sep-lever { font-size: 10px; line-height: 1.45; color: var(--text-2); }
+    .sep-diff {
+      display: grid; grid-template-columns: 260px 1fr; gap: 12px;
+      align-items: center; border: 1px solid var(--border); border-radius: 7px;
+      background: var(--bg-0, #fff); padding: 8px 10px; margin-bottom: 9px;
+    }
+    .sep-diff-print { width: 100%; height: 220px; display: block; }
+    .sep-diff-copy { font-size: 10px; line-height: 1.45; color: var(--text-2); }
+    .sep-diff-copy b { color: var(--text-0); font-weight: 650; }
+    .sep-diff-copy .sep-diff-names { font-size: 12px; color: var(--text-0); font-weight: 650; margin-bottom: 3px; }
+    .sep-diff-copy .mini-btn { margin-top: 6px; }
+    @media (max-width: 760px) { .sep-diff { grid-template-columns: 1fr; } .sep-diff-print { height: 240px; } }
+    .sep-more { font-size: 10px; color: var(--text-3); margin-top: 6px; }
+    .sep-foot { font-size: 9px; color: var(--text-3); margin-top: 7px; line-height: 1.4; }
+
+    /* === Check — the comparison surface inside Smells === */
+    .play-wrap {
+      display: flex; flex-direction: column; gap: 12px;
+      padding: 14px 16px 18px; overflow-y: auto; flex: 1; min-height: 0;
+    }
+    .play-pane { display: none; }
+    .play-pane.active { display: block; }
+    .check-wrap { display: flex; flex-direction: column; gap: 12px; }
+
+    .check-head { display: flex; align-items: flex-start; gap: 16px; }
+    .check-head h2 { font-size: 16px; font-weight: 600; color: var(--text-0); margin: 0; }
+    .check-head .hint { margin: 2px 0 0; max-width: 720px; }
+    .check-head-actions { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+    .check-bench {
+      display: grid; gap: 12px; align-items: stretch;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr) minmax(280px, 1fr);
+    }
+    .check-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-width: 0; }
+    .check-pick, .check-diff, .check-result {
+      display: flex; flex-direction: column; min-width: 0;
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--bg-1, #faf7f0); padding: 10px;
+    }
+    .check-pick label {
+      font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--text-3); margin-bottom: 4px;
+    }
+    .check-pick select {
+      width: 100%; min-width: 0; font-size: 12px; color: var(--text-1);
+      background: var(--bg-0, #fff); border: 1px solid var(--border);
+      border-radius: 4px; padding: 4px 6px;
+    }
+    .check-print { width: 100%; height: 196px; display: block; margin: 5px 0 3px; }
+    .check-pick-meta { font-size: 10px; line-height: 1.4; color: var(--text-3); }
+    .check-diff-head {
+      display: flex; align-items: baseline; gap: 8px;
+      font-size: 12px; font-weight: 600; color: var(--text-0);
+    }
+    .check-diff-head .coord-tag { margin-left: auto; }
+    .check-diff-print { width: 100%; flex: 1; min-height: 260px; display: block; }
+    .check-legend {
+      display: flex; gap: 10px; flex-wrap: wrap;
+      font-size: 9px; color: var(--text-3); padding-top: 4px;
+    }
+    .check-legend .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 3px; }
+    .check-legend .dot.pos { background: #0f6f86; }
+    .check-legend .dot.neg { background: #b45309; }
+    .check-legend .dot.na { border: 1px solid #a99e8b; }
+    .check-result { gap: 7px; }
+    .check-verdict { display: flex; align-items: center; gap: 8px; }
+    .check-verdict .coord-tag { margin-left: auto; }
+    .check-result .sep-pair-head .sep-badge { display: none; }
+    .check-empty { font-size: 12px; line-height: 1.5; color: var(--text-3); }
+    .check-empty b { color: var(--text-1); }
+    .check-decision { font-size: 13px; line-height: 1.45; color: var(--text-1); margin: 0; }
+    .check-decision b { color: var(--text-0); font-weight: 650; }
+    .check-result .sep-pair { border: 0; border-left: 3px solid var(--border); border-radius: 0; background: transparent; padding: 0 0 0 9px; }
+    .check-result .sep-pair.separable { border-left-color: var(--green); }
+    .check-result .sep-pair.fragile { border-left-color: #c98a15; }
+    .check-result .sep-pair.confusable { border-left-color: var(--red); }
+    .check-result .sep-pair.insufficient { border-left-color: var(--text-3); }
+    .check-result .sep-pair-head { margin-bottom: 1px; }
+    .check-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 6px; }
+    .check-saved { border-top: 1px solid var(--border); padding-top: 10px; }
+    .check-saved-head {
+      display: flex; align-items: baseline; gap: 8px;
+      font-size: 12px; font-weight: 600; color: var(--text-0);
+    }
+    .check-saved-head .coord-tag { margin-left: auto; }
+    .check-saved-note { font-size: 10px; color: var(--text-3); margin: 2px 0 0; line-height: 1.4; }
+    .check-saved-list {
+      display: grid; gap: 8px; margin-top: 8px;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    }
+    .check-saved-item {
+      display: flex; align-items: stretch; overflow: hidden;
+      border: 1px solid var(--border); border-radius: 6px; background: var(--bg-1, #faf7f0);
+    }
+    .check-saved-main {
+      flex: 1; min-width: 0; text-align: left; background: none; border: 0;
+      padding: 8px 10px; cursor: pointer; color: inherit;
+    }
+    .check-saved-main:hover { background: var(--bg-2); }
+    .check-saved-name { display: block; font-size: 12px; font-weight: 600; color: var(--text-0); }
+    .check-saved-meta { display: block; font-size: 9px; color: var(--text-3); margin-top: 2px; }
+    .check-saved-del {
+      width: 30px; border: 0; border-left: 1px solid var(--border);
+      background: transparent; color: var(--text-3); cursor: pointer; font-size: 14px;
+    }
+    .check-saved-del:hover { color: var(--red); background: var(--bg-2); }
+    @media (max-width: 1150px) {
+      .check-bench { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+      .check-result { grid-column: 1 / -1; }
+      .check-diff-print { min-height: 230px; }
+    }
+    @media (max-width: 820px) {
+      .check-bench { grid-template-columns: 1fr; }
+      .check-pair { grid-template-columns: 1fr 1fr; }
+      .check-result { grid-column: auto; }
+    }
+
+    /* === Vials — reusable decision packs === */
+    .vials-pane { display: flex; flex-direction: column; gap: 12px; padding: 14px; min-height: 0; flex: 1; overflow-y: auto; }
+    .vials-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .vials-head h2 { font-size: 16px; color: var(--text-0); font-weight: 700; }
+    .vials-head .hint { max-width: 680px; margin-top: 3px; }
+    .vials-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+    .vials-note {
+      border: 1px solid var(--border); border-left: 3px solid var(--green);
+      background: var(--bg-1); padding: 10px 12px; font-size: 11px;
+      line-height: 1.5; color: var(--text-2);
+    }
+    .vials-note b { color: var(--text-0); }
+    .vials-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 12px; align-content: start; }
+    .vial-card {
+      display: flex; flex-direction: column; gap: 9px; padding: 13px;
+      border: 1px solid var(--border); background: var(--bg-1); min-width: 0;
+      transition: border-color .12s ease, box-shadow .12s ease;
+    }
+    .vial-card:hover { border-color: var(--border-strong); box-shadow: 0 4px 18px rgba(29,26,22,0.05); }
+    .vial-card.sealed { border-left: 3px solid var(--green); }
+    .vial-card.open { border-left: 3px solid #c98a15; }
+    .vial-card.draft { border-left: 3px solid var(--text-3); }
+    .vial-card-head { display: flex; align-items: flex-start; gap: 8px; }
+    .vial-card-name { font-size: 14px; font-weight: 700; color: var(--text-0); line-height: 1.2; }
+    .vial-card-sub { font-size: 9px; color: var(--text-3); font-family: var(--font-mono); letter-spacing: 0.05em; margin-top: 3px; }
+    .vial-status {
+      margin-left: auto; flex-shrink: 0; font-family: var(--font-mono); font-size: 8px;
+      text-transform: uppercase; letter-spacing: 0.12em; padding: 2px 6px; border: 1px solid currentColor;
+    }
+    .vial-status.sealed { color: var(--green); background: var(--green-dim); }
+    .vial-status.open { color: #a56a0a; background: var(--yellow-dim); }
+    .vial-status.draft { color: var(--text-3); background: var(--bg-2); }
+    .vial-question { font-size: 12px; color: var(--text-1); line-height: 1.4; }
+    .vial-stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+    .vial-stat { background: var(--bg-2); border: 1px solid var(--border); padding: 5px 7px; }
+    .vial-stat b { display: block; font-size: 13px; color: var(--text-0); font-family: var(--font-mono); }
+    .vial-stat span { display: block; font-size: 8px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.09em; margin-top: 1px; }
+    .vial-card-meta { font-size: 9px; color: var(--text-3); line-height: 1.5; }
+    .vial-card-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: auto; padding-top: 3px; }
+    .vial-card-actions .mini-btn { font-size: 8px; }
+    .vial-empty { grid-column: 1 / -1; padding: 42px 20px; text-align: center; border: 1px solid var(--border); background: var(--bg-1); }
+    .vial-empty b { display: block; font-size: 15px; color: var(--text-0); margin-bottom: 5px; }
+    .vial-empty p { font-size: 11px; color: var(--text-2); line-height: 1.5; max-width: 520px; margin: 0 auto 12px; }
+    .modal-box.vial-modal-box { width: min(980px, 94vw); max-height: 92vh; overflow: hidden; }
+    .modal-box.vial-detail-box { width: min(840px, 94vw); }
+    .modal-box.vial-use-box { width: min(660px, 94vw); }
+    .vial-create-grid { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.85fr); gap: 16px; min-height: 0; flex: 1 1 auto; overflow: hidden; }
+    .vial-form { display: flex; flex-direction: column; gap: 7px; min-width: 0; overflow-y: auto; padding-right: 4px; }
+    .vial-form label { font-size: 10px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; }
+    .vial-form input, .vial-form select, .vial-form textarea {
+      width: 100%; background: var(--bg-2); border: 1px solid var(--border);
+      color: var(--text-1); font-size: 12px; padding: 5px 7px; font-family: var(--font-sans);
+      border-radius: var(--radius-sm);
+    }
+    .vial-form textarea { min-height: 64px; resize: vertical; line-height: 1.45; }
+    .vial-form .vial-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .vial-preview { font-family: var(--font-mono); font-size: 9px; line-height: 1.55; color: var(--text-2); background: var(--bg-2); border: 1px solid var(--border); padding: 7px 8px; white-space: pre-wrap; }
+    .vial-validation { border-left: 1px solid var(--border); padding-left: 14px; display: flex; flex-direction: column; gap: 7px; min-width: 0; overflow-y: auto; padding-right: 4px; }
+    .vial-modal-box .modal-actions { flex-shrink: 0; border-top: 1px solid var(--border); padding-top: 10px; margin-top: 0; }
+    .vial-validation h4 { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-3); }
+    .vial-check-row { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 6px; align-items: start; padding: 5px 0; border-bottom: 1px solid var(--border); }
+    .vial-check-row:last-child { border-bottom: 0; }
+    .vial-check-mark { font-family: var(--font-mono); font-size: 10px; line-height: 1.4; }
+    .vial-check-row.pass .vial-check-mark { color: var(--green); }
+    .vial-check-row.fail .vial-check-mark { color: var(--red); }
+    .vial-check-label { font-size: 10px; color: var(--text-1); line-height: 1.35; }
+    .vial-check-detail { font-size: 9px; color: var(--text-3); line-height: 1.4; margin-top: 1px; overflow-wrap: anywhere; }
+    .vial-validation-summary { font-size: 10px; line-height: 1.45; padding: 7px 8px; border: 1px solid var(--border); background: var(--bg-2); }
+    .vial-validation-summary.pass { border-left: 3px solid var(--green); }
+    .vial-validation-summary.fail { border-left: 3px solid #c98a15; }
+    .vial-detail-section { border-top: 1px solid var(--border); padding-top: 9px; }
+    .vial-detail-section h4 { font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-3); margin-bottom: 4px; }
+    .vial-detail-section p, .vial-detail-section li { font-size: 11px; line-height: 1.5; color: var(--text-2); }
+    .vial-detail-section ul { margin: 0; padding-left: 16px; }
+    .vial-detail-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+    .vial-use-result { margin-top: 10px; }
+    @media (max-width: 860px) {
+      .vial-create-grid { grid-template-columns: 1fr; overflow-y: auto; }
+      .vial-form, .vial-validation { overflow: visible; padding-right: 0; }
+      .vial-validation { border-left: 0; border-top: 1px solid var(--border); padding-left: 0; padding-top: 12px; }
+    }
+
+    /* === Domain Vials — host-rendered workspaces === */
+    .vials-pane > #vialsMain { display: flex; flex-direction: column; gap: 12px; min-height: 0; }
+    .vials-section-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 8px;
+      margin-top: 6px; padding-bottom: 5px; border-bottom: 1px solid var(--border);
+    }
+    .vials-section-head > span:first-child {
+      font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
+      letter-spacing: 0.12em; color: var(--text-3);
+    }
+    .domain-area { display: flex; flex-direction: column; gap: 9px; }
+    .domain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+    .domain-card {
+      display: flex; flex-direction: column; gap: 7px; padding: 12px;
+      border: 1px solid var(--border); background: var(--bg-1); min-width: 0;
+    }
+    .domain-card.installed { border-left: 3px solid var(--cyan); }
+    .domain-card-head { display: flex; align-items: flex-start; gap: 8px; }
+    .domain-card-name { font-size: 14px; font-weight: 700; color: var(--text-0); line-height: 1.2; }
+    .domain-card-sub { font-size: 9px; color: var(--text-3); font-family: var(--font-mono); margin-top: 3px; }
+    .domain-card-tagline { font-size: 11px; color: var(--text-1); line-height: 1.45; }
+    .domain-card-meta { font-size: 9px; color: var(--text-3); line-height: 1.5; }
+    .domain-card-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: auto; padding-top: 3px; }
+    .domain-empty {
+      grid-column: 1 / -1; padding: 14px; border: 1px dashed var(--border);
+      font-size: 11px; color: var(--text-2); line-height: 1.5; background: var(--bg-1);
+    }
+    .domain-risk {
+      margin-left: auto; flex-shrink: 0; font-family: var(--font-mono); font-size: 8px;
+      text-transform: uppercase; letter-spacing: 0.1em; padding: 2px 6px;
+      border: 1px solid currentColor;
+    }
+    .risk-low { color: var(--green); }
+    .risk-medium { color: #a56a0a; }
+    .risk-high { color: var(--red); }
+    .risk-critical { color: #9f1239; }
+    .domain-workspace { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: 1; overflow-y: auto; }
+    .domain-workspace-head {
+      position: sticky; top: -14px; z-index: 3; display: flex; align-items: center; gap: 10px;
+      padding: 8px 0; background: var(--bg-0); border-bottom: 1px solid var(--border);
+    }
+    .domain-workspace-meta { margin-left: auto; font-size: 9px; color: var(--text-3); font-family: var(--font-mono); text-align: right; line-height: 1.5; }
+    .domain-hero {
+      display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.8fr);
+      gap: 16px; align-items: center; border: 1px solid var(--border);
+      background: var(--bg-1); padding: 14px;
+    }
+    .domain-hero h2 { font-size: 20px; color: var(--text-0); line-height: 1.1; }
+    .domain-hero p { font-size: 12px; color: var(--text-2); line-height: 1.5; margin-top: 6px; }
+    .domain-hero .domain-hero-note { font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-3); margin-top: 9px; }
+    .domain-art { width: 100%; height: auto; display: block; border: 1px solid var(--border); background: var(--bg-2); }
+    .domain-art-line { fill: none; stroke: var(--text-1); stroke-width: 1.4; }
+    .domain-art-soft { fill: none; stroke: var(--text-3); stroke-width: 1; stroke-dasharray: 3 3; }
+    .domain-art-fill { fill: var(--bg-1); }
+    .domain-art-accent { fill: var(--cyan); opacity: 0.22; }
+    .domain-art-sensor { fill: var(--cyan); }
+    .domain-art-label { fill: var(--text-3); font-family: var(--font-mono); font-size: 7px; }
+    .domain-hotspot { cursor: pointer; }
+    .domain-hotspot circle { fill: var(--bg-0); stroke: var(--text-2); stroke-width: 1.2; }
+    .domain-hotspot:hover circle, .domain-hotspot.active circle { fill: var(--cyan); stroke: var(--cyan); }
+    .domain-hotspot text { fill: var(--text-2); font-family: var(--font-mono); font-size: 7px; }
+    .domain-panel { border: 1px solid var(--border); background: var(--bg-1); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .domain-panel h3 { font-size: 12px; color: var(--text-0); }
+    .domain-panel .hint { margin: 0; }
+    .domain-risk-banner { border: 1px solid var(--border); border-left: 4px solid #c98a15; background: var(--bg-1); padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .domain-risk-banner.high, .domain-risk-banner.critical { border-left-color: var(--red); }
+    .domain-risk-banner.low { border-left-color: var(--green); }
+    .domain-risk-head { display: flex; align-items: flex-start; gap: 8px; }
+    .domain-risk-head b { font-size: 14px; color: var(--text-0); line-height: 1.3; }
+    .domain-risk-head .domain-risk { margin-left: auto; }
+    .domain-risk-body { font-size: 11px; color: var(--text-2); line-height: 1.5; }
+    .domain-risk-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .domain-risk-lists h4 { font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-3); margin-bottom: 4px; }
+    .domain-risk-lists ul { margin: 0; padding-left: 15px; }
+    .domain-risk-lists li { font-size: 10px; line-height: 1.45; color: var(--text-2); margin-bottom: 3px; }
+    .domain-risk-lists .never li::marker { color: var(--red); }
+    .domain-risk-lists .always li::marker { color: var(--green); }
+    .domain-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+    .domain-metric { background: var(--bg-2); border: 1px solid var(--border); padding: 8px; }
+    .domain-metric strong { display: block; font-size: 13px; color: var(--text-0); line-height: 1.25; }
+    .domain-metric span { display: block; font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-3); margin-bottom: 4px; }
+    .domain-metric p { font-size: 9px; color: var(--text-3); line-height: 1.4; margin-top: 3px; }
+    .domain-timeline { display: flex; flex-direction: column; }
+    .domain-step { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .domain-step:last-child { border-bottom: 0; }
+    .domain-step-range { font-family: var(--font-mono); font-size: 9px; color: var(--cyan); }
+    .domain-step-label { font-size: 11px; font-weight: 600; color: var(--text-0); }
+    .domain-step-body { font-size: 10px; color: var(--text-2); line-height: 1.5; margin-top: 2px; }
+    .domain-step-warn { font-size: 10px; color: #a56a0a; line-height: 1.45; margin-top: 4px; }
+    .domain-track-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+    .domain-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+    .domain-field label { font-size: 9px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; }
+    .domain-field input, .domain-field select {
+      background: var(--bg-2); border: 1px solid var(--border); color: var(--text-1);
+      font-size: 11px; padding: 5px 6px; border-radius: var(--radius-sm); min-width: 0;
+    }
+    .domain-log-form { display: grid; grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)); gap: 7px; align-items: end; border-top: 1px solid var(--border); padding-top: 9px; }
+    .domain-log-add { align-self: end; }
+    .domain-log-list { display: flex; flex-direction: column; gap: 5px; }
+    .domain-log-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; padding: 7px 8px; border: 1px solid var(--border); background: var(--bg-2); }
+    .domain-log-values { font-size: 10px; line-height: 1.5; color: var(--text-2); overflow-wrap: anywhere; }
+    .domain-log-values b { color: var(--text-0); font-weight: 600; }
+    .domain-log-del { border: 0; background: transparent; color: var(--text-3); cursor: pointer; font-size: 13px; padding: 0 2px; }
+    .domain-log-del:hover { color: var(--red); }
+    .domain-chart { width: 100%; height: auto; display: block; background: var(--bg-2); border: 1px solid var(--border); }
+    .domain-chart-axis { stroke: var(--border); stroke-width: 1; }
+    .domain-chart-line { fill: none; stroke: var(--cyan); stroke-width: 2; }
+    .domain-chart-dot { fill: var(--cyan); }
+    .domain-chart-label { fill: var(--text-3); font-family: var(--font-mono); font-size: 8px; }
+    .domain-chart-title { fill: var(--text-2); font-family: var(--font-mono); font-size: 9px; }
+    .domain-chart-note { font-size: 9px; color: var(--text-3); line-height: 1.45; margin-top: 4px; }
+    .domain-rules { display: flex; flex-direction: column; gap: 6px; }
+    .domain-rule { display: grid; grid-template-columns: 65px minmax(0, 1fr); gap: 8px; padding: 7px 8px; border: 1px solid var(--border); background: var(--bg-2); }
+    .domain-rule.stop { border-left: 3px solid var(--red); }
+    .domain-rule.warn { border-left: 3px solid #c98a15; }
+    .domain-rule.info { border-left: 3px solid var(--cyan); }
+    .domain-rule-sev { font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); }
+    .domain-rule-when { font-size: 10px; font-weight: 600; color: var(--text-0); line-height: 1.4; }
+    .domain-rule-then { font-size: 10px; color: var(--text-2); line-height: 1.45; margin-top: 2px; }
+    .domain-checklist { display: grid; grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 7px; }
+    .domain-check { display: flex; gap: 7px; align-items: flex-start; padding: 7px 8px; border: 1px solid var(--border); background: var(--bg-2); }
+    .domain-check input { margin-top: 2px; accent-color: var(--cyan); }
+    .domain-check label { font-size: 10px; color: var(--text-1); line-height: 1.35; cursor: pointer; }
+    .domain-check span { display: block; font-size: 9px; color: var(--text-3); line-height: 1.35; margin-top: 2px; }
+    .domain-docs { display: flex; flex-direction: column; gap: 5px; }
+    .domain-doc { border: 1px solid var(--border); background: var(--bg-1); }
+    .domain-doc summary { cursor: pointer; padding: 8px 10px; font-size: 11px; font-weight: 600; color: var(--text-1); }
+    .domain-doc summary:hover { background: var(--bg-2); }
+    .domain-doc-body { padding: 0 10px 10px; font-size: 11px; line-height: 1.55; color: var(--text-2); }
+    .domain-doc-body p { margin: 0 0 7px; }
+    .domain-doc-body p:last-child { margin-bottom: 0; }
+    .domain-rig { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-left: 3px solid var(--cyan); background: var(--bg-1); border-top: 1px solid var(--border); border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 10px 12px; }
+    .domain-rig p { font-size: 11px; color: var(--text-2); line-height: 1.45; }
+    .domain-hotspot-info { border-left: 3px solid var(--cyan); background: var(--bg-2); padding: 9px 10px; font-size: 11px; line-height: 1.5; color: var(--text-2); }
+    .domain-hotspot-info b { color: var(--text-0); }
+    .domain-tracking-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    @media (max-width: 860px) {
+      .domain-hero { grid-template-columns: 1fr; }
+      .domain-metrics { grid-template-columns: 1fr; }
+      .domain-risk-lists { grid-template-columns: 1fr; }
+      .domain-step { grid-template-columns: 72px minmax(0, 1fr); }
+      .domain-rule { grid-template-columns: 1fr; gap: 3px; }
+      .domain-rig { align-items: flex-start; flex-direction: column; }
+    }
+
+    /* === Utility: field guide + command palette + fast navigation === */
+    .tabbar .utility-btn { font-size: 10px; color: var(--text-3); padding: 0 10px; }
+    .tabbar .utility-btn:hover { color: var(--cyan); }
+    .tabbar #commandBtn { margin-left: auto; }
+    .text-link {
+      background: none; border: 0; padding: 0; color: var(--cyan); font: inherit;
+      font-size: 10px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+    }
+    .text-link:hover { color: var(--text-0); }
+
+    .guide-overlay { position: fixed; inset: 0; z-index: 300; display: flex; justify-content: flex-end; }
+    .guide-backdrop { position: absolute; inset: 0; background: rgba(14, 13, 11, 0.38); backdrop-filter: blur(2px); }
+    .guide-drawer {
+      position: relative; width: min(980px, 94vw); height: 100%; background: var(--bg-0);
+      border-left: 1px solid var(--border); box-shadow: -24px 0 60px rgba(0, 0, 0, 0.18);
+      display: flex; flex-direction: column; animation: guideIn 0.18s ease-out;
+    }
+    @keyframes guideIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+    .guide-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid var(--border); }
+    .guide-head h2 { font-size: 18px; color: var(--text-0); margin-top: 4px; line-height: 1.15; }
+    .guide-tools { display: flex; align-items: center; gap: 8px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
+    .guide-tools input {
+      flex: 1; background: var(--bg-1); border: 1px solid var(--border); color: var(--text-1);
+      font-size: 11px; padding: 6px 8px; border-radius: var(--radius-sm); outline: none;
+    }
+    .guide-tools input:focus { border-color: var(--cyan); }
+    .guide-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 220px minmax(0, 1fr); }
+    .guide-nav { overflow-y: auto; border-right: 1px solid var(--border); padding: 8px 8px 20px; }
+    .guide-nav-group { font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-3); margin: 12px 7px 4px; }
+    .guide-nav-btn {
+      display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text-2);
+      font-size: 11px; line-height: 1.35; padding: 6px 8px; cursor: pointer; border-left: 2px solid transparent;
+      text-transform: none; letter-spacing: 0.01em; font-family: var(--font-mono);
+    }
+    .guide-nav-btn:hover { background: var(--bg-1); color: var(--text-0); }
+    .guide-nav-btn.active { border-left-color: var(--cyan); color: var(--text-0); background: var(--bg-1); }
+    .guide-content { overflow-y: auto; padding: 18px 22px 40px; }
+    .guide-content h2 { font-size: 20px; color: var(--text-0); line-height: 1.15; }
+    .guide-summary { font-size: 12px; color: var(--text-1); line-height: 1.5; margin-top: 5px; max-width: 720px; }
+    .guide-p { font-size: 12px; color: var(--text-2); line-height: 1.65; margin-top: 10px; max-width: 720px; }
+    .guide-list { margin: 10px 0 0; padding-left: 18px; max-width: 720px; }
+    .guide-list li { font-size: 12px; color: var(--text-2); line-height: 1.6; margin-bottom: 5px; }
+    .guide-empty { padding: 18px 0; font-size: 12px; color: var(--text-3); }
+    .guide-foot { padding: 8px 18px; border-top: 1px solid var(--border); font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-3); }
+
+    .command-overlay { position: fixed; inset: 0; z-index: 320; display: flex; align-items: flex-start; justify-content: center; padding-top: 12vh; }
+    .command-backdrop { position: absolute; inset: 0; background: rgba(14, 13, 11, 0.4); backdrop-filter: blur(2px); }
+    .command-box {
+      position: relative; width: min(640px, 94vw); background: var(--bg-0); border: 1px solid var(--border);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.22); display: flex; flex-direction: column; max-height: 66vh;
+      animation: commandIn 0.14s ease-out;
+    }
+    @keyframes commandIn { from { transform: translateY(-6px); opacity: 0; } to { transform: none; opacity: 1; } }
+    .command-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .command-head input { flex: 1; background: transparent; border: 0; outline: none; color: var(--text-0); font-size: 13px; }
+    .command-list { overflow-y: auto; padding: 6px; }
+    .command-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; background: none; border: 0; color: var(--text-1); padding: 7px 8px; cursor: pointer; border-left: 2px solid transparent; }
+    .command-item:hover, .command-item.active { background: var(--bg-1); border-left-color: var(--cyan); }
+    .command-item .cmd-group { font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-3); min-width: 62px; }
+    .command-item .cmd-title { font-size: 11px; text-transform: none; letter-spacing: 0.01em; }
+    .command-item .cmd-hint { margin-left: auto; font-size: 9px; color: var(--text-3); }
+    .command-foot { display: flex; gap: 14px; padding: 7px 12px; border-top: 1px solid var(--border); font-size: 9px; color: var(--text-3); }
+    .command-foot kbd { font-family: var(--font-mono); font-size: 8px; border: 1px solid var(--border); padding: 1px 4px; margin-right: 2px; }
+
+    /* === Domain Vials — workspace navigation and density === */
+    .vials-pane { overflow: hidden; gap: 10px; padding: 12px 14px; }
+    .vials-pane > #vialsMain { overflow-y: auto; padding-right: 2px; }
+    .vials-note { font-size: 10px; line-height: 1.55; }
+    .vials-section-head { margin-top: 4px; }
+    .vials-switch { display: flex; gap: 2px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+    .vials-switch-btn {
+      background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-3);
+      font-family: var(--font-mono); font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em;
+      padding: 6px 10px 7px; cursor: pointer;
+    }
+    .vials-switch-btn span {
+      display: inline-block; min-width: 14px; margin-left: 4px; padding: 0 4px;
+      border: 1px solid var(--border); color: var(--text-3); font-size: 8px; line-height: 1.4;
+    }
+    .vials-switch-btn:hover { color: var(--text-1); }
+    .vials-switch-btn.active { color: var(--cyan); border-bottom-color: var(--cyan); }
+    .vials-switch-btn.active span { color: var(--cyan); border-color: var(--cyan); }
+    .vials-pane-section { display: flex; flex-direction: column; gap: 9px; min-height: 0; }
+    .vials-inline-actions { display: flex; gap: 5px; flex-wrap: wrap; }
+    .domain-catalog-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+    .domain-catalog-actions .coord-tag { margin-left: 2px; }
+    .domain-url-bar {
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--cyan);
+      background: var(--bg-1);
+      padding: 9px 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .domain-url-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .domain-url-row input {
+      flex: 1 1 360px;
+      min-width: 180px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      padding: 6px 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-2);
+      color: var(--text-0);
+    }
+    .domain-url-row input:focus { outline: none; border-color: var(--cyan); }
+    .domain-url-status { font-size: 9px; line-height: 1.45; color: var(--text-3); font-family: var(--font-mono); overflow-wrap: anywhere; }
+    .domain-url-status.busy { color: var(--cyan); }
+    .domain-url-status.fail { color: var(--red); }
+    .domain-url-status.pass { color: var(--green); }
+    .domain-detector-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+    .domain-detector-head .hint { max-width: 560px; }
+    .domain-detector-head .mini-btn { flex-shrink: 0; }
+    .domain-detector-baseline { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 8px; border: 1px solid var(--border); border-left: 3px solid var(--cyan); background: var(--bg-2); padding: 7px 8px; font-size: 10px; line-height: 1.45; color: var(--text-2); }
+    .domain-detector-baseline b { color: var(--text-3); font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em; }
+    .domain-detector-levels { display: flex; flex-direction: column; gap: 4px; }
+    .domain-detector-level { display: grid; grid-template-columns: 118px minmax(0, 1fr) minmax(0, 0.9fr); gap: 8px; align-items: start; border: 1px solid var(--border); background: var(--bg-2); padding: 6px 8px; }
+    .domain-detector-level.l0 { border-left: 3px solid var(--border-strong); }
+    .domain-detector-level.l1 { border-left: 3px solid #c98a15; }
+    .domain-detector-level.l2 { border-left: 3px solid var(--red); }
+    .domain-detector-level.l3 { border-left: 3px solid var(--red); background: var(--red-dim); }
+    .domain-detector-level-key { font-family: var(--font-mono); font-size: 9px; color: var(--text-1); line-height: 1.35; }
+    .domain-detector-level-meaning { font-size: 10px; color: var(--text-2); line-height: 1.4; }
+    .domain-detector-level-action { font-size: 10px; color: var(--text-1); line-height: 1.4; }
+    .domain-detector-limits { border-top: 1px solid var(--border); padding-top: 7px; }
+    .domain-detector-limits b { display: block; font-size: 9px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-3); margin-bottom: 4px; }
+    .domain-detector-limits ul { margin: 0; padding-left: 16px; }
+    .domain-detector-limits li { font-size: 10px; line-height: 1.45; color: var(--text-2); margin-bottom: 3px; }
+    .domain-detector-evidence { font-family: var(--font-mono); font-size: 9px; line-height: 1.5; color: var(--text-3); border-top: 1px solid var(--border); padding-top: 7px; }
+    .domain-workspace { overflow-y: auto; }
+    .domain-workspace-head { top: 0; padding-top: 0; }
+    .domain-jumpbar {
+      position: sticky; top: 38px; z-index: 2; display: flex; gap: 3px; overflow-x: auto;
+      padding: 4px 0 6px; background: var(--bg-0); border-bottom: 1px solid var(--border);
+      flex-shrink: 0; min-height: 28px;
+    }
+    .domain-jump {
+      flex: 0 0 auto; background: none; border: 1px solid transparent; color: var(--text-3);
+      font-family: var(--font-mono); font-size: 8px; text-transform: uppercase; letter-spacing: 0.08em;
+      padding: 3px 7px; cursor: pointer; border-radius: 2px;
+    }
+    .domain-jump span { color: var(--text-4); margin-right: 4px; }
+    .domain-jump:hover { color: var(--text-1); border-color: var(--border); }
+    .domain-jump.active { color: var(--cyan); border-color: var(--border); background: var(--bg-1); }
+    #domainWorkspaceBody { display: flex; flex-direction: column; gap: 12px; }
+    .domain-full { display: flex; flex-direction: column; gap: 12px; }
+    .domain-columns { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr); gap: 12px; align-items: start; }
+    .domain-col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    .domain-section { min-width: 0; scroll-margin-top: 92px; }
+    .domain-hero {
+      background-color: var(--bg-1);
+      background-image: radial-gradient(rgba(15, 111, 134, 0.12) 1px, transparent 1px);
+      background-size: 13px 13px;
+    }
+    .domain-bubble { transform-box: fill-box; transform-origin: center; animation: bubbleRise 3.2s ease-in-out infinite; }
+    @keyframes bubbleRise {
+      0% { opacity: 0; transform: translateY(8px) scale(0.7); }
+      40% { opacity: 0.9; }
+      100% { opacity: 0; transform: translateY(-28px) scale(1.1); }
+    }
+    .domain-art-sensor { animation: sensorPulse 2.6s ease-in-out infinite; }
+    @keyframes sensorPulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+    .domain-hotspot-info { border-left-color: var(--cyan); }
+    @media (max-width: 980px) {
+      .domain-columns { grid-template-columns: 1fr; }
+      .domain-detector-head { flex-direction: column; }
+      .domain-detector-level { grid-template-columns: 1fr; gap: 3px; }
+      .domain-detector-baseline { grid-template-columns: 1fr; gap: 3px; }
+      .domain-url-row input { flex-basis: 100%; }
+      .guide-body { grid-template-columns: 170px minmax(0, 1fr); }
+    }
+    @media (max-width: 760px) {
+      .guide-body { grid-template-columns: 1fr; }
+      .guide-nav { max-height: 160px; border-right: 0; border-bottom: 1px solid var(--border); }
+      .tabbar .utility-btn { padding: 0 7px; }
+    }
 
     /* === Compare Tab === */
     .compare {
@@ -1205,6 +1990,22 @@
       flex: 1;
       min-height: 0;
     }
+    .compare-empty { display: none; grid-column: 1 / -1; }
+    .compare.empty .compare-body > .compare-side,
+    .compare.empty .compare-body > .compare-chart { display: none; }
+    .compare.empty .compare-empty {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 7px; min-height: 280px; padding: 28px 18px; text-align: center;
+      border: 1px dashed var(--border); border-radius: 8px; background: var(--bg-1);
+    }
+    .compare-empty h3 {
+      margin: 2px 0 0; font-size: 19px; font-weight: 600; color: var(--text-0);
+      text-transform: none; letter-spacing: 0;
+    }
+    .compare-empty p { max-width: 520px; margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-2); }
+    .compare-empty p b { color: var(--text-0); }
+    .compare-empty-actions { display: flex; gap: 7px; flex-wrap: wrap; justify-content: center; margin-top: 5px; }
+    .compare-empty .hint { margin-top: 3px; }
     .compare-side,
     .compare-chart {
       display: flex;
@@ -1268,6 +2069,18 @@
     .cmp-metrics-table tr.cmp-best td { color: var(--green); font-weight: 700; }
     .cmp-recover-hi { color: var(--green); }
     .cmp-recover-lo { color: var(--red); }
+    .cmp-verdict {
+      margin-top: 10px; padding-top: 8px;
+      border-top: 1px solid var(--border);
+    }
+    .cmp-verdict-head {
+      font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--text-3); margin-bottom: 4px;
+    }
+    .cmp-verdict-line { font-size: 11px; line-height: 1.4; color: var(--text-1); }
+    .cmp-verdict-line.ok { color: var(--green); }
+    .cmp-verdict-line.warn { color: #8a5a08; }
+    .cmp-verdict-sub { font-size: 10px; line-height: 1.45; color: var(--text-3); margin-top: 4px; }
 
     /* === Datasets Catalog === */
     .dataset-catalog {
@@ -1286,25 +2099,54 @@
       border-radius: var(--radius);
     }
     .ds-card-head { display: flex; align-items: baseline; gap: 8px; }
-    .ds-card-name { font-size: 13px; font-weight: 700; color: var(--text-0); }
-    .ds-badge {
+    .ds-card-name { font-size: 14px; font-weight: 700; color: var(--text-0); }
+    .ds-format {
       margin-left: auto;
-      padding: 2px 7px;
+      padding: 2px 8px;
       font-family: var(--font-mono);
       font-size: 9px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
+      letter-spacing: 0.04em;
       white-space: nowrap;
       border-radius: 10px;
       background: var(--bg-3);
+      color: var(--text-2);
     }
-    .ds-badge.yes { color: var(--green); }
-    .ds-badge.check { color: var(--yellow); }
-    .ds-badge.no { color: var(--red); }
-    .ds-badge.api { color: var(--cyan); }
-    .ds-meta { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); }
-    .ds-note { font-size: 11px; line-height: 1.45; color: var(--text-2); }
-    .ds-actions { display: flex; gap: 6px; margin-top: auto; padding-top: 6px; }
+    .ds-format.ready { color: var(--green); }
+    .ds-format.converts { color: var(--cyan); }
+    .ds-format.raw { color: var(--text-3); }
+    .ds-what { font-size: 12px; line-height: 1.5; color: var(--text-1); }
+    .ds-chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 2px 0; }
+    .ds-chip {
+      font-family: var(--font-mono);
+      font-size: 9px;
+      padding: 2px 7px;
+      border-radius: 8px;
+      background: var(--bg-3);
+      color: var(--text-2);
+    }
+    .ds-note { font-size: 11px; line-height: 1.45; color: var(--text-3); }
+    .ds-actions { display: flex; align-items: center; gap: 6px; margin-top: auto; padding-top: 6px; }
+    .ds-license { margin-left: auto; font-size: 9px; color: var(--text-3); white-space: normal; text-align: right; line-height: 1.35; max-width: 260px; }
+    .ds-storage { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+    .ds-storage-label { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+    .ds-storage-path { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 340px; }
+    .ds-download { border-color: var(--cyan); color: var(--cyan); font-weight: 600; }
+
+    /* === Global download dock === */
+    .dl-dock { position: fixed; right: 16px; bottom: 16px; width: 330px; max-height: 60vh; display: none; flex-direction: column;
+      background: var(--bg-2); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 10px 34px rgba(0,0,0,.35); z-index: 90; overflow: hidden; }
+    .dl-dock-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border-bottom: 1px solid var(--border);
+      font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-2); }
+    .dl-list { overflow: auto; }
+    .dl-item { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+    .dl-item:last-child { border-bottom: none; }
+    .dl-item-head { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; margin-bottom: 2px; }
+    .dl-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .dl-pct { font-family: var(--font-mono); color: var(--cyan); flex: none; }
+    .dl-meta { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); margin-top: 4px; }
+    .dl-actions { display: flex; gap: 6px; margin-top: 8px; }
+    .dl-item.done .progress-fill { background: var(--green); }
+    .dl-item.failed .progress-fill { background: var(--red); }
 
     /* === Recipes === */
     .recipe-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
@@ -1388,7 +2230,7 @@
     .quality-badge.bad { background: var(--red-dim); color: var(--red); }
     .lib-analyze {
       background: transparent;
-      border: 1px dashed var(--border);
+      border: 1px solid var(--border);
       color: var(--text-3);
       font-family: var(--font-mono);
       font-size: 9px;
@@ -1570,6 +2412,7 @@
       max-width: 100%;
     }
     .train-metric { display: flex; justify-content: space-between; padding: 2px 0; font-size: 11px; }
+    .train-note { font-size: 10px; line-height: 1.45; color: var(--text-3); margin: 4px 0 2px; }
 
     /* === Live Classifier (Dashboard sidebar proxy) === */
     .live-probs { display: flex; flex-direction: column; gap: 5px; margin-top: 2px; }
@@ -1778,7 +2621,7 @@
       letter-spacing: 0.06em;
       color: var(--text-2);
       background: var(--bg-2);
-      border: 1px dashed var(--border);
+      border: 1px solid var(--border);
       padding: 5px 8px;
       margin-bottom: 10px;
       white-space: nowrap;
@@ -1893,6 +2736,20 @@
       flex: 1;
       min-height: 0;
     }
+    .fleet-empty {
+      grid-column: 1 / -1;
+      align-self: center;
+      justify-self: center;
+      max-width: 360px;
+      margin-top: 10vh;
+      padding: 22px 24px;
+      text-align: center;
+      border: 1px solid var(--border);
+      background: var(--bg-0);
+    }
+    .fleet-empty b { display: block; font-size: 15px; color: var(--text-0); margin-bottom: 5px; }
+    .fleet-empty p { font-size: 11px; line-height: 1.5; color: var(--text-2); margin: 0 0 12px; }
+    .fleet-empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
     .device-card {
       background: var(--bg-2);
       border: 1px solid var(--border);
@@ -1941,6 +2798,7 @@
     .fleet-health {
       margin-top: 12px;
       background: var(--bg-1);
+      flex-shrink: 0;
     }
     .fleet-health-grid {
       display: grid;
@@ -2091,8 +2949,11 @@
       font-family: var(--font-mono);
       padding: 2px 6px;
       cursor: pointer;
+      transition: background .12s ease, color .12s ease, border-color .12s ease;
     }
     .mini-btn:hover { background: var(--cyan); color: var(--bg-0); }
+    .mini-btn.primary { background: var(--cyan); color: var(--bg-0); }
+    .mini-btn.primary:hover { background: var(--bg-0); }
     .sensor-grid {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -2243,8 +3104,10 @@
     .ps-arrow { color: var(--text-3); }
     .ps-fill { flex: 1; }
     .ps-hint { font-size: 9px; color: var(--text-3); }
-    .modal-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
+    .modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; margin-top: 2px; }
     .modal-actions button { padding: 5px 12px; }
+    .modal-box.check-save-box { width: 440px; }
+    .check-save-box input { width: 100%; }
 
     /* === Flash modal / drop hint / train shortfall === */
 
@@ -2299,6 +3162,11 @@
       font-size: 10px;
     }
     .form-row .hint { font-size: 11px; }
+    /* The modal's generic h3 rule is all-caps; an object's name is a name. */
+    .modal-box .smell-detail-head h3 {
+      font-size: 22px; font-weight: 650; text-transform: none; letter-spacing: 0;
+      line-height: 1.1; color: var(--text-0);
+    }
   </style>
 </head>
 <body>
@@ -2353,28 +3221,57 @@
       </div>
     </header>
 
-    <!-- Tab Bar -->
+    <!-- Tab Bar — organised by the job, not by the implementation.
+         Home | Explore | Decide | Train | Vials | Data | Rig -->
     <nav class="tabbar">
-      <button class="tab-btn active" data-tab="dashboard">Dashboard</button>
-      <button class="tab-btn" data-tab="library">Sources</button>
-      <button class="tab-btn" data-tab="compare">Compare</button>
+      <button class="tab-btn active" data-tab="dashboard">Home</button>
+      <button class="tab-btn" data-tab="explore">Explore</button>
+      <button class="tab-btn" data-tab="decide">Decide</button>
       <button class="tab-btn" data-tab="train">Train</button>
-      <button class="tab-btn" data-tab="fleet">Fleet <span class="badge" id="fleetBadge" style="display:none">0</span></button>
-      <button class="tab-btn" data-tab="system">System</button>
+      <button class="tab-btn" data-tab="vials">Vials</button>
+      <button class="tab-btn" data-tab="data">Data</button>
+      <button class="tab-btn" data-tab="rig">Rig <span class="badge" id="fleetBadge" style="display:none">0</span></button>
+      <button class="tab-btn utility-btn" id="commandBtn" type="button" title="Command palette (Ctrl+K)">⌘K</button>
+      <button class="tab-btn utility-btn" id="guideBtn" type="button" title="Field guide (?)">? Guide</button>
+      <!-- Legacy aliases. Code and older command-palette actions still use these
+           names; the router maps them to the new workspaces. -->
+      <button class="tab-btn" data-tab="library" hidden aria-hidden="true"></button>
+      <button class="tab-btn" data-tab="compare" hidden aria-hidden="true"></button>
+      <button class="tab-btn" data-tab="fleet" hidden aria-hidden="true"></button>
+      <button class="tab-btn" data-tab="system" hidden aria-hidden="true"></button>
     </nav>
 
     <!-- Main Content -->
     <div class="content">
-      <!-- ===== DASHBOARD ===== -->
-      <div class="tab-panel active" id="panel-dashboard">
-        <div id="sampleCard" class="sample-card">
-          <div class="sample-card-text">
-            <div class="sample-card-title">No hardware yet?</div>
-            <div class="sample-card-sub">Load a sample session to see live traces, quality scoring and analysis — no device needed.</div>
-          </div>
-          <button id="loadSampleSession" class="green">Load a sample session</button>
-          <button id="sampleDismiss" class="dock-toggle" title="Dismiss">✕</button>
+      <!-- Job-level workspaces. The existing panels are moved into these shells
+           at boot so every ID, handler, and saved state keeps working. -->
+      <div class="tab-panel" id="panel-explore"></div>
+      <div class="tab-panel" id="panel-decide">
+        <div class="workspace-subnav">
+          <button class="src-subnav-btn active" data-src="check">Check</button>
+          <button class="src-subnav-btn" data-src="compare">Compare</button>
         </div>
+        <div class="workspace-body" id="decideBody"></div>
+      </div>
+      <div class="tab-panel" id="panel-vials"></div>
+      <div class="tab-panel" id="panel-data">
+        <div class="workspace-subnav">
+          <button class="src-subnav-btn active" data-src="sessions">Recordings</button>
+          <button class="src-subnav-btn" data-src="datasets">Datasets</button>
+          <button class="src-subnav-btn" data-src="changelog">Change Log</button>
+        </div>
+        <div class="workspace-body" id="dataBody"></div>
+      </div>
+      <div class="tab-panel" id="panel-rig">
+        <div class="workspace-subnav">
+          <button class="src-subnav-btn active" data-src="fleet">Fleet</button>
+          <button class="src-subnav-btn" data-src="system">System</button>
+        </div>
+        <div class="workspace-body" id="rigBody"></div>
+      </div>
+
+      <!-- ===== RESULT ===== -->
+      <div class="tab-panel active" id="panel-dashboard">
         <div class="boot-banner" id="bootBanner">
           <span style="color:var(--yellow);font-weight:700">⚠ BOOTLOADER</span>
           <span>This device is answering in bootloader mode — it will not stream data until it is flashed. Firmware may be missing or corrupt.</span>
@@ -2410,7 +3307,7 @@
               <span class="plot-readout" id="plotEnv"></span>
               <span class="plot-readout" id="plotScaleNote" style="display:none"></span>
               <button id="liveClear" class="transport-btn trans-nav" title="Clear the displayed window">⟲</button>
-              <button id="exportTracesPng" class="transport-btn trans-nav" title="Export the visible traces as a PNG image">PNG</button>
+              <button id="exportTracesPng" class="transport-btn trans-nav" title="Save the visible traces as an image" aria-label="Save traces as image"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button>
             </div>
             <div id="hoverReadout" class="hover-readout" style="display:none"></div>
 
@@ -2427,6 +3324,17 @@
             </div>
             <div class="canvas-wrap hud-corners">
               <canvas id="traces"></canvas>
+              <div class="canvas-empty" id="dashboardEmpty">
+                <div class="canvas-empty-card">
+                  <b>No rig connected.</b>
+                  <p>Plug in an e-nose to stream live, or explore 22 real smells with no hardware.</p>
+                  <div class="canvas-empty-actions">
+                    <button class="mini-btn primary" id="dashExplore" type="button">Explore smells →</button>
+                    <button class="mini-btn" id="dashCompare" type="button">Try a comparison →</button>
+                    <button class="mini-btn" id="dashConnect" type="button">Connect a rig</button>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="dock" id="underDock">
               <div class="dock-head">
@@ -2463,7 +3371,7 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell grow" id="phenoBound">
-                    <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span><button id="exportFingerprintPng" class="mini" style="float:right" title="Export this fingerprint as a PNG image">PNG</button></div>
+                    <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span><button id="exportFingerprintPng" class="mini fp-save" title="Save this fingerprint as an image" aria-label="Save fingerprint as image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button></div>
                     <canvas id="fingerprint"></canvas>
                   </div>
                 </div>
@@ -2511,14 +3419,196 @@
         </div>
       </div>
 
+      <!-- ===== SOURCES ===== -->
       <div class="tab-panel" id="panel-library">
         <div class="src-wrap">
           <div class="src-subnav">
-            <button class="src-subnav-btn active" data-src="sessions">Sessions</button>
+            <button class="src-subnav-btn active" data-src="smells">Gallery</button>
+            <button class="src-subnav-btn" data-src="check">Check</button>
+            <button class="src-subnav-btn" data-src="vials">Vials</button>
+            <button class="src-subnav-btn" data-src="sessions">Recordings</button>
             <button class="src-subnav-btn" data-src="datasets">Datasets</button>
             <button class="src-subnav-btn" data-src="changelog">Change Log</button>
           </div>
-          <div class="src-view active" id="src-sessions">
+
+          <!-- Explore — the front door. A user thinks in smells, not files: one
+               card per substance, showing the mean measured response of the array. -->
+          <div class="src-view active" id="src-smells">
+            <div class="smells-pane">
+              <div class="smells-head">
+                <div>
+                  <h2>Smells</h2>
+                  <p class="hint" id="smellsSub">Every smell in your library, as the response it produced.</p>
+                  <div class="smells-rig" id="smellsRig" hidden></div>
+                </div>
+                <div class="smells-actions">
+                  <button class="mini-btn" id="smellImport" title="Import a CSV recording">Import</button>
+                  <button class="mini-btn primary" id="smellCapture" title="Capture a smell with a connected rig">● Capture</button>
+                  <span class="smells-actions-sep"></span>
+                  <span class="coord-tag" id="smellSelStamp">0 selected</span>
+                  <button class="mini-btn" id="smellCompare" disabled>Compare</button>
+                  <button class="mini-btn" id="smellClearSel">Clear</button>
+                </div>
+              </div>
+              <div class="smells-toolbar">
+                <input id="smellSearch" class="smells-search" type="search" placeholder="Search smells…" autocomplete="off" aria-label="Search smells" />
+                <div class="smell-chips" id="smellChips" role="group" aria-label="Filter smells">
+                  <button class="smell-chip active" type="button" data-smell-filter="all">All</button>
+                  <button class="smell-chip" type="button" data-smell-filter="ready">Ready to check</button>
+                  <button class="smell-chip" type="button" data-smell-filter="needs">Needs analysis</button>
+                  <button class="smell-chip" type="button" data-smell-filter="multi">Multiple arrays</button>
+                </div>
+                <select id="smellSort" class="smells-sort" aria-label="Sort smells">
+                  <option value="recordings">Most recordings</option>
+                  <option value="name">Name A–Z</option>
+                  <option value="quality">Best quality</option>
+                  <option value="newest">Newest</option>
+                </select>
+                <button id="smellSurprise" class="mini-btn" type="button" title="Open a random smell">Surprise me</button>
+                <span class="coord-tag" id="smellResultStamp">0 smells</span>
+              </div>
+              <div class="discovery-strip" id="discoveryStrip"></div>
+              <div class="sep-panel" id="smellsSep" hidden></div>
+              <div class="smells-grid" id="smellsGrid"></div>
+            </div>
+          </div>
+
+          <!-- Check — can this array tell two smells apart? -->
+          <div class="src-view" id="src-check">
+            <div class="play-wrap">
+              <div class="play-pane active" id="playCheck">
+                <div class="check-wrap">
+                  <div class="check-head">
+                    <div>
+                      <h2>Check</h2>
+                      <p class="hint">Can this array tell two smells apart? Pick a reference and a sample. The verdict comes from saved replicates — before any model is trained.</p>
+                    </div>
+                    <div class="check-head-actions">
+                      <span class="coord-tag" id="checkStamp">not run</span>
+                      <button class="mini-btn" id="checkSwap" type="button" title="Swap reference and sample">⇄ Swap</button>
+                      <button class="mini-btn primary" id="checkRun" type="button">Run check</button>
+                    </div>
+                  </div>
+
+                  <div class="check-bench">
+                    <div class="check-pair">
+                      <div class="check-pick">
+                        <label for="checkRef">Reference</label>
+                        <select id="checkRef"></select>
+                        <canvas id="checkRefPrint" class="check-print"></canvas>
+                        <div class="check-pick-meta" id="checkRefMeta">—</div>
+                      </div>
+                      <div class="check-pick">
+                        <label for="checkSample">Sample</label>
+                        <select id="checkSample"></select>
+                        <canvas id="checkSamplePrint" class="check-print"></canvas>
+                        <div class="check-pick-meta" id="checkSampleMeta">—</div>
+                      </div>
+                    </div>
+
+                    <div class="check-diff">
+                      <div class="check-diff-head">
+                        <span>Difference fingerprint</span>
+                        <span class="coord-tag" id="checkDiffTag">reference → sample</span>
+                      </div>
+                      <canvas id="checkDiffPrint" class="check-diff-print"></canvas>
+                      <div class="check-legend">
+                        <span><i class="dot pos"></i>sample higher</span>
+                        <span><i class="dot neg"></i>sample lower</span>
+                        <span><i class="dot na"></i>no signal / n/a</span>
+                      </div>
+                    </div>
+
+                    <div class="check-result" id="checkResult">
+                      <div class="check-empty">Pick two smells to see whether the array separates them.</div>
+                    </div>
+                  </div>
+
+                  <section class="check-saved">
+                    <div class="check-saved-head">
+                      <span>Saved checks</span>
+                      <span class="coord-tag" id="checkSavedCount">0</span>
+                    </div>
+                    <p class="check-saved-note">Saved on this machine. A saved check is a snapshot of the verdict; reopening it recomputes against the current library.</p>
+                    <div id="checkSavedList" class="check-saved-list"></div>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Vials — installable domain workspaces and reusable decision packs. -->
+          <div class="src-view" id="src-vials">
+            <div class="vials-pane">
+              <div id="vialsMain">
+                <div class="vials-head">
+                  <div>
+                    <h2>Vials</h2>
+                    <p class="hint">Installable ways of working. A domain Vial carries a protocol, a log, and its limits. A decision Vial carries a closed-set claim with its evidence. Neither is a universal smell ID.</p>
+                  </div>
+                  <div class="vials-actions">
+                    <span class="coord-tag" id="vialsSummary">0 domain · 0 decisions · 0 sealed</span>
+                    <button class="text-link" type="button" data-guide-open="vials">Validation gate →</button>
+                    <input type="file" id="vialImportFile" accept=".json,application/json" hidden />
+                    <input type="file" id="domainImportFile" accept=".json,application/json" hidden />
+                  </div>
+                </div>
+                <div class="vials-switch" role="tablist" aria-label="Vial categories">
+                  <button class="vials-switch-btn active" type="button" data-vials-tab="workspaces">Workspaces <span id="vialsWorkspacesCount">0</span></button>
+                  <button class="vials-switch-btn" type="button" data-vials-tab="decisions">Decisions <span id="vialsDecisionsCount">0</span></button>
+                  <button class="vials-switch-btn" type="button" data-vials-tab="aromatory">Aromatory <span id="vialsAromatoryCount">0</span></button>
+                </div>
+                <div id="vialsWorkspacesPane" class="vials-pane-section">
+                  <div class="vials-note">
+                    <b>Installed workspaces.</b> A domain Vial keeps the context the sensor cannot: the protocol,
+                    the log, the stop rules, and the refusal. Open one to work; install another from the Aromatory.
+                  </div>
+                  <div id="domainInstalledList" class="domain-area"></div>
+                </div>
+                <div id="vialsDecisionsPane" class="vials-pane-section" style="display:none">
+                  <div class="vials-note">
+                    <b>Decision packs.</b> A decision Vial is a closed-set claim — “on this array, these two smells
+                    are distinguishable” — with the source, replicates, 95% lower bound, permutation p-value,
+                    limits, and method. It is sealed only when saved evidence passes the local gate.
+                  </div>
+                  <div class="vials-section-head">
+                    <span>Your decision Vials <span class="coord-tag" id="vialsDecisionCount">0</span></span>
+                    <span class="vials-inline-actions">
+                      <button class="mini-btn" id="vialImportBtn" type="button">Import .vial.json</button>
+                      <button class="mini-btn primary" id="vialNewBtn" type="button">New Vial</button>
+                    </span>
+                  </div>
+                  <div id="vialsList" class="vials-list"></div>
+                </div>
+                <div id="vialsAromatoryPane" class="vials-pane-section" style="display:none">
+                  <div class="vials-note">
+                    <b>The Aromatory.</b> Official and community domain Vials. Community packs are policy-gated
+                    on import, rendered declaratively, and never execute code. Export any pack to inspect or share it.
+                  </div>
+                  <div id="domainUrlBar" class="domain-url-bar" hidden>
+                    <div class="domain-url-row">
+                      <input id="domainUrlInput" type="url" spellcheck="false" autocomplete="off" placeholder="https://raw.githubusercontent.com/you/your-vial/main/vial.json" aria-label="Domain Vial manifest URL" />
+                      <button id="domainUrlInstall" class="mini-btn primary" type="button">Validate &amp; install</button>
+                      <button id="domainUrlCancel" class="mini-btn" type="button">Cancel</button>
+                    </div>
+                    <div id="domainUrlStatus" class="domain-url-status">HTTPS only. The manifest runs through the same local policy gate as a file import.</div>
+                  </div>
+                  <div id="domainCatalog" class="domain-area"></div>
+                </div>
+              </div>
+
+              <div id="domainWorkspace" class="domain-workspace" style="display:none">
+                <div class="domain-workspace-head">
+                  <button id="domainBack" class="mini-btn" type="button">← Vials</button>
+                  <div id="domainWorkspaceMeta" class="domain-workspace-meta"></div>
+                </div>
+                <div id="domainJumpBar" class="domain-jumpbar"></div>
+                <div id="domainWorkspaceBody"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="src-view" id="src-sessions">
         <div class="library">
           <div class="library-main hud-panel" id="libMain">
             <div class="hud-panel-head">
@@ -2533,6 +3623,7 @@
               <button id="libConvert">Export .osmell</button>
               <button id="libRefresh">Refresh</button>
               <span style="width:1px;height:16px;background:var(--border)"></span>
+              <button id="libSample" title="Load a bundled sample session (no hardware needed)">Load sample</button>
               <input type="text" id="libSearch" placeholder="Search substance, label..." />
             </div>
             <div class="lib-table-wrap">
@@ -2559,6 +3650,11 @@
             <div class="hud-panel-head" style="padding-left:0;padding-right:0">
               <span class="hp-num">INS</span>
               <span>Inspector</span>
+            </div>
+            <div class="inspector-section" id="inspHealthSection">
+              <h4>Rig Health <span id="inspHealthStamp" class="coord-tag"></span></h4>
+              <div class="rig-hint">Judged on the opening baseline, where the array should be at rest.</div>
+              <div id="inspHealthBody" class="rig-body"></div>
             </div>
             <div class="inspector-section">
               <h4>Session Details</h4>
@@ -2619,31 +3715,21 @@
         </div>
           </div><!-- /src-sessions -->
 
-          <!-- Datasets Catalog — explore real public smell data (no hardware needed).
-               We LINK to the original source and show its license; we only rehost what
-               is clearly permissive. Honesty over hype (see private/DATA_AND_LICENSING.md). -->
+          <!-- Datasets Catalog — public smell data. Fetch from the source; import the CSV.
+               Licensing policy lives in private/DATA_AND_LICENSING.md + NOTICE.md, not in the UI. -->
           <div class="src-view" id="src-datasets">
             <div class="src-pane">
               <h2>Datasets</h2>
               <div class="card">
-                <p class="hint" style="margin-bottom:8px">
-                  Real public smell / gas-sensor datasets, across sensor types. We link to the
-                  original source and show its license up front — we only rehost what is clearly
-                  permissive. <b>Always credit the source.</b>
-                </p>
                 <div class="form-row">
-                  <input type="text" id="dsFilter" placeholder="Filter by name, sensor, license…" style="flex:1" />
-                  <select id="dsCommercial">
-                    <option value="all">All licenses</option>
-                    <option value="yes">Commercial OK</option>
-                    <option value="check">Check license</option>
-                    <option value="no">Link only</option>
-                    <option value="api">API</option>
-                  </select>
+                  <input type="text" id="dsFilter" placeholder="Search smell data — food, air quality, mixtures…" style="flex:1" />
                 </div>
-                <div class="form-row" style="margin-top:8px">
-                  <button id="dsImport" class="mini-btn">Import a downloaded CSV…</button>
-                  <span class="hint">Fetch a dataset from its source above, then import the CSV here.</span>
+                <div class="ds-storage">
+                  <span class="ds-storage-label">Storage</span>
+                  <span class="ds-storage-path" id="dsStoragePath">…</span>
+                  <span style="flex:1"></span>
+                  <button id="dsOpenFolder" class="mini-btn">Open folder</button>
+                  <button id="dsImport" class="mini-btn">Import CSV…</button>
                 </div>
               </div>
               <div id="datasetCatalog" class="dataset-catalog">Loading…</div>
@@ -2661,8 +3747,70 @@
         </div><!-- /src-wrap -->
       </div>
 
+      <!-- ===== RECIPE ===== -->
+      <!-- Recipe — the smell-native unit of work: source → ordered transforms → result.
+           Saved, re-runnable and versioned; every step is a named transform so no
+           derived number is invented (see private/SMELL_OPERATIONS.md). -->
+      <div class="tab-panel" id="panel-recipe">
+        <div class="recipe-pane">
+          <div class="form-row" style="align-items:center;margin-bottom:6px">
+            <h2 style="margin:0">How this was computed</h2>
+            <span style="flex:1"></span>
+            <button id="recipeBack" class="mini-btn" type="button">← Back to Explore</button>
+          </div>
+          <div class="card">
+            <p class="hint" style="margin-bottom:8px">
+              This is the preprocessing chain behind a fingerprint: <b>source → ordered
+              transforms → result</b>. Osmograph applies a standard chain automatically;
+              edit it only when you need a different baseline, window, or normalisation.
+              Every step is named, saved, and re-runnable — no invented numbers.
+            </p>
+            <div class="form-row">
+              <button id="recipeNew" class="mini-btn">New recipe</button>
+              <button id="recipeRefresh" class="mini-btn">Refresh</button>
+            </div>
+          </div>
+
+          <div id="recipeEditor" class="card" style="display:none">
+            <div class="form-row"><label style="width:70px">Name</label><input id="recName" placeholder="Fermentation Monitor" style="flex:1" /></div>
+            <div class="form-row"><label style="width:70px">Source</label><select id="recSourceSel" style="flex:1"></select></div>
+            <div class="hint" id="recSourceHint" style="margin:-2px 0 6px 76px"></div>
+            <div class="form-row"><label style="width:70px">Version</label><input id="recVersion" value="1.0.0" style="width:100px" /></div>
+            <div id="recSteps" style="margin:6px 0"></div>
+            <div class="hint" style="margin:2px 0 6px">Params: <b>window=5</b> · <b>alpha=0.3</b> · <b>z=3</b> · <b>method=0|1</b> · <b>start/end</b> seconds. Channel blank = all channels.</div>
+            <div class="form-row">
+              <button id="recAddStep" class="mini-btn">+ Step</button>
+              <button id="recRun" class="mini-btn primary">Run</button>
+              <button id="recSave" class="mini-btn">Save</button>
+              <button id="recCancel" class="mini-btn">Cancel</button>
+            </div>
+            <div id="recMsg" class="hint" style="min-height:14px"></div>
+          </div>
+
+          <div id="recipeResult" class="card" style="display:none">
+            <div class="form-row" style="align-items:baseline">
+              <h3 style="margin:0">Result</h3>
+              <span id="recipeResultMeta" class="hint" style="margin-left:auto"></span>
+              <button id="recSaveResult" class="mini-btn" style="margin-left:8px">Save .osmell</button>
+            </div>
+            <canvas id="recipeChart" style="width:100%;height:230px;display:block;margin:8px 0"></canvas>
+            <div id="recipeResultSteps" class="recipe-steps"></div>
+            <div id="recipeResultWarn" class="hint" style="color:var(--yellow);margin-top:6px"></div>
+            <div id="recipeResultMsg" class="hint" style="margin-top:4px"></div>
+          </div>
+
+          <div id="recipeList" class="recipe-list">Loading…</div>
+
+          <div class="card">
+            <h3 style="margin-bottom:6px">Op catalog</h3>
+            <p class="hint" style="margin-bottom:8px">The v1 transform set. <b>core</b> ships now; <b>next</b>/<b>research</b> are planned.</p>
+            <div id="recipeOps" class="op-catalog">Loading…</div>
+          </div>
+        </div>
+      </div>
+
       <!-- ===== COMPARE ===== -->
-      <div class="tab-panel" id="panel-compare">
+      <div class="workspace-view" id="panel-compare">
         <div class="compare">
           <div class="compare-head">
             <div>
@@ -2673,10 +3821,14 @@
                 devices and days.
               </div>
             </div>
-            <div class="compare-modes" id="compareModes">
-              <button class="cmp-mode active" data-mode="overlay">Overlay</button>
-              <button class="cmp-mode" data-mode="delta">Δ vs ref</button>
-              <button class="cmp-mode" data-mode="heatmap">Similarity</button>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <button id="comparePick" class="mini-btn" type="button">Pick in Explore →</button>
+              <div class="compare-modes" id="compareModes">
+                <button class="cmp-mode active" data-mode="overlay">Overlay</button>
+                <button class="cmp-mode" data-mode="delta">Δ vs ref</button>
+                <button class="cmp-mode" data-mode="heatmap">Similarity</button>
+                <button class="cmp-mode" data-mode="trajectory" title="The recording as a path through sensor space — time is the extra dimension">Trajectory</button>
+              </div>
             </div>
           </div>
           <div class="compare-controls" id="compareControls">
@@ -2708,6 +3860,22 @@
               <div class="compare-labels" id="compareLabels"></div>
               <div id="compareWrap">
                 <canvas id="compareCanvas"></canvas>
+              </div>
+            </div>
+            <div class="compare-empty" id="compareEmpty">
+              <div class="coord-tag">DECIDE · COMPARE</div>
+              <h3>Pick two recordings.</h3>
+              <p>
+                Tick the compare box on two smells in <b>Explore</b>, then press
+                <b>Compare</b>. This view overlays their per-channel responses and
+                refuses to blend recordings from different arrays.
+              </p>
+              <div class="compare-empty-actions">
+                <button id="compareEmptyTry" class="mini-btn primary" type="button">Try a starter pair →</button>
+                <button id="compareEmptyPick" class="mini-btn" type="button">Browse Explore →</button>
+              </div>
+              <div class="hint">
+                No hardware needed. The starter library is real, labelled data.
               </div>
             </div>
           </div>
@@ -2748,6 +3916,7 @@
                 <input type="text" id="trainName" placeholder="Model name (e.g. kitchen_spices)" title="Name your model" />
                 <div class="train-field"><label>Window</label><input type="number" id="trainWindow" min="20" max="500" value="100" title="Samples per classification window (20-500, default 100)" /></div>
                 <div class="train-field"><label>Min quality /100</label><input type="number" id="trainMinQuality" min="0" max="100" step="5" value="0" title="Skip recordings below this quality (0-100); 0 = include all" /></div>
+                <button id="trainStarter" title="Pick a balanced set from the bundled samples and train immediately — no hardware or setup needed">Try bundled samples</button>
                 <button id="trainBtn" class="green">Train</button>
                 <button id="trainRefresh">Refresh</button>
               </div>
@@ -2781,7 +3950,7 @@
       </div>
 
       <!-- ===== FLEET ===== -->
-      <div class="tab-panel" id="panel-fleet">
+      <div class="workspace-view" id="panel-fleet">
         <div class="fleet-layout">
           <div class="fleet-toolbar">
             <h2 style="font-size:14px;color:var(--text-0);font-weight:600">Fleet Management</h2>
@@ -2805,7 +3974,7 @@
       </div>
 
       <!-- ===== SYSTEM ===== -->
-      <div class="tab-panel" id="panel-system">
+      <div class="workspace-view" id="panel-system">
         <div class="system">
           <div class="sys-nav">
             <div class="sys-nav-item active" data-sys="connection">Connection</div>
@@ -2817,10 +3986,8 @@
             <div class="sys-nav-item" data-sys="firmware">Firmware</div>
             <div class="sys-nav-item" data-sys="burnin">Burn-In</div>
             <div class="sys-nav-item" data-sys="data">Data Storage</div>
-            <div class="sys-nav-item" data-sys="recipes">Recipes</div>
             <div class="sys-nav-item" data-sys="plugins">Plugins</div>
             <div class="sys-nav-item" data-sys="updates">Updates</div>
-            <div class="sys-nav-item" data-sys="privacy">Privacy</div>
             <div class="sys-nav-item" data-sys="about">About</div>
           </div>
 
@@ -3322,45 +4489,6 @@ Confidence: 97.3%</div>
             </div>
           </div>
 
-          <!-- Recipes — the smell-native unit of work: source → ordered transforms → result.
-               Recipes are saved, re-runnable and versioned; every step is a named transform
-               so no derived number is invented (see private/SMELL_OPERATIONS.md). -->
-          <div class="sys-panel" id="sys-recipes">
-            <h2>Recipes</h2>
-            <div class="card">
-              <p class="hint" style="margin-bottom:8px">
-                A recipe is <b>source → ordered transforms → result</b>. Saved recipes are
-                re-runnable and versioned, and carry provenance. Every step is a named,
-                reproducible transform — no invented numbers.
-              </p>
-              <div class="form-row">
-                <button id="recipeNew" class="mini-btn">New recipe</button>
-                <button id="recipeRefresh" class="mini-btn">Refresh</button>
-              </div>
-            </div>
-
-            <div id="recipeEditor" class="card" style="display:none">
-              <div class="form-row"><label style="width:70px">Name</label><input id="recName" placeholder="Fermentation Monitor" style="flex:1" /></div>
-              <div class="form-row"><label style="width:70px">Source</label><input id="recSource" placeholder="live | osmell:&lt;id&gt; | dataset:&lt;id&gt;" style="flex:1" /></div>
-              <div class="form-row"><label style="width:70px">Version</label><input id="recVersion" value="1.0.0" style="width:100px" /></div>
-              <div id="recSteps" style="margin:6px 0"></div>
-              <div class="form-row">
-                <button id="recAddStep" class="mini-btn">+ Step</button>
-                <button id="recSave" class="mini-btn">Save</button>
-                <button id="recCancel" class="mini-btn">Cancel</button>
-              </div>
-              <div id="recMsg" class="hint" style="min-height:14px"></div>
-            </div>
-
-            <div id="recipeList" class="recipe-list">Loading…</div>
-
-            <div class="card">
-              <h3 style="margin-bottom:6px">Op catalog</h3>
-              <p class="hint" style="margin-bottom:8px">The v1 transform set. <b>core</b> ships now; <b>next</b>/<b>research</b> are planned.</p>
-              <div id="recipeOps" class="op-catalog">Loading…</div>
-            </div>
-          </div>
-
           <!-- Plugins Panel -->
           <div class="sys-panel" id="sys-plugins">
             <h2>Plugins <button id="pluginRefresh" style="font-size:10px;margin-left:auto">Refresh</button></h2>
@@ -3386,19 +4514,6 @@ Confidence: 97.3%</div>
                 <span id="updateStatus" style="font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px"></span>
               </div>
               <div id="updateNotes" class="update-notes" style="display:none"></div>
-            </div>
-          </div>
-
-          <div class="sys-panel" id="sys-privacy">
-            <h2>Privacy &amp; Telemetry</h2>
-            <div class="card">
-              <h3>Anonymous usage stats</h3>
-              <p class="hint">Off by default. When on, Osmograph sends aggregate counts only — never sensor readings, file names, device serials, or anything identifying.</p>
-              <div class="form-row">
-                <label>Send anonymous usage stats</label>
-                <input type="checkbox" id="telemetryToggle">
-              </div>
-              <p class="hint" style="margin-top:8px">Sent: event name, app version, OS and CPU architecture. Never sent: readings, file/dataset names, device IDs, IP as an identifier, or emails.</p>
             </div>
           </div>
 
@@ -3601,6 +4716,161 @@ Confidence: 97.3%</div>
     }, 8000);
   </script>
 
+  <!-- Save check — an in-app dialog, not a browser prompt. -->
+  <div id="checkSaveModal" class="modal" style="display:none">
+    <div class="modal-box check-save-box">
+      <h3>Save check</h3>
+      <p class="hint" style="margin:0">Name this check so you can reopen it from the Check tab.</p>
+      <label for="checkSaveName">Name
+        <input id="checkSaveName" type="text" maxlength="80" autocomplete="off" />
+      </label>
+      <div id="checkSaveError" class="hint" style="display:none;color:var(--red)">Give the check a name.</div>
+      <div class="modal-actions">
+        <button id="checkSaveCancel" class="mini-btn" type="button">Cancel</button>
+        <button id="checkSaveConfirm" class="mini-btn primary" type="button">Save check</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Smell detail — one smell as an object, with its closest confusable. -->
+  <div id="smellDetailModal" class="modal" style="display:none">
+    <div class="modal-box smell-detail-box">
+      <div class="smell-detail-head">
+        <div>
+          <h3 id="sdName" style="margin:0">Smell</h3>
+          <div id="sdMeta" class="hint" style="margin-top:2px"></div>
+        </div>
+        <div class="sd-nav">
+          <button id="sdPrev" class="mini-btn" type="button" title="Previous smell (←)">←</button>
+          <span id="sdPos" class="coord-tag">1 / 1</span>
+          <button id="sdNext" class="mini-btn" type="button" title="Next smell (→)">→</button>
+          <button id="sdRandom" class="mini-btn" type="button" title="Open a random smell">⚄</button>
+          <button id="sdClose" class="mini-btn" type="button">Close</button>
+        </div>
+      </div>
+      <div class="sd-print-wrap">
+        <canvas id="sdPrint"></canvas>
+        <div class="sd-print-foot">
+          <span>FINGERPRINT · mean settled response per channel</span>
+          <span>one shared scale · signed bars carry polarity</span>
+        </div>
+      </div>
+      <div class="sd-read-key">
+        The fingerprint shows the <b>pattern across channels</b>. The bars show
+        <b>how far and which way</b> each channel moved. Both describe this array;
+        neither is a chemical identification.
+      </div>
+      <div class="smell-detail-body">
+        <div>
+          <div class="sd-section-title">What the array sees</div>
+          <div id="sdBars" class="sd-bars"></div>
+          <div class="sd-caption">Settled response, baseline-relative. Teal = reducing,
+            amber = oxidising. <b>n/a</b> means the channel did not move — not a zero.</div>
+        </div>
+        <div>
+          <div class="sd-section-title">Closest confusable</div>
+          <div id="sdNeighbor"><div class="hint">Ranking smells by steady-response similarity…</div></div>
+          <div id="sdTraceWrap" hidden>
+            <div class="sd-section-title" id="sdTraceTitle" style="margin-top:9px">Mean trace</div>
+            <canvas id="sdTrace" style="width:100%;height:118px;display:block"></canvas>
+            <div id="sdTraceLegend" class="hint" style="font-size:10px;margin-top:2px"></div>
+          </div>
+          <details class="sd-method" id="sdMethod" hidden>
+            <summary>Evidence &amp; method</summary>
+            <div id="sdEvidence"></div>
+            <div class="sep-foot" style="margin-top:8px;padding-top:8px">
+              The verdict is the best of level, shape and together, with a 95% lower
+              bound and a label-shuffle p-value whose feature choice is repeated inside
+              every shuffle. It is a preview from saved replicates, not a trained model.
+            </div>
+          </details>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button id="sdAll" class="mini-btn" type="button">All recordings</button>
+        <button id="sdCopy" class="mini-btn" type="button">Copy summary</button>
+        <button id="sdRecipe" class="mini-btn" type="button">How computed</button>
+        <button id="sdCheck" class="mini-btn" type="button">Check against…</button>
+        <button id="sdCompare" class="mini-btn" type="button">Compare replicates</button>
+        <button id="sdCard" class="mini-btn primary" type="button">Save card</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create a Vial from a saved check. -->
+  <div id="vialCreateModal" class="modal" style="display:none">
+    <div class="modal-box vial-modal-box">
+      <div class="smell-detail-head">
+        <div>
+          <h3 style="margin:0">New Vial</h3>
+          <div class="hint" style="margin-top:2px">Package a saved check as a reusable, inspectable decision. Validation is local and evidence-based.</div>
+        </div>
+        <button id="vialCreateClose" class="mini-btn" type="button">Close</button>
+      </div>
+      <div class="vial-create-grid">
+        <div class="vial-form">
+          <label for="vialSourceCheck">Evidence source</label>
+          <select id="vialSourceCheck"></select>
+          <div id="vialEvidencePreview" class="vial-preview">Pick a saved check.</div>
+          <label for="vialName">Name</label>
+          <input id="vialName" type="text" maxlength="80" autocomplete="off" placeholder="Coffee roast match" />
+          <div class="vial-two">
+            <div><label for="vialAuthor">Author</label><input id="vialAuthor" type="text" maxlength="60" placeholder="@yourhandle" /></div>
+            <div><label for="vialVersion">Version</label><input id="vialVersion" type="text" maxlength="20" value="0.1.0" /></div>
+          </div>
+          <div class="vial-two">
+            <div><label for="vialDomain">Domain</label><input id="vialDomain" type="text" maxlength="60" placeholder="coffee" /></div>
+            <div><label for="vialLicense">License</label><input id="vialLicense" type="text" maxlength="40" value="CC-BY-4.0" /></div>
+          </div>
+          <label for="vialQuestion">Question</label>
+          <input id="vialQuestion" type="text" maxlength="160" placeholder="Can this array tell Banana from Apple apart?" />
+          <label for="vialDescription">Description</label>
+          <textarea id="vialDescription" maxlength="500" placeholder="What decision does this Vial support, and on what evidence?"></textarea>
+          <label for="vialLimits">Limits — one per line</label>
+          <textarea id="vialLimits" maxlength="800" placeholder="Closed-set comparison only; not open-world identification.&#10;Validated on this 6-channel array; not a cross-rig claim."></textarea>
+        </div>
+        <div class="vial-validation">
+          <h4>Validation gate</h4>
+          <p class="hint" style="margin:0">A Vial is sealed only if every critical check passes. Otherwise it is saved as Open and labelled unusable for decisions.</p>
+          <div id="vialValidationPreview"></div>
+          <div id="vialValidationChecks"></div>
+        </div>
+      </div>
+      <div id="vialCreateError" class="hint" style="display:none;color:var(--red)"></div>
+      <div class="modal-actions">
+        <button id="vialCreateDraft" class="mini-btn" type="button">Save draft</button>
+        <button id="vialCreateValidate" class="mini-btn primary" type="button">Validate &amp; publish</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Inspect a Vial's claim, evidence, and validation history. -->
+  <div id="vialDetailModal" class="modal" style="display:none">
+    <div class="modal-box vial-detail-box">
+      <div class="smell-detail-head">
+        <div><h3 id="vialDetailTitle" style="margin:0">Vial</h3><div id="vialDetailMeta" class="hint" style="margin-top:2px"></div></div>
+        <button id="vialDetailClose" class="mini-btn" type="button">Close</button>
+      </div>
+      <div id="vialDetailBody"></div>
+    </div>
+  </div>
+
+  <!-- Use a Vial on a smell from the local library. -->
+  <div id="vialUseModal" class="modal" style="display:none">
+    <div class="modal-box vial-use-box">
+      <div class="smell-detail-head">
+        <div><h3 style="margin:0">Use Vial</h3><div id="vialUseIntro" class="hint" style="margin-top:2px"></div></div>
+        <button id="vialUseClose" class="mini-btn" type="button">Close</button>
+      </div>
+      <label for="vialUseSample" style="font-size:10px;color:var(--text-3);text-transform:uppercase;letter-spacing:.08em">Sample smell</label>
+      <select id="vialUseSample"></select>
+      <div class="modal-actions">
+        <button id="vialUseRun" class="mini-btn primary" type="button">Run check</button>
+      </div>
+      <div id="vialUseResult" class="vial-use-result"></div>
+    </div>
+  </div>
+
   <div id="wizard" class="wizard" style="display:none">
     <div class="wizard-card">
       <div class="wizard-dots">
@@ -3608,8 +4878,8 @@ Confidence: 97.3%</div>
       </div>
       <div class="wizard-body">
         <div class="wslide active"><h2>Welcome to Osmograph</h2><p>Turn smells into data you can trust — and share. No lab required.</p></div>
-        <div class="wslide"><h2>1 · Connect a device — or try a sample</h2><p>Plug in an ESP32 e-nose over USB, or click <strong>Load a sample session</strong> on the Dashboard to explore with no hardware at all.</p></div>
-        <div class="wslide"><h2>2 · Watch, score and share</h2><p>Live traces, a quality score you can defend, and a fingerprint you can export as PNG.</p><label class="wizard-consent"><input type="checkbox" id="wizardTelemetry"> Send anonymous usage stats (no data, no PII)</label></div>
+        <div class="wslide"><h2>1 · Start with real smells</h2><p>We've already loaded <strong>12 kitchen smells — 60 real recordings</strong> from the open SmellNet dataset. Nothing to import, no hardware needed.</p></div>
+        <div class="wslide"><h2>2 · Compare, train, or watch live</h2><p>Pick two substances and compare their fingerprints, teach the app to tell them apart, or plug in your own e-nose and watch it live.</p></div>
       </div>
       <div class="wizard-actions">
         <button id="wizardSkip" class="mini">Skip</button>
@@ -3617,6 +4887,42 @@ Confidence: 97.3%</div>
         <button id="wizardBack" class="mini" style="display:none">Back</button>
         <button id="wizardNext" class="green">Next</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Field guide — the public record behind every claim-bearing surface. -->
+  <div id="guideOverlay" class="guide-overlay" style="display:none">
+    <div class="guide-backdrop" data-guide-close></div>
+    <aside class="guide-drawer" role="dialog" aria-modal="true" aria-labelledby="guideTitle">
+      <div class="guide-head">
+        <div>
+          <span class="coord-tag">Field guide</span>
+          <h2 id="guideTitle">What this can and cannot claim</h2>
+        </div>
+        <button id="guideClose" class="mini-btn" type="button">Close</button>
+      </div>
+      <div class="guide-tools">
+        <input id="guideSearch" type="search" placeholder="Search the guide — check, vial, ethylene, licence…" autocomplete="off" />
+        <span id="guideCount" class="coord-tag"></span>
+      </div>
+      <div class="guide-body">
+        <nav id="guideNav" class="guide-nav"></nav>
+        <div id="guideContent" class="guide-content"></div>
+      </div>
+      <div class="guide-foot">Every claim should have a source, a method, and a limit. If something is missing, that is a bug.</div>
+    </aside>
+  </div>
+
+  <!-- Command palette — the fast path to every surface without hunting through tabs. -->
+  <div id="commandOverlay" class="command-overlay" style="display:none">
+    <div class="command-backdrop" data-command-close></div>
+    <div class="command-box" role="dialog" aria-modal="true" aria-label="Command palette">
+      <div class="command-head">
+        <span class="coord-tag">Command</span>
+        <input id="commandInput" type="search" placeholder="Jump to… try “fermentation”, “check”, or “guide”" autocomplete="off" />
+      </div>
+      <div id="commandList" class="command-list"></div>
+      <div class="command-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span></div>
     </div>
   </div>
 

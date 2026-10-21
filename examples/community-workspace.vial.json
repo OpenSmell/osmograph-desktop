@@ -1,0 +1,163 @@
+{
+  "schema": "osmograph.domain-pack/1",
+  "id": "community.example-coffee-roast",
+  "name": "Coffee Roast Log",
+  "version": "0.1.0",
+  "author": "@example-author",
+  "license": "CC-BY-4.0",
+  "tier": "community",
+  "risk": "medium",
+  "domain": "coffee",
+  "tagline": "Track the roast, not just the aroma.",
+  "summary": "A small example workspace for logging roast batches and the context that changes what the array response means. It is a template for authors, not a validated roasting controller.",
+  "whatItIs": "A protocol and a local log for recording roast batch context, tasting notes, and a same-array comparison against a reference bean. It helps a person keep a reproducible record of what changed.",
+  "whatItIsNot": "Not a roast defect classifier, not a universal coffee identifier, not a concentration meter, and not a safety verdict. A pleasant aroma does not prove a batch is good, and a changed signal does not prove a defect.",
+  "citations": [
+    "Example reference: replace this with a real paper or book. Author, year, title, venue. A citation is not decoration; it is the context for your claims.",
+    "Example reference: sensory analysis methods and the limits of a small, non-representative panel."
+  ],
+  "widgets": [
+    {
+      "type": "hero",
+      "art": "generic",
+      "title": "Coffee Roast Log",
+      "subtitle": "A batch record with a sensor column, not a sensor verdict.",
+      "note": "Community domain Vial · declarative · host-rendered · no executable code"
+    },
+    {
+      "type": "risk",
+      "level": "medium",
+      "headline": "The roast is the evidence; the array is a prompt.",
+      "body": "A roast can smell pleasant and still be under-developed, baked, or scorched. Record the charge weight, drop temperature, development time, and taste before you interpret the array.",
+      "always": [
+        "Record the same bean, roast level, rest time, and grind before comparing two batches.",
+        "Use the same array and the same sample preparation for a same-rig comparison."
+      ],
+      "never": [
+        "Do not turn a pleasant aroma into a quality score.",
+        "Do not compare a light roast on one array with a dark roast on another and call it a roast effect."
+      ]
+    },
+    {
+      "type": "metrics",
+      "title": "What this workspace can claim",
+      "items": [
+        {
+          "label": "Signal",
+          "value": "Same-array change",
+          "hint": "Compare a batch against your own reference bean on the same rig."
+        },
+        {
+          "label": "Context",
+          "value": "Batch record",
+          "hint": "The log is the primary evidence; the array is one column."
+        },
+        {
+          "label": "Not a",
+          "value": "Quality score",
+          "hint": "No defect classification and no universal coffee ID."
+        }
+      ]
+    },
+    {
+      "type": "tracking",
+      "title": "Roast log",
+      "description": "Keep the context fixed enough that a comparison means something.",
+      "fields": [
+        {
+          "id": "bean",
+          "label": "Bean / lot",
+          "type": "text",
+          "placeholder": "Lot 04"
+        },
+        {
+          "id": "roast_date",
+          "label": "Roast date",
+          "type": "date"
+        },
+        {
+          "id": "roast_level",
+          "label": "Roast level",
+          "type": "select",
+          "options": ["light", "medium", "dark"]
+        }
+      ],
+      "logFields": [
+        {
+          "id": "day",
+          "label": "Rest day",
+          "type": "number",
+          "placeholder": "3"
+        },
+        {
+          "id": "drop_temp",
+          "label": "Drop temp",
+          "type": "number",
+          "unit": "°C",
+          "placeholder": "205"
+        },
+        {
+          "id": "taste",
+          "label": "Taste note",
+          "type": "text",
+          "placeholder": "what did you taste?"
+        }
+      ],
+      "logLabel": "Add roast reading"
+    },
+    {
+      "type": "rules",
+      "title": "Decision rules",
+      "rules": [
+        {
+          "when": "The log context changed (bean, roast level, rest day, or grind)",
+          "then": "Do not compare the reading to the old baseline. Record a new reference on the same array.",
+          "severity": "warn"
+        },
+        {
+          "when": "The aroma is pleasant but the primary roast measurements are outside your recipe",
+          "then": "Treat the batch as a process question, not a successful roast. The array does not clear it.",
+          "severity": "stop"
+        }
+      ]
+    },
+    {
+      "type": "docs",
+      "title": "Field notes"
+    },
+    {
+      "type": "rig",
+      "title": "Use this with your rig",
+      "body": "Capture a reference and a sample on the same array. If the channel sets differ, Check refuses the comparison. The export is a manifest, not a model.",
+      "cta": "Open Check"
+    }
+  ],
+  "docs": [
+    {
+      "id": "how",
+      "title": "How to use this workspace",
+      "body": [
+        "Record the bean, roast date, roast level, and rest day before the first reading.",
+        "Capture a reference sample and a batch sample on the same array, then compare them in Check.",
+        "Write down what you tasted. The log is the primary record; the array is a prompt to look."
+      ]
+    },
+    {
+      "id": "limits",
+      "title": "What it cannot tell you",
+      "body": [
+        "It cannot tell you whether a roast is objectively good, defective, or safe.",
+        "It cannot identify a coffee variety or origin from an aroma.",
+        "It cannot transfer a result from one rig to another without a calibration story."
+      ]
+    },
+    {
+      "id": "refs",
+      "title": "References",
+      "body": [
+        "Replace the example citations with real sources. Cite the method and the domain claim, not just the idea.",
+        "The references contextualise the workspace. They do not validate the sensor or the local array."
+      ]
+    }
+  ]
+}

@@ -62,6 +62,8 @@ pub struct AppState {
     pub fleet: Arc<Mutex<Vec<FleetDeviceState>>>,
     pub last_channels: Arc<Mutex<Vec<f64>>>,
     pub live_classifier: Arc<Mutex<opensmell::LiveClassifier>>,
+    /// In-flight dataset downloads keyed by filename, so the UI can pause/cancel.
+    pub dataset_downloads: Arc<Mutex<std::collections::HashMap<String, Arc<data::dataset_io::DownloadControl>>>>,
 }
 
 impl Default for AppState {
@@ -97,6 +99,7 @@ impl Default for AppState {
             fleet: Arc::new(Mutex::new(Vec::new())),
             last_channels: Arc::new(Mutex::new(Vec::new())),
             live_classifier: Arc::new(Mutex::new(opensmell::LiveClassifier::new())),
+            dataset_downloads: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -1914,6 +1917,31 @@ fn get_recordings_dir(state: State<AppState>) -> Result<String, String> {
     Ok(dir.to_string_lossy().to_string())
 }
 
+/// The folder every dataset download lands in, created on demand.
+#[tauri::command]
+fn dataset_dir(state: State<AppState>) -> Result<String, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let d = data::dataset_io::datasets_dir(&dir);
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    Ok(d.to_string_lossy().to_string())
+}
+
+/// Reveal a local file/folder in the OS file manager.
+#[tauri::command]
+fn open_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    let cmd = "xdg-open";
+    #[cfg(target_os = "macos")]
+    let cmd = "open";
+    #[cfg(target_os = "windows")]
+    let cmd = "explorer";
+    std::process::Command::new(cmd)
+        .arg(&path)
+        .spawn()
+        .map_err(|e| format!("Could not open {path}: {e}"))?;
+    Ok(())
+}
+
 #[tauri::command]
 fn list_recordings(state: State<AppState>) -> Result<Vec<RecordingFile>, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
@@ -1998,7 +2026,33 @@ fn parse_csv_summary_cached(
 }
 
 /// Best-effort header/rows/duration scan of a recorded CSV (Python library import parity).
+///
+/// This is the *cheap* summary used to paint the library, so it must agree with
+/// the real parser (`csv_parse::parse_session_csv`) on the two numbers a user
+/// reads: how many sensor channels there are, and how long the recording is.
+/// A naive column count got both wrong for any CSV that is not the recorder's
+/// own `timestamp_ms,CHn` shape — i.e. for essentially every public dataset in
+/// the catalog (environment columns counted as sensors; no time column read as
+/// if the first gas channel were time). Both are fixed here by sharing the
+/// parser's column semantics.
 fn parse_csv_summary(path: &std::path::Path) -> (usize, usize, f64) {
+    if path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("osmell"))
+        .unwrap_or(false)
+    {
+        return match data::osmell_read::read_osmell(path) {
+            Ok(b) => {
+                let duration = match (b.time.first(), b.time.last()) {
+                    (Some(a), Some(z)) => ((z - a) / 1000.0).max(0.0),
+                    _ => 0.0,
+                };
+                (b.time.len(), b.channels.len(), duration)
+            }
+            Err(_) => (0, 0, 0.0),
+        };
+    }
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return (0, 0, 0.0),
@@ -2006,7 +2060,8 @@ fn parse_csv_summary(path: &std::path::Path) -> (usize, usize, f64) {
     let reader = std::io::BufReader::new(file);
     let mut rows = 0usize;
     let mut sensor_count = 0usize;
-    let mut header_checked = false;
+    let mut time_col: Option<usize> = None;
+    let mut header_done = false;
     let mut first_ts: Option<f64> = None;
     let mut last_ts: Option<f64> = None;
     for line in reader.lines().flatten() {
@@ -2014,33 +2069,58 @@ fn parse_csv_summary(path: &std::path::Path) -> (usize, usize, f64) {
         if line.is_empty() {
             continue;
         }
-        if !header_checked {
-            header_checked = true;
-            let cols = line.split(',').count();
-            let has_ts = line.to_lowercase().starts_with("timestamp");
-            sensor_count = cols.saturating_sub(if has_ts { 1 } else { 0 });
+        if !header_done {
+            header_done = true;
+            let headers: Vec<String> = line
+                .split(',')
+                .map(|h| h.trim().trim_matches('"').trim().to_string())
+                .collect();
+            if let Some((name, _unit)) = data::csv_parse::detect_time_column_info(&headers) {
+                time_col = headers.iter().position(|h| *h == name);
+            }
+            // Sensor channels = named, non-time, non-context columns. Mirrors the
+            // parser's ruling that environmental metadata is never a sensor.
+            sensor_count = headers
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| Some(*i) != time_col)
+                .filter(|(_, h)| !h.is_empty() && !data::csv_parse::is_context_column(h))
+                .count();
             continue;
         }
         rows += 1;
-        if let Some(first) = line.split(',').next() {
-            if let Ok(v) = first.trim().parse::<f64>() {
-                if first_ts.is_none() {
-                    first_ts = Some(v);
+        if let Some(idx) = time_col {
+            if let Some(cell) = line.split(',').nth(idx) {
+                if let Ok(v) = cell.trim().parse::<f64>() {
+                    if first_ts.is_none() {
+                        first_ts = Some(v);
+                    }
+                    last_ts = Some(v);
                 }
-                last_ts = Some(v);
             }
         }
     }
     let duration = match (first_ts, last_ts) {
         (Some(a), Some(b)) => ((b - a) / 1000.0).max(0.0),
-        _ => 0.0,
+        // No time column: the parser synthesises a uniform grid, so the honest
+        // duration is rows / assumed rate — not zero.
+        _ => rows as f64 / data::csv_parse::DEFAULT_SYNTHETIC_RATE_HZ,
     };
     (rows, sensor_count, duration)
 }
 
 /// `{YYYYMMDD_HHMMSS}_{safe_label}.csv` -> substance label (Python `suggest_label`-lite).
+fn recording_stem(name: &str) -> &str {
+    for ext in [".csv", ".CSV", ".osmell", ".OSMELL"] {
+        if let Some(stem) = name.strip_suffix(ext) {
+            return stem;
+        }
+    }
+    name
+}
+
 fn substance_from_filename(name: &str) -> String {
-    let stem = name.strip_suffix(".csv").unwrap_or(name);
+    let stem = recording_stem(name);
     let mut parts = stem.splitn(3, '_');
     let _date = parts.next();
     let _time = parts.next();
@@ -2057,7 +2137,7 @@ fn substance_from_filename(name: &str) -> String {
 }
 
 fn file_id_from_filename(name: &str) -> String {
-    let stem = name.strip_suffix(".csv").unwrap_or(name);
+    let stem = recording_stem(name);
     let mut parts = stem.splitn(3, '_');
     let date = parts.next().unwrap_or("");
     let time = parts.next().unwrap_or("");
@@ -2541,6 +2621,58 @@ fn load_session_series(state: State<AppState>, file_id: String) -> Result<Sessio
     Ok(series)
 }
 
+/// Run a saved recipe on one indexed session. The source is resolved here, not
+/// in the UI, so a run can never silently use a different recording.
+#[tauri::command]
+fn recipe_run(
+    state: State<AppState>,
+    file_id: String,
+    steps: Vec<recipe::RecipeStep>,
+) -> Result<recipe::RecipeRun, String> {
+    let index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let rec = index
+        .records
+        .iter()
+        .find(|r| r.file_id == file_id)
+        .ok_or_else(|| format!("No session with file_id \"{}\"", file_id))?;
+    let series = load_session_series_for(&rec.csv_path)?;
+    recipe::run_pipeline(&series.channels, &series.time, &series.values, &steps)
+}
+
+/// Run a recipe and save the transformed result as a `.osmell` record. The
+/// bundle carries the source file, recipe id/version, content hash, and units.
+#[tauri::command]
+fn recipe_export_osmell(
+    state: State<AppState>,
+    file_id: String,
+    steps: Vec<recipe::RecipeStep>,
+    output_path: String,
+    recipe_id: String,
+    recipe_name: String,
+    recipe_version: String,
+) -> Result<String, String> {
+    let index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let rec = index
+        .records
+        .iter()
+        .find(|r| r.file_id == file_id)
+        .ok_or_else(|| format!("No session with file_id \"{}\"", file_id))?;
+    let series = load_session_series_for(&rec.csv_path)?;
+    let run = recipe::run_pipeline(&series.channels, &series.time, &series.values, &steps)?;
+    data::export::export_recipe_run_osmell(
+        &index,
+        &file_id,
+        &run,
+        data::export::RecipeExportMeta {
+            id: &recipe_id,
+            name: &recipe_name,
+            version: &recipe_version,
+            steps: &steps,
+        },
+        std::path::Path::new(&output_path),
+    )
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct SessionSummary {
     pub duration_seconds: f64,
@@ -2643,6 +2775,107 @@ pub struct SensorHealthInfo {
     pub recommendation: String,
 }
 
+/// Per-channel health of a *saved* recording — the same verdict the live monitor
+/// gives, applied to a file. This is how a rig gets checked after the fact:
+/// record for a minute, then ask whether the array was actually sane.
+///
+/// Judged on the *opening baseline*, not the whole trace: the response itself is
+/// the measurement, not a fault, and scoring it would label every real exposure
+/// "drift". Resting stability is what tells you whether a channel is poisoned.
+#[tauri::command]
+fn assess_recording_health(
+    state: State<AppState>,
+    file_id: String,
+) -> Result<Vec<SensorHealthInfo>, String> {
+    let series = load_session_series(state, file_id)?;
+    Ok(series
+        .values
+        .iter()
+        .enumerate()
+        .map(|(ch, values)| {
+            let n = values.len();
+            let window = if n > 60 { (n / 5).clamp(30, 300) } else { n };
+            assess_channel_health(ch, &values[..window.min(n)])
+        })
+        .collect())
+}
+
+/// Bump when the bundled starter CSV content changes. The marker lets an app
+/// update replace an older pack (e.g. one with a corrupt column) without
+/// touching user recordings elsewhere in the recordings directory.
+const STARTER_PACK_VERSION: &str = "2026-10-19-6ch";
+
+/// Copy the bundled starter CSVs over `dest`, preserving any extra user files.
+/// Writes the version marker only after at least one file was copied, so a
+/// missing resource directory cannot claim the pack is current.
+fn sync_starter_pack(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    version: &str,
+) -> Result<usize, String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut copied = 0usize;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
+        let p = entry.path();
+        if p.extension().map(|x| x == "csv").unwrap_or(false) {
+            if let Some(name) = p.file_name() {
+                std::fs::copy(&p, dest.join(name)).map_err(|e| e.to_string())?;
+                copied += 1;
+            }
+        }
+    }
+    if copied > 0 {
+        std::fs::write(dest.join(".starter_version"), version).map_err(|e| e.to_string())?;
+    }
+    Ok(copied)
+}
+
+/// Copy the bundled starter library into the recordings directory once, so a
+/// fresh install has real smells to explore with no hardware and no import step.
+/// Returns the directory to import from, or `None` when no bundle is present.
+#[tauri::command]
+fn ensure_starter_library(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+) -> Result<Option<String>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest = dir.join("SmellNet");
+    let populated = std::fs::read_dir(&dest)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    let resolved = app
+        .path()
+        .resolve("starter_data/smellnet", tauri::path::BaseDirectory::Resource)
+        .unwrap_or_default();
+    // Dev runs the binary straight out of the target dir, where the bundler has
+    // not copied resources; fall back to the source tree so the dev loop works.
+    let src = if resolved.is_dir() {
+        resolved
+    } else if cfg!(debug_assertions) {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("starter_data/smellnet")
+    } else {
+        resolved
+    };
+    if !src.is_dir() {
+        return Ok(if populated { Some(dest.to_string_lossy().to_string()) } else { None });
+    }
+    let current = std::fs::read_to_string(dest.join(".starter_version"))
+        .map(|v| v.trim() == STARTER_PACK_VERSION)
+        .unwrap_or(false);
+    // The marker alone is not enough: if the CSVs were deleted, the front door
+    // would be empty even though the pack claims to be current.
+    let has_csv = std::fs::read_dir(&dest)
+        .map(|d| d.flatten().any(|e| {
+            e.path().extension().map(|x| x == "csv").unwrap_or(false)
+        }))
+        .unwrap_or(false);
+    if populated && current && has_csv {
+        return Ok(Some(dest.to_string_lossy().to_string()));
+    }
+    sync_starter_pack(&src, &dest, STARTER_PACK_VERSION)?;
+    Ok(Some(dest.to_string_lossy().to_string()))
+}
+
 // === Data Export ===
 
 #[tauri::command]
@@ -2701,31 +2934,72 @@ fn save_png_data_url(path: String, data_url: String) -> Result<String, String> {
     Ok(format!("Saved image to {}", path))
 }
 
-/// Opt-in, anonymous, aggregate-only telemetry (see private/ANALYTICS.md). The
-/// frontend only calls this after the user consents. Sends counts only — never
-/// readings, file names, device IDs or anything identifying. Best-effort: any
-/// failure is swallowed so telemetry can never affect the app.
-const TELEMETRY_ENDPOINT: &str = "https://www.opensmell.xyz/api/t";
+// === Dataset catalog download (fetched straight from the source; never rehosted) ===
+
+#[derive(Serialize, Clone)]
+struct DatasetProgress {
+    filename: String,
+    received: u64,
+    total: Option<u64>,
+    paused: bool,
+}
+
+/// Async + off-thread: a download must never block the UI event loop.
+#[tauri::command]
+async fn dataset_download(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    url: String,
+    filename: String,
+) -> Result<data::dataset_io::DownloadOutcome, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest_dir = data::dataset_io::datasets_dir(&dir);
+    let control = Arc::new(data::dataset_io::DownloadControl::default());
+    {
+        let mut map = state.dataset_downloads.lock().map_err(|e| e.to_string())?;
+        map.insert(filename.clone(), control.clone());
+    }
+
+    let tname = filename.clone();
+    let app2 = app.clone();
+    let ctl = control.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        data::dataset_io::download_url(&dest_dir, &url, &tname, &ctl, |received, total, paused| {
+            let _ = app2.emit(
+                "dataset-download-progress",
+                DatasetProgress { filename: tname.clone(), received, total, paused },
+            );
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if let Ok(mut map) = state.dataset_downloads.lock() {
+        map.remove(&filename);
+    }
+    result
+}
 
 #[tauri::command]
-fn telemetry_send(event: String, props: Option<serde_json::Value>) -> Result<(), String> {
-    let body = serde_json::json!({
-        "event": event,
-        "props": props.unwrap_or(serde_json::Value::Null),
-        "version": env!("CARGO_PKG_VERSION"),
-        "os": std::env::consts::OS,
-        "arch": std::env::consts::ARCH,
-    })
-    .to_string();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build()
-        .into();
-    let _ = agent
-        .post(TELEMETRY_ENDPOINT)
-        .header("Content-Type", "application/json")
-        .send(body);
+fn dataset_control(state: State<AppState>, filename: String, action: String) -> Result<(), String> {
+    let map = state.dataset_downloads.lock().map_err(|e| e.to_string())?;
+    if let Some(c) = map.get(&filename) {
+        match action.as_str() {
+            "pause" => c.set_paused(true),
+            "resume" => c.set_paused(false),
+            "cancel" => c.cancel(),
+            other => return Err(format!("Unknown action: {other}")),
+        }
+    }
     Ok(())
+}
+
+#[tauri::command]
+fn dataset_extract(state: State<AppState>, path: String) -> Result<Vec<String>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest = data::dataset_io::datasets_dir(&dir).join("extracted");
+    let csvs = data::dataset_io::extract_csvs(std::path::Path::new(&path), &dest)?;
+    Ok(csvs.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
 }
 
 // === Fleet Management ===
@@ -3419,15 +3693,21 @@ pub fn run() {    env_logger::init();
             get_readings_buffer,
             run_smellability_check,
             get_sensor_health,
+            assess_recording_health,
             export_labeled_data,
             save_session_csv,
             get_recordings_dir,
+            dataset_dir,
+            open_path,
             list_recordings,
             import_recordings,
             import_paths,
+            ensure_starter_library,
             load_sample_session,
             save_png_data_url,
-            telemetry_send,
+            dataset_download,
+            dataset_control,
+            dataset_extract,
             get_session_index,
             remove_session,
             rename_session,
@@ -3473,6 +3753,8 @@ pub fn run() {    env_logger::init();
             recipe::recipe_load,
             recipe::recipe_delete,
             recipe::recipe_ops,
+            recipe_run,
+            recipe_export_osmell,
             recipe::provenance_stamp,
             classifier::train_classifier,
             classifier::list_classifiers,
@@ -3699,5 +3981,37 @@ mod tests {
         assert_eq!(board_fqbn("arduino_uno"), "arduino:avr:uno");
         assert!(board_pio_env("arduino_uno").contains("atmelavr"));
         assert!(board_pio_env("esp32").contains("espressif32"));
+    }
+
+    #[test]
+    fn starter_pack_refreshes_old_files_without_deleting_user_files() {
+        let root = std::env::temp_dir().join(format!(
+            "osm-starter-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let src = root.join("src");
+        let dest = root.join("dest");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("a.csv"), "x,y\n1,2\n").unwrap();
+        std::fs::write(src.join("notes.txt"), "not a recording").unwrap();
+
+        assert_eq!(super::sync_starter_pack(&src, &dest, "v1").unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(dest.join("a.csv")).unwrap(), "x,y\n1,2\n");
+        assert_eq!(std::fs::read_to_string(dest.join(".starter_version")).unwrap(), "v1");
+        assert!(!dest.join("notes.txt").exists());
+
+        // A user-added file in the starter directory survives a pack refresh.
+        std::fs::write(src.join("a.csv"), "x,y\n3,4\n").unwrap();
+        std::fs::write(dest.join("keep.csv"), "mine\n").unwrap();
+        assert_eq!(super::sync_starter_pack(&src, &dest, "v2").unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(dest.join("a.csv")).unwrap(), "x,y\n3,4\n");
+        assert_eq!(std::fs::read_to_string(dest.join("keep.csv")).unwrap(), "mine\n");
+        assert_eq!(std::fs::read_to_string(dest.join(".starter_version")).unwrap(), "v2");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
