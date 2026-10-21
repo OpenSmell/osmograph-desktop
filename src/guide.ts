@@ -20,8 +20,8 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     paragraphs: [
       'Osmograph turns a gas-sensor recording into a reproducible comparison: this sample, on this array, against this reference, under this method. The core objects are Session, Recipe, Result, Experiment, Check, Vial, and Library.',
       'It is not a universal smell identifier, a concentration meter, or a safety instrument. A sensor response is a mixture. The useful claim is a closed-set, same-array comparison with the uncertainty and limits attached.',
-      'The quickest first loop is: open Explore → tick two smells → Decide → Compare → read the same-array guard and the difference wheel → save a Check. If you have no hardware, the bundled SmellNet recordings are enough to do the whole loop; Home → Try a comparison runs the starter pair for you.',
-      'The app is organised by job: Home, Explore, Decide, Train, Vials, Data, and Rig. Hardware controls appear on Home and Rig; Explore, Decide, Vials, and Data work without a rig.',
+      'The quickest first loop is: open Explore → tick two smells → Analyse → Compare → read the same-array guard and the difference wheel → save a Check. If you have no hardware, the bundled SmellNet recordings are enough to do the whole loop; Home → Try a comparison runs the starter pair for you.',
+      'The app is organised by job: Home, Explore, Analyse, Vials, Data, Rigs, and Settings. Hardware controls appear on Home, Rigs, and Settings; Explore, Analyse, Vials, and Data work without a rig.',
     ],
     bullets: [
       'No hardware? Use Gallery and Compare. The bundled data is real and labelled.',
@@ -50,7 +50,8 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     title: 'Fingerprints and the difference wheel',
     summary: 'A fingerprint is a signed, normalised response shape — not a chemical ID or a time-series scentprint.',
     paragraphs: [
-      'The Explore fingerprint is a radar over the array channels. Each channel is normalised against its own baseline and drawn on the same scale. The shape is a visual hash of the array response, useful for spotting a change and useless for naming a molecule.',
+      'Gallery cards show a compact radar: the mean settled response of each channel on the dominant array, normalised against its own baseline and drawn on one scale. It is a visual hash for scanning the library, not a chemical image.',
+      'Open a smell and the detail view shows the evidence behind that hash: one small panel per channel, thin lines for each replicate, a bold line for their mean, and relative time left to right. That is where kinetics and replicate spread become visible. It is a static summary of recordings, not a GIF or a live transformation.',
       'The signed difference wheel is the comparison view. Positive values point outward in teal; negative values point inward in amber; a zero ring separates them. It is intentionally not a time-series plot and not a blended array.',
       'The same-array guard is a hard rule. If the reference and sample do not share the same channel set, the comparison is refused. A six-channel SmellNet fingerprint and a user rig fingerprint are not the same object, even if both have six numbers.',
     ],
@@ -75,6 +76,22 @@ export const GUIDE_SECTIONS: GuideSection[] = [
       'Pairing: the reference and sample must share the same array channels.',
       'Statistics: paired held-out evaluations, Wilson lower bound, permutation p-value.',
       'Refusal: no cross-rig comparison, no absolute concentration, no chemical identification.',
+    ],
+  },
+  {
+    id: 'recipes',
+    group: 'Methods',
+    title: 'Recipes, trim, and replay',
+    summary: 'A recipe is a named transform chain, not a model and not a smell.',
+    paragraphs: [
+      'Use Analyse → Recipes, or select a recording in Data → Recordings and press Trim. A recipe binds to one indexed recording, runs named transforms in order, previews the result, and can save the result as a new .osmell recording. The original is never overwritten.',
+      'Runnable transforms include trim.range (cut to start/end seconds), gap fill, outlier removal, smoothing, detrending, baseline selection, response ratio, R0 normalization, and min-max/z-score scaling. Catalogued-but-unimplemented transforms are not presented as working.',
+      'Replay plays a recorded session at 0.5×–8× with a scrub bar. The live fingerprint reflects the replayed moment; replay does not feed the live detector or classifier. A saved Check is a snapshot of a verdict; reopening it recomputes against the current library.',
+    ],
+    bullets: [
+      'A recipe cannot change its source recording in place.',
+      'Saving creates a derived recording; export it to move it.',
+      'A derived recording is not independent evidence.',
     ],
   },
   {
@@ -168,8 +185,8 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     title: 'Tutorials: the first 30 minutes',
     summary: 'Three short loops that produce something useful without pretending to have a lab.',
     paragraphs: [
-      'Tutorial A — read a fingerprint. Open Explore → Gallery. Pick Banana. Read the channel count and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison. On Home, Try a comparison runs this starter pair without hardware.',
-      'Tutorial B — save a Check. In Decide → Check, choose a reference and a sample from the same array. Run Check. Read the lower bound and the p-value, not just the badge. Save the Check. Now open Vials → Decisions and package the saved Check. Inspect the validation gate before you trust the seal.',
+      'Tutorial A — read a fingerprint. Open Explore → Gallery. Pick Banana. Read the per-channel curves, the replicate spread, the channel count, and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison. On Home, Try a comparison runs this starter pair without hardware.',
+      'Tutorial B — save a Check. In Analyse → Check, choose a reference and a sample from the same array. Run Check. Read the lower bound and the p-value, not just the badge. Save the Check. Now open Vials → Decisions and package the saved Check. Inspect the validation gate before you trust the seal.',
       'Tutorial C — install a Domain Vial. Open Vials → Aromatory, install Fermentation Lab, and read the risk panel before the log. Add one reading with a pH, temperature, and visual note. The point is the record, not the sensor trace. Then open Plant Respiration and read its “no ethylene channel” limit.',
     ],
   },
@@ -200,8 +217,9 @@ export const GUIDE_SECTIONS: GuideSection[] = [
       'Baseline-relative: each channel is normalised to its own opening baseline before comparison.',
       'Check: a paired, same-array comparison with a verdict, a confidence bound, and a p-value.',
       'Domain Vial: a declarative workspace with a protocol, log, risk model, rules, and docs.',
-      'Fingerprint: the signed, normalised response shape drawn as a radar.',
+      'Fingerprint: the mean settled baseline-relative response per channel on the dominant array. Gallery cards draw it as a compact radar; the detail view shows the per-channel curves and replicates.',
       'Permutation p-value: the probability of seeing a separation at least this strong if the labels were exchangeable.',
+      'Recipe: a named, ordered transform chain from one source recording to a previewed result. Saving the result creates a new .osmell recording.',
       'Sealed Vial: a local decision pack that passed every critical validation gate. Not a safety certification.',
       'Wilson lower bound: a conservative lower bound on the paired success rate, used to avoid over-reading a small sample.',
     ],

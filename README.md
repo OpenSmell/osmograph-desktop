@@ -21,12 +21,16 @@ not a universal smell identifier, a concentration meter, or a safety instrument.
 
 ## Features
 
-- **Job-level navigation**: **Home** (live rig), **Explore** (smell library), **Decide**
-  (Check + Compare), **Train**, **Vials**, **Data** (recordings, datasets, change log), and **Rig**
-  (fleet + system). Hardware controls stay on Home and Rig; content workspaces stay quiet.
+- **Job-level navigation**: **Home** (live rig), **Explore** (smell library), **Analyse**
+  (Compare, Check, Recipes, Train, Change Log), **Vials**, **Data** (recordings + datasets),
+  **Rigs** (fleet), and **Settings** (hardware, calibration, release). Hardware controls stay on
+  Home, Rigs, and Settings; content workspaces stay quiet.
 - **No-hardware first run**: Explore ships 22 real, labelled SmellNet smells. Home's
-  **Try a comparison** selects the starter pair and opens Decide → Compare without pretending a rig
-  is connected.
+  **Try a comparison** selects the starter pair and opens Analyse → Compare without pretending a
+  rig is connected.
+- **Recipes + trim**: source → named steps → preview → Save `.osmell`. Use `trim.range` to cut a
+  recording, smooth/filter, baseline, normalize, and add the derived result back to the library
+  without overwriting the original.
 - **Live recording** from serial and BLE MOX sensor boards, with adaptive channel presets
   (3 / 4 / 6-sensor) and burn-in tracking.
 - **Session library** with per-recording storage, CSV import/export, and `.osmell` bundle read/write.

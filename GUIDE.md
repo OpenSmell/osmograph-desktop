@@ -16,6 +16,7 @@ Osmograph is a local-first workbench for digitising the experiment around a smel
 - [The claim ladder](#claims)
 - [Fingerprints and the difference wheel](#fingerprints)
 - [How Check works](#check)
+- [Recipes, trim, and replay](#recipes)
 
 **Vials**
 
@@ -46,11 +47,11 @@ Osmograph turns a gas-sensor recording into a reproducible comparison: this samp
 
 It is not a universal smell identifier, a concentration meter, or a safety instrument. A sensor response is a mixture. The useful claim is a closed-set, same-array comparison with the uncertainty and limits attached.
 
-The quickest first loop is: open Explore → tick two smells → Decide → Compare → read the same-array guard and the difference wheel → save a Check. If you have no hardware, the bundled SmellNet recordings are enough to do the whole loop; Home → Try a comparison runs the starter pair for you.
+The quickest first loop is: open Explore → tick two smells → Analyse → Compare → read the same-array guard and the difference wheel → save a Check. If you have no hardware, the bundled SmellNet recordings are enough to do the whole loop; Home → Try a comparison runs the starter pair for you.
 
-The app is organised by job: Home, Explore, Decide, Train, Vials, Data, and Rig. Hardware controls appear on Home and Rig; Explore, Decide, Vials, and Data work without a rig.
+The app is organised by job: Home, Explore, Analyse, Vials, Data, Rigs, and Settings. Hardware controls appear on Home, Rigs, and Settings; Explore, Analyse, Vials, and Data work without a rig.
 
-- No hardware? Use Explore and Decide → Compare. The bundled data is real and labelled.
+- No hardware? Use Explore and Analyse → Compare. The bundled data is real and labelled.
 - Have a rig? Capture a baseline and a sample on the same channels, then use Check.
 - Want a reusable decision? Package a saved Check as a Vial, or install a Domain Vial for a field protocol.
 
@@ -60,9 +61,9 @@ The app is organised by job: Home, Explore, Decide, Train, Vials, Data, and Rig.
 
 *Three short loops that produce something useful without pretending to have a lab.*
 
-Tutorial A — read a fingerprint. Open Explore → Gallery. Pick Banana. Read the channel count and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison. On Home, Try a comparison runs this starter pair without hardware.
+Tutorial A — read a fingerprint. Open Explore → Gallery. Pick Banana. Read the per-channel curves, the replicate spread, the channel count, and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison. On Home, Try a comparison runs this starter pair without hardware.
 
-Tutorial B — save a Check. In Decide → Check, choose a reference and a sample from the same array. Run Check. Read the lower bound and the p-value, not just the badge. Save the Check. Now open Vials → Decisions and package the saved Check. Inspect the validation gate before you trust the seal.
+Tutorial B — save a Check. In Analyse → Check, choose a reference and a sample from the same array. Run Check. Read the lower bound and the p-value, not just the badge. Save the Check. Now open Vials → Decisions and package the saved Check. Inspect the validation gate before you trust the seal.
 
 Tutorial C — install a Domain Vial. Open Vials → Aromatory, install Fermentation Lab, and read the risk panel before the log. Add one reading with a pH, temperature, and visual note. The point is the record, not the sensor trace. Then open Plant Respiration and read its “no ethylene channel” limit.
 
@@ -87,7 +88,9 @@ The software separates four kinds of statement. They are related, but they are n
 
 *A fingerprint is a signed, normalised response shape — not a chemical ID or a time-series scentprint.*
 
-The Explore fingerprint is a radar over the array channels. Each channel is normalised against its own baseline and drawn on the same scale. The shape is a visual hash of the array response, useful for spotting a change and useless for naming a molecule.
+Gallery cards show a compact radar: the mean settled response of each channel on the dominant array, normalised against its own baseline and drawn on one scale. It is a visual hash for scanning the library, not a chemical image.
+
+Open a smell and the detail view shows the evidence behind that hash: one small panel per channel, thin lines for each replicate, a bold line for their mean, and relative time left to right. That is where kinetics and replicate spread become visible. It is a static summary of recordings, not a GIF or a live transformation.
 
 The signed difference wheel is the comparison view. Positive values point outward in teal; negative values point inward in amber; a zero ring separates them. It is intentionally not a time-series plot and not a blended array.
 
@@ -113,6 +116,20 @@ The verdicts are deliberately plain: separable, fragile, confusable, insufficien
 - Pairing: the reference and sample must share the same array channels.
 - Statistics: paired held-out evaluations, Wilson lower bound, permutation p-value.
 - Refusal: no cross-rig comparison, no absolute concentration, no chemical identification.
+
+<a id="recipes"></a>
+
+### Recipes, trim, and replay
+
+*A recipe is a named transform chain, not a model and not a smell.*
+
+Use Analyse → Recipes, or select a recording in Data → Recordings and press Trim. A recipe binds to one indexed recording, runs named transforms in order, previews the result, and can save the result as a new `.osmell` recording. The original is never overwritten. Runnable transforms include `trim.range` (cut to start/end seconds), gap fill, outlier removal, smoothing, detrending, baseline selection, response ratio, R0 normalization, and min-max/z-score scaling. Catalogued-but-unimplemented transforms are not presented as working.
+
+Replay plays a recorded session at 0.5×–8× with a scrub bar. The live fingerprint reflects the replayed moment; replay does not feed the live detector or classifier. A saved Check is a snapshot of a verdict; reopening it recomputes against the current library.
+
+- A recipe cannot change its source recording in place.
+- Saving creates a derived recording; export it to move it.
+- A derived recording is not independent evidence.
 
 ## Vials
 
@@ -236,9 +253,11 @@ Check: a paired, same-array comparison with a verdict, a confidence bound, and a
 
 Domain Vial: a declarative workspace with a protocol, log, risk model, rules, and docs.
 
-Fingerprint: the signed, normalised response shape drawn as a radar.
+Fingerprint: the mean settled baseline-relative response per channel on the dominant array. Gallery cards draw it as a compact radar; the detail view shows the per-channel curves and replicates.
 
 Permutation p-value: the probability of seeing a separation at least this strong if the labels were exchangeable.
+
+Recipe: a named, ordered transform chain from one source recording to a previewed result. Saving the result creates a new `.osmell` recording.
 
 Sealed Vial: a local decision pack that passed every critical validation gate. Not a safety certification.
 

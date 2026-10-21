@@ -108,6 +108,7 @@ pub fn known_ops() -> Vec<OpInfo> {
         ("import.csv", "Import a CSV/JSON recording", "core"),
         ("units.convert", "raw ADC / voltage / resistance → conductance / ΔR/R0 / ppm estimate", "core"),
         ("resample", "Resample to a uniform time grid", "core"),
+        ("trim.range", "Trim to an explicit start/end second window", "core"),
         ("trim.idle", "Trim leading/trailing idle", "core"),
         // B. Conditioning
         ("missing.fill", "Fill gaps (linear / LOCF) and flag them", "core"),
@@ -166,7 +167,8 @@ pub fn known_ops() -> Vec<OpInfo> {
 pub fn is_runnable(op: &str) -> bool {
     matches!(
         op,
-        "missing.fill"
+        "trim.range"
+            | "missing.fill"
             | "outlier.remove"
             | "smooth.ema"
             | "smooth.movavg"
@@ -369,6 +371,7 @@ pub fn run_pipeline(
         return Err("a recipe needs at least one step".into());
     }
     let mut data: Vec<Vec<f64>> = values.to_vec();
+    let mut timeline: Vec<f64> = time.to_vec();
     let mut units = vec!["raw".to_string(); channels.len()];
     let mut baseline: Option<Vec<f64>> = None;
     let mut applied = Vec::new();
@@ -396,12 +399,46 @@ pub fn run_pipeline(
         };
 
         match step.op.as_str() {
+            "trim.range" => {
+                let start = param(step, "start", 0.0);
+                let end = param(step, "end", f64::INFINITY);
+                if !start.is_finite() || end < start {
+                    return Err(format!(
+                        "step {}: trim.range needs finite start <= end",
+                        i + 1
+                    ));
+                }
+                let keep: Vec<usize> = timeline
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, t)| **t >= start && **t <= end)
+                    .map(|(idx, _)| idx)
+                    .collect();
+                if keep.len() < 2 {
+                    return Err(format!(
+                        "step {}: trim.range kept {} sample(s); widen the window",
+                        i + 1,
+                        keep.len()
+                    ));
+                }
+                timeline = keep.iter().map(|&idx| timeline[idx]).collect();
+                data = data
+                    .iter()
+                    .map(|v| keep.iter().map(|&idx| v[idx]).collect())
+                    .collect();
+                warnings.push(format!(
+                    "trimmed to {:.3}–{:.3}s ({} samples)",
+                    timeline.first().copied().unwrap_or(0.0),
+                    timeline.last().copied().unwrap_or(0.0),
+                    timeline.len()
+                ));
+            }
             "baseline.select" => {
                 let start = param(step, "start", 0.0);
                 let end = param(step, "end", f64::INFINITY);
                 let mut picked = vec![f64::NAN; data.len()];
                 for ci in 0..data.len() {
-                    picked[ci] = mean_window(&data[ci], time, start, end)
+                    picked[ci] = mean_window(&data[ci], &timeline, start, end)
                         .or_else(|| mean_first(&data[ci], 15))
                         .unwrap_or(f64::NAN);
                 }
@@ -508,7 +545,7 @@ pub fn run_pipeline(
     Ok(RecipeRun {
         channels: channels.to_vec(),
         units,
-        time: time.to_vec(),
+        time: timeline,
         values: data
             .into_iter()
             .map(|v| v.into_iter().map(|x| x.is_finite().then_some(x)).collect())
@@ -814,6 +851,21 @@ mod tests {
         assert_eq!(run.units[1], "raw");
         let b: Vec<f64> = run.values[1].iter().map(|v| v.unwrap()).collect();
         assert_eq!(b, vec![10.0, 10.0, 20.0, 30.0]);
+    }
+
+    #[test]
+    fn trim_range_cuts_time_and_values_in_place() {
+        let channels = vec!["CO".to_string()];
+        let time = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+        let values = vec![vec![10.0, 20.0, 30.0, 40.0, 50.0]];
+        let mut trim = step("trim.range");
+        trim.params.insert("start".into(), 1.0);
+        trim.params.insert("end".into(), 3.0);
+        let run = run_pipeline(&channels, &time, &values, &[trim]).unwrap();
+        assert_eq!(run.time, vec![1.0, 2.0, 3.0]);
+        let out: Vec<f64> = run.values[0].iter().map(|v| v.unwrap()).collect();
+        assert_eq!(out, vec![20.0, 30.0, 40.0]);
+        assert!(run.warnings.iter().any(|w| w.contains("trimmed to")));
     }
 
     #[test]

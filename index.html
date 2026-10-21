@@ -425,7 +425,7 @@
 
     /* The rig controls belong to the rig. On content-first workspaces the
        titlebar stays quiet; connection state is still one tap away in Rig. */
-    body:not([data-workspace="dashboard"]):not([data-workspace="rig"]) .connection-group {
+    body:not([data-workspace="dashboard"]):not([data-workspace="rig"]):not([data-workspace="settings"]) .connection-group {
       display: none;
     }
 
@@ -477,6 +477,13 @@
       background-repeat: repeat;
       background-size: 56px 100px;
     }
+    /* Keep every scroll container discoverable; Wayland overlay scrollbars
+       otherwise hide the fact that a panel continues below the fold. */
+    *::-webkit-scrollbar { width: 8px; height: 8px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: rgba(29,26,22,0.22); border-radius: 8px; }
+    *::-webkit-scrollbar-thumb:hover { background: rgba(29,26,22,0.38); }
+
     .tab-panel {
       display: none;
       height: 100%;
@@ -501,7 +508,6 @@
     /* The library tab stacks the session-library grid and the replay strip vertically. */
     #panel-library.tab-panel { flex-direction: column; }
     /* Recipe is a scrollable column in the primary flow. */
-    #panel-recipe.tab-panel { flex-direction: column; }
     .recipe-pane { padding: 16px; overflow-y: auto; height: 100%; }
     .recipe-pane h2 { font-size: 16px; font-weight: 600; color: var(--text-0); margin-bottom: 12px; }
     #panel-dashboard .dashboard {
@@ -660,6 +666,17 @@
     }
     .canvas-empty-card b { display: block; font-size: 15px; color: var(--text-0); margin-bottom: 5px; }
     .canvas-empty-card p { font-size: 11px; line-height: 1.5; color: var(--text-2); margin: 0 0 12px; }
+    .home-glance {
+      display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 7px;
+      margin-top: 9px; font-family: var(--font-mono); font-size: 9px; color: var(--text-3);
+      text-transform: uppercase; letter-spacing: 0.06em;
+    }
+    .home-glance button {
+      background: none; border: 0; padding: 0; cursor: pointer;
+      font: inherit; color: var(--text-2); text-decoration: underline; text-underline-offset: 2px;
+    }
+    .home-glance button:hover { color: var(--cyan); }
+    .home-glance i { font-style: normal; color: var(--text-4); }
     .canvas-empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
     /* Subtle retro-scanline texture — cyberpunk HUD layer kept barely-there so
        the warm paper reads clearly underneath. */
@@ -1166,10 +1183,11 @@
        answer one question; the old top-level panels are moved inside these
        shells at boot, so their IDs and handlers remain stable. */
     #panel-explore.tab-panel,
-    #panel-decide.tab-panel,
+    #panel-analyse.tab-panel,
     #panel-vials.tab-panel,
     #panel-data.tab-panel,
-    #panel-rig.tab-panel { flex-direction: column; }
+    #panel-rig.tab-panel,
+    #panel-settings.tab-panel { flex-direction: column; }
     .workspace-subnav {
       display: flex; gap: 4px; padding: 10px 14px 0; flex: 0 0 auto;
       background: var(--bg-1); border-bottom: 1px solid var(--border);
@@ -1298,20 +1316,21 @@
     .smell-detail-head .mini-btn { margin-left: auto; }
     .sd-nav { margin-left: auto; display: flex; align-items: center; justify-content: flex-end; gap: 4px; flex-wrap: wrap; }
     .sd-nav .mini-btn { margin-left: 0; }
+    .sd-nav #sdClose { padding: 4px 11px; }
     .sd-print-wrap {
       padding: 8px 10px 6px; border: 1px solid var(--border); border-radius: 8px;
       background:
         linear-gradient(180deg, rgba(14,116,144,0.035), rgba(255,255,255,0)),
         var(--bg-1, #faf7f0);
     }
-    #sdPrint { width: 100%; height: 190px; display: block; }
+    #sdPrint { width: 100%; height: 252px; display: block; }
     .sd-print-foot {
       display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap;
       font-family: var(--font-mono); font-size: 9px; text-transform: uppercase;
       letter-spacing: .06em; color: var(--text-3); margin-top: 3px;
     }
     .sd-read-key {
-      font-size: 12px; line-height: 1.5; color: var(--text-2);
+      font-size: 11px; line-height: 1.45; color: var(--text-2);
       padding: 7px 10px; border-left: 3px solid var(--cyan);
       background: rgba(14,116,144,0.05); border-radius: 0 5px 5px 0;
     }
@@ -1523,9 +1542,9 @@
     .vials-head .hint { max-width: 680px; margin-top: 3px; }
     .vials-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
     .vials-note {
-      border: 1px solid var(--border); border-left: 3px solid var(--green);
-      background: var(--bg-1); padding: 10px 12px; font-size: 11px;
-      line-height: 1.5; color: var(--text-2);
+      border: 1px solid var(--border); border-left: 2px solid var(--green);
+      background: var(--bg-1); padding: 7px 9px; font-size: 10px;
+      line-height: 1.45; color: var(--text-2);
     }
     .vials-note b { color: var(--text-0); }
     .vials-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 12px; align-content: start; }
@@ -1609,17 +1628,17 @@
       letter-spacing: 0.12em; color: var(--text-3);
     }
     .domain-area { display: flex; flex-direction: column; gap: 9px; }
-    .domain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+    .domain-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 9px; }
     .domain-card {
-      display: flex; flex-direction: column; gap: 7px; padding: 12px;
+      display: flex; flex-direction: column; gap: 5px; padding: 10px 11px;
       border: 1px solid var(--border); background: var(--bg-1); min-width: 0;
     }
     .domain-card.installed { border-left: 3px solid var(--cyan); }
     .domain-card-head { display: flex; align-items: flex-start; gap: 8px; }
-    .domain-card-name { font-size: 14px; font-weight: 700; color: var(--text-0); line-height: 1.2; }
+    .domain-card-name { font-size: 13px; font-weight: 700; color: var(--text-0); line-height: 1.2; }
     .domain-card-sub { font-size: 9px; color: var(--text-3); font-family: var(--font-mono); margin-top: 3px; }
-    .domain-card-tagline { font-size: 11px; color: var(--text-1); line-height: 1.45; }
-    .domain-card-meta { font-size: 9px; color: var(--text-3); line-height: 1.5; }
+    .domain-card-tagline { font-size: 10.5px; color: var(--text-1); line-height: 1.4; }
+    .domain-card-meta { font-size: 8.5px; color: var(--text-3); line-height: 1.45; }
     .domain-card-actions { display: flex; gap: 5px; flex-wrap: wrap; margin-top: auto; padding-top: 3px; }
     .domain-empty {
       grid-column: 1 / -1; padding: 14px; border: 1px dashed var(--border);
@@ -1634,9 +1653,9 @@
     .risk-medium { color: #a56a0a; }
     .risk-high { color: var(--red); }
     .risk-critical { color: #9f1239; }
-    .domain-workspace { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: 1; overflow-y: auto; }
+    .domain-workspace { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: none; overflow: visible; }
     .domain-workspace-head {
-      position: sticky; top: -14px; z-index: 3; display: flex; align-items: center; gap: 10px;
+      position: sticky; top: 0; z-index: 3; display: flex; align-items: center; gap: 10px;
       padding: 8px 0; background: var(--bg-0); border-bottom: 1px solid var(--border);
     }
     .domain-workspace-meta { margin-left: auto; font-size: 9px; color: var(--text-3); font-family: var(--font-mono); text-align: right; line-height: 1.5; }
@@ -1704,6 +1723,8 @@
     .domain-log-del:hover { color: var(--red); }
     .domain-chart { width: 100%; height: auto; display: block; background: var(--bg-2); border: 1px solid var(--border); }
     .domain-chart-axis { stroke: var(--border); stroke-width: 1; }
+    .domain-chart-line.demo { stroke-dasharray: 5 4; opacity: 0.6; }
+    .domain-chart-demo { fill: var(--text-3); font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.1em; }
     .domain-chart-line { fill: none; stroke: var(--cyan); stroke-width: 2; }
     .domain-chart-dot { fill: var(--cyan); }
     .domain-chart-label { fill: var(--text-3); font-family: var(--font-mono); font-size: 8px; }
@@ -1746,7 +1767,7 @@
     /* === Utility: field guide + command palette + fast navigation === */
     .tabbar .utility-btn { font-size: 10px; color: var(--text-3); padding: 0 10px; }
     .tabbar .utility-btn:hover { color: var(--cyan); }
-    .tabbar #commandBtn { margin-left: auto; }
+    .tabbar #settingsBtn { margin-left: auto; }
     .text-link {
       background: none; border: 0; padding: 0; color: var(--cyan); font: inherit;
       font-size: 10px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
@@ -1829,6 +1850,7 @@
     .vials-inline-actions { display: flex; gap: 5px; flex-wrap: wrap; }
     .domain-catalog-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-left: auto; }
     .domain-catalog-actions .coord-tag { margin-left: 2px; }
+    .domain-url-bar[hidden] { display: none; }
     .domain-url-bar {
       border: 1px solid var(--border);
       border-left: 3px solid var(--cyan);
@@ -1873,7 +1895,7 @@
     .domain-detector-limits ul { margin: 0; padding-left: 16px; }
     .domain-detector-limits li { font-size: 10px; line-height: 1.45; color: var(--text-2); margin-bottom: 3px; }
     .domain-detector-evidence { font-family: var(--font-mono); font-size: 9px; line-height: 1.5; color: var(--text-3); border-top: 1px solid var(--border); padding-top: 7px; }
-    .domain-workspace { overflow-y: auto; }
+    .domain-workspace { overflow: visible; }
     .domain-workspace-head { top: 0; padding-top: 0; }
     .domain-jumpbar {
       position: sticky; top: 38px; z-index: 2; display: flex; gap: 3px; overflow-x: auto;
@@ -3083,6 +3105,7 @@
       background: var(--bg-1); border: 1px solid var(--border);
       border-radius: var(--radius); padding: 16px; width: 400px;
       max-width: 92vw; max-height: 92vh; overflow-y: auto;
+      scrollbar-width: thin; scrollbar-color: var(--text-3) transparent;
       display: flex; flex-direction: column; gap: 10px;
     }
     .modal-box h3 { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; }
@@ -3221,24 +3244,27 @@
       </div>
     </header>
 
-    <!-- Tab Bar — organised by the job, not by the implementation.
-         Home | Explore | Decide | Train | Vials | Data | Rig -->
+    <!-- Tab Bar — jobs, not implementation buckets.
+         Home | Explore | Analyse | Vials | Data | Rigs, then utilities. -->
     <nav class="tabbar">
       <button class="tab-btn active" data-tab="dashboard">Home</button>
       <button class="tab-btn" data-tab="explore">Explore</button>
-      <button class="tab-btn" data-tab="decide">Decide</button>
-      <button class="tab-btn" data-tab="train">Train</button>
+      <button class="tab-btn" data-tab="analyse">Analyse</button>
       <button class="tab-btn" data-tab="vials">Vials</button>
       <button class="tab-btn" data-tab="data">Data</button>
-      <button class="tab-btn" data-tab="rig">Rig <span class="badge" id="fleetBadge" style="display:none">0</span></button>
+      <button class="tab-btn" data-tab="rig">Rigs <span class="badge" id="fleetBadge" style="display:none">0</span></button>
+      <button class="tab-btn utility-btn" id="settingsBtn" data-tab="settings" type="button" title="Settings — hardware, calibration, firmware">⚙ Settings</button>
       <button class="tab-btn utility-btn" id="commandBtn" type="button" title="Command palette (Ctrl+K)">⌘K</button>
       <button class="tab-btn utility-btn" id="guideBtn" type="button" title="Field guide (?)">? Guide</button>
       <!-- Legacy aliases. Code and older command-palette actions still use these
            names; the router maps them to the new workspaces. -->
       <button class="tab-btn" data-tab="library" hidden aria-hidden="true"></button>
       <button class="tab-btn" data-tab="compare" hidden aria-hidden="true"></button>
+      <button class="tab-btn" data-tab="check" hidden aria-hidden="true"></button>
+      <button class="tab-btn" data-tab="train" hidden aria-hidden="true"></button>
       <button class="tab-btn" data-tab="fleet" hidden aria-hidden="true"></button>
       <button class="tab-btn" data-tab="system" hidden aria-hidden="true"></button>
+      <button class="tab-btn" data-tab="decide" hidden aria-hidden="true"></button>
     </nav>
 
     <!-- Main Content -->
@@ -3246,29 +3272,28 @@
       <!-- Job-level workspaces. The existing panels are moved into these shells
            at boot so every ID, handler, and saved state keeps working. -->
       <div class="tab-panel" id="panel-explore"></div>
-      <div class="tab-panel" id="panel-decide">
+      <div class="tab-panel" id="panel-analyse">
         <div class="workspace-subnav">
-          <button class="src-subnav-btn active" data-src="check">Check</button>
-          <button class="src-subnav-btn" data-src="compare">Compare</button>
+          <button class="src-subnav-btn active" data-src="compare">Compare</button>
+          <button class="src-subnav-btn" data-src="check">Check</button>
+          <button class="src-subnav-btn" data-src="recipes">Recipes</button>
+          <button class="src-subnav-btn" data-src="train">Train</button>
+          <button class="src-subnav-btn" data-src="changelog">Change Log</button>
         </div>
-        <div class="workspace-body" id="decideBody"></div>
+        <div class="workspace-body" id="analyseBody"></div>
       </div>
       <div class="tab-panel" id="panel-vials"></div>
       <div class="tab-panel" id="panel-data">
         <div class="workspace-subnav">
           <button class="src-subnav-btn active" data-src="sessions">Recordings</button>
           <button class="src-subnav-btn" data-src="datasets">Datasets</button>
-          <button class="src-subnav-btn" data-src="changelog">Change Log</button>
         </div>
         <div class="workspace-body" id="dataBody"></div>
       </div>
       <div class="tab-panel" id="panel-rig">
-        <div class="workspace-subnav">
-          <button class="src-subnav-btn active" data-src="fleet">Fleet</button>
-          <button class="src-subnav-btn" data-src="system">System</button>
-        </div>
         <div class="workspace-body" id="rigBody"></div>
       </div>
+      <div class="tab-panel" id="panel-settings"></div>
 
       <!-- ===== RESULT ===== -->
       <div class="tab-panel active" id="panel-dashboard">
@@ -3333,6 +3358,7 @@
                     <button class="mini-btn" id="dashCompare" type="button">Try a comparison →</button>
                     <button class="mini-btn" id="dashConnect" type="button">Connect a rig</button>
                   </div>
+                  <div class="home-glance" id="homeGlance"></div>
                 </div>
               </div>
             </div>
@@ -3438,7 +3464,7 @@
               <div class="smells-head">
                 <div>
                   <h2>Smells</h2>
-                  <p class="hint" id="smellsSub">Every smell in your library, as the response it produced.</p>
+                  <p class="hint" id="smellsSub">Grouped from your recordings. Fingerprint = mean settled ΔR/R₀ per channel on the dominant array; open a smell for the curves.</p>
                   <div class="smells-rig" id="smellsRig" hidden></div>
                 </div>
                 <div class="smells-actions">
@@ -3544,7 +3570,7 @@
                 <div class="vials-head">
                   <div>
                     <h2>Vials</h2>
-                    <p class="hint">Installable ways of working. A domain Vial carries a protocol, a log, and its limits. A decision Vial carries a closed-set claim with its evidence. Neither is a universal smell ID.</p>
+                    <p class="hint">Domain workspaces and closed-set decisions. Install more from the Aromatory.</p>
                   </div>
                   <div class="vials-actions">
                     <span class="coord-tag" id="vialsSummary">0 domain · 0 decisions · 0 sealed</span>
@@ -3559,18 +3585,11 @@
                   <button class="vials-switch-btn" type="button" data-vials-tab="aromatory">Aromatory <span id="vialsAromatoryCount">0</span></button>
                 </div>
                 <div id="vialsWorkspacesPane" class="vials-pane-section">
-                  <div class="vials-note">
-                    <b>Installed workspaces.</b> A domain Vial keeps the context the sensor cannot: the protocol,
-                    the log, the stop rules, and the refusal. Open one to work; install another from the Aromatory.
-                  </div>
+                  <div class="vials-note"><b>Workspaces.</b> Open a protocol, keep its log, follow its stop rules.</div>
                   <div id="domainInstalledList" class="domain-area"></div>
                 </div>
                 <div id="vialsDecisionsPane" class="vials-pane-section" style="display:none">
-                  <div class="vials-note">
-                    <b>Decision packs.</b> A decision Vial is a closed-set claim — “on this array, these two smells
-                    are distinguishable” — with the source, replicates, 95% lower bound, permutation p-value,
-                    limits, and method. It is sealed only when saved evidence passes the local gate.
-                  </div>
+                  <div class="vials-note"><b>Decisions.</b> Closed-set evidence. Sealed only when the local gate passes.</div>
                   <div class="vials-section-head">
                     <span>Your decision Vials <span class="coord-tag" id="vialsDecisionCount">0</span></span>
                     <span class="vials-inline-actions">
@@ -3581,10 +3600,7 @@
                   <div id="vialsList" class="vials-list"></div>
                 </div>
                 <div id="vialsAromatoryPane" class="vials-pane-section" style="display:none">
-                  <div class="vials-note">
-                    <b>The Aromatory.</b> Official and community domain Vials. Community packs are policy-gated
-                    on import, rendered declaratively, and never execute code. Export any pack to inspect or share it.
-                  </div>
+                  <div class="vials-note"><b>Aromatory.</b> Official and community packs. Declarative, policy-gated, no executable code.</div>
                   <div id="domainUrlBar" class="domain-url-bar" hidden>
                     <div class="domain-url-row">
                       <input id="domainUrlInput" type="url" spellcheck="false" autocomplete="off" placeholder="https://raw.githubusercontent.com/you/your-vial/main/vial.json" aria-label="Domain Vial manifest URL" />
@@ -3612,8 +3628,8 @@
         <div class="library">
           <div class="library-main hud-panel" id="libMain">
             <div class="hud-panel-head">
-              <span class="hp-num">LIB</span>
-              <span>Session Library</span>
+              <span class="hp-num">REC</span>
+              <span>Recordings</span>
               <span class="hp-fill"></span>
               <span id="libFilterStamp" class="coord-tag">0 records</span>
             </div>
@@ -3651,19 +3667,6 @@
               <span class="hp-num">INS</span>
               <span>Inspector</span>
             </div>
-            <div class="inspector-section" id="inspHealthSection">
-              <h4>Rig Health <span id="inspHealthStamp" class="coord-tag"></span></h4>
-              <div class="rig-hint">Judged on the opening baseline, where the array should be at rest.</div>
-              <div id="inspHealthBody" class="rig-body"></div>
-            </div>
-            <div class="inspector-section">
-              <h4>Session Details</h4>
-              <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
-            </div>
-            <div class="inspector-section">
-              <h4>Response Fingerprint</h4>
-              <canvas id="session-fp"></canvas>
-            </div>
             <div class="inspector-section">
               <h4>Actions</h4>
               <div style="display:flex;flex-wrap:wrap;gap:6px">
@@ -3671,8 +3674,22 @@
                 <button id="inspAnalyze">Analyze</button>
                 <button id="inspExport">Export</button>
                 <button id="inspReplay">▶ Replay</button>
+                <button id="inspTrim">✂ Trim</button>
                 <button id="inspDelete" style="color:var(--red)">Delete</button>
               </div>
+            </div>
+            <div class="inspector-section" id="inspHealthSection">
+              <h4>Rig Health <span id="inspHealthStamp" class="coord-tag"></span></h4>
+              <div class="rig-hint">Judged on the opening baseline, where the array should be at rest.</div>
+              <div id="inspHealthBody" class="rig-body"></div>
+            </div>
+            <div class="inspector-section">
+              <h4>Recording details</h4>
+              <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
+            </div>
+            <div class="inspector-section">
+              <h4>Response fingerprint</h4>
+              <canvas id="session-fp"></canvas>
             </div>
           </div>
         </div>
@@ -3751,19 +3768,18 @@
       <!-- Recipe — the smell-native unit of work: source → ordered transforms → result.
            Saved, re-runnable and versioned; every step is a named transform so no
            derived number is invented (see private/SMELL_OPERATIONS.md). -->
-      <div class="tab-panel" id="panel-recipe">
+      <div class="workspace-view" id="panel-recipe">
         <div class="recipe-pane">
           <div class="form-row" style="align-items:center;margin-bottom:6px">
-            <h2 style="margin:0">How this was computed</h2>
+            <h2 style="margin:0">Recipes</h2>
             <span style="flex:1"></span>
-            <button id="recipeBack" class="mini-btn" type="button">← Back to Explore</button>
+            <button id="recipeBack" class="mini-btn" type="button">← Explore</button>
           </div>
           <div class="card">
             <p class="hint" style="margin-bottom:8px">
-              This is the preprocessing chain behind a fingerprint: <b>source → ordered
-              transforms → result</b>. Osmograph applies a standard chain automatically;
-              edit it only when you need a different baseline, window, or normalisation.
-              Every step is named, saved, and re-runnable — no invented numbers.
+              <b>Source → steps → result.</b> Trim, smooth, baseline, normalize, and export a
+              derived recording. Run previews on the source; Save .osmell adds the result back
+              to your library. Every step is named and reproducible.
             </p>
             <div class="form-row">
               <button id="recipeNew" class="mini-btn">New recipe</button>
@@ -3777,9 +3793,10 @@
             <div class="hint" id="recSourceHint" style="margin:-2px 0 6px 76px"></div>
             <div class="form-row"><label style="width:70px">Version</label><input id="recVersion" value="1.0.0" style="width:100px" /></div>
             <div id="recSteps" style="margin:6px 0"></div>
-            <div class="hint" style="margin:2px 0 6px">Params: <b>window=5</b> · <b>alpha=0.3</b> · <b>z=3</b> · <b>method=0|1</b> · <b>start/end</b> seconds. Channel blank = all channels.</div>
+            <div class="hint" style="margin:2px 0 6px">Params: <b>start=0,end=30</b> for trim · <b>window=5</b> · <b>alpha=0.3</b> · <b>z=3</b> · <b>method=0|1</b>. Channel blank = all channels.</div>
             <div class="form-row">
               <button id="recAddStep" class="mini-btn">+ Step</button>
+              <button id="recAddTrim" class="mini-btn" type="button">✂ Trim preset</button>
               <button id="recRun" class="mini-btn primary">Run</button>
               <button id="recSave" class="mini-btn">Save</button>
               <button id="recCancel" class="mini-btn">Cancel</button>
@@ -3827,7 +3844,6 @@
                 <button class="cmp-mode active" data-mode="overlay">Overlay</button>
                 <button class="cmp-mode" data-mode="delta">Δ vs ref</button>
                 <button class="cmp-mode" data-mode="heatmap">Similarity</button>
-                <button class="cmp-mode" data-mode="trajectory" title="The recording as a path through sensor space — time is the extra dimension">Trajectory</button>
               </div>
             </div>
           </div>
@@ -3863,7 +3879,7 @@
               </div>
             </div>
             <div class="compare-empty" id="compareEmpty">
-              <div class="coord-tag">DECIDE · COMPARE</div>
+              <div class="coord-tag">ANALYSE · COMPARE</div>
               <h3>Pick two recordings.</h3>
               <p>
                 Tick the compare box on two smells in <b>Explore</b>, then press
@@ -3887,7 +3903,7 @@
       </div>
 
       <!-- ===== TRAIN ===== -->
-      <div class="tab-panel" id="panel-train">
+      <div class="workspace-view" id="panel-train">
         <div class="train">
           <div style="padding:14px 16px 4px">
             <h2 style="font-size:16px;color:var(--text-0);font-weight:700">Train a Smell Model</h2>
@@ -4751,14 +4767,14 @@ Confidence: 97.3%</div>
       <div class="sd-print-wrap">
         <canvas id="sdPrint"></canvas>
         <div class="sd-print-foot">
-          <span>FINGERPRINT · mean settled response per channel</span>
-          <span>one shared scale · signed bars carry polarity</span>
+          <span>CHANNEL RESPONSE · normalized ΔR/R₀</span>
+          <span>thin = replicate · bold = mean · relative time →</span>
         </div>
       </div>
       <div class="sd-read-key">
-        The fingerprint shows the <b>pattern across channels</b>. The bars show
-        <b>how far and which way</b> each channel moved. Both describe this array;
-        neither is a chemical identification.
+        One panel per channel. Thin lines are individual recordings; the bold line is
+        their mean. The shape shows <b>how the response changes over time</b>; the signed
+        bars below show <b>where it settles</b>. Both describe this array, not a chemical.
       </div>
       <div class="smell-detail-body">
         <div>
@@ -4770,11 +4786,6 @@ Confidence: 97.3%</div>
         <div>
           <div class="sd-section-title">Closest confusable</div>
           <div id="sdNeighbor"><div class="hint">Ranking smells by steady-response similarity…</div></div>
-          <div id="sdTraceWrap" hidden>
-            <div class="sd-section-title" id="sdTraceTitle" style="margin-top:9px">Mean trace</div>
-            <canvas id="sdTrace" style="width:100%;height:118px;display:block"></canvas>
-            <div id="sdTraceLegend" class="hint" style="font-size:10px;margin-top:2px"></div>
-          </div>
           <details class="sd-method" id="sdMethod" hidden>
             <summary>Evidence &amp; method</summary>
             <div id="sdEvidence"></div>

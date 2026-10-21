@@ -427,26 +427,27 @@ interface LiveSnapshot {
 }
 
 // === Workspace router ===
-// The app used to expose implementation buckets as top-level tabs. A person
-// thinks in jobs: explore a smell, decide whether two are separable, run a
-// domain protocol, find data, manage the rig. These shells keep the existing
-// panels and handlers intact while presenting that job-level model.
-type WorkspaceKey = 'dashboard' | 'explore' | 'decide' | 'train' | 'vials' | 'data' | 'rig';
+// The app is organised by jobs, not implementation buckets:
+// observe (Home), browse (Explore), analyse, run a domain workspace (Vials),
+// inspect raw data (Data), manage hardware (Rigs), configure (Settings).
+type WorkspaceKey = 'dashboard' | 'explore' | 'analyse' | 'vials' | 'data' | 'rig' | 'settings';
 interface SourceViewSpec { workspace: WorkspaceKey; id: string; }
 const SOURCE_VIEWS: Record<string, SourceViewSpec> = {
   smells: { workspace: 'explore', id: 'src-smells' },
-  check: { workspace: 'decide', id: 'src-check' },
-  compare: { workspace: 'decide', id: 'panel-compare' },
+  compare: { workspace: 'analyse', id: 'panel-compare' },
+  check: { workspace: 'analyse', id: 'src-check' },
+  recipes: { workspace: 'analyse', id: 'panel-recipe' },
+  train: { workspace: 'analyse', id: 'panel-train' },
+  changelog: { workspace: 'analyse', id: 'src-changelog' },
   vials: { workspace: 'vials', id: 'src-vials' },
   sessions: { workspace: 'data', id: 'src-sessions' },
   datasets: { workspace: 'data', id: 'src-datasets' },
-  changelog: { workspace: 'data', id: 'src-changelog' },
   fleet: { workspace: 'rig', id: 'panel-fleet' },
-  system: { workspace: 'rig', id: 'panel-system' },
+  system: { workspace: 'settings', id: 'panel-system' },
 };
 const WORKSPACE_DEFAULT: Record<WorkspaceKey, string> = {
-  dashboard: 'dashboard', explore: 'smells', decide: 'check', train: 'train',
-  vials: 'vials', data: 'sessions', rig: 'fleet',
+  dashboard: 'dashboard', explore: 'smells', analyse: 'compare', vials: 'vials',
+  data: 'sessions', rig: 'fleet', settings: 'system',
 };
 const workspaceLastView: Partial<Record<WorkspaceKey, string>> = {};
 
@@ -457,18 +458,18 @@ function installWorkspaceShell(): void {
     if (node && parent) parent.appendChild(node);
   };
   move('src-smells', 'panel-explore');
-  move('src-check', 'decideBody');
-  move('panel-compare', 'decideBody');
+  move('panel-compare', 'analyseBody');
+  move('src-check', 'analyseBody');
+  move('panel-recipe', 'analyseBody');
+  move('panel-train', 'analyseBody');
+  move('src-changelog', 'analyseBody');
   move('src-vials', 'panel-vials');
   move('src-sessions', 'dataBody');
   move('src-datasets', 'dataBody');
-  move('src-changelog', 'dataBody');
   move('panel-fleet', 'rigBody');
-  move('panel-system', 'rigBody');
-  // The three moved panels used to be top-level `.tab-panel`s. Their local
-  // subnav controls visibility now, so make the contract explicit even if the
-  // markup is ever loaded in the old order.
-  for (const id of ['panel-compare', 'panel-fleet', 'panel-system']) {
+  move('panel-system', 'panel-settings');
+  // Panels that used to be top-level tabs are now views inside a workspace.
+  for (const id of ['panel-compare', 'panel-fleet', 'panel-system', 'panel-train', 'panel-recipe']) {
     const node = document.getElementById(id);
     if (!node) continue;
     node.classList.remove('tab-panel');
@@ -499,17 +500,18 @@ function showWorkspaceView(src: string): void {
   workspaceLastView[spec.workspace] = src;
 
   if (src === 'smells') void renderSmellGallery();
+  else if (src === 'compare') requestAnimationFrame(() => updateCompare());
   else if (src === 'check') void renderCheckView(true);
+  else if (src === 'recipes') void refreshRecipes();
+  else if (src === 'changelog') renderChangeLog();
   else if (src === 'vials') renderVials();
   else if (src === 'sessions') renderLibrary();
   else if (src === 'datasets') renderDatasetCatalog();
-  else if (src === 'changelog') renderChangeLog();
-  else if (src === 'compare') requestAnimationFrame(() => updateCompare());
   else if (src === 'fleet') renderFleet();
 }
 
 function showWorkspaceDefault(ws: WorkspaceKey): void {
-  if (ws === 'dashboard' || ws === 'train') {
+  if (ws === 'dashboard') {
     activateWorkspace(ws);
     return;
   }
@@ -518,16 +520,19 @@ function showWorkspaceDefault(ws: WorkspaceKey): void {
 
 installWorkspaceShell();
 
-// Top-level navigation. Legacy aliases (`library`, `compare`, `fleet`, `system`)
-// stay live for saved commands and deep links.
+// Top-level navigation. Legacy aliases (`library`, `compare`, `check`, `train`,
+// `fleet`, `system`, `decide`) stay live for saved commands and deep links.
 document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => {
     const tab = btn.dataset.tab!;
     if (tab === 'library') { showWorkspaceView('smells'); return; }
     if (tab === 'compare') { showWorkspaceView('compare'); return; }
+    if (tab === 'check') { showWorkspaceView('check'); return; }
+    if (tab === 'train') { showWorkspaceView('train'); return; }
     if (tab === 'fleet') { showWorkspaceView('fleet'); return; }
     if (tab === 'system') { showWorkspaceView('system'); return; }
-    if (tab === 'explore' || tab === 'decide' || tab === 'vials' || tab === 'data' || tab === 'rig') {
+    if (tab === 'decide') { showWorkspaceDefault('analyse'); return; }
+    if (tab === 'explore' || tab === 'analyse' || tab === 'vials' || tab === 'data' || tab === 'rig' || tab === 'settings') {
       showWorkspaceDefault(tab as WorkspaceKey);
       return;
     }
@@ -1673,6 +1678,7 @@ function renderLibrary() {
   document.getElementById('libStatus')!.textContent = `${sessions.length} sessions`;
   const stamp = document.getElementById('libFilterStamp');
   if (stamp) stamp.textContent = `${sessions.length} records · ${sessions.filter(s => s.quality_report).length} analyzed`;
+  renderHomeGlance();
   body.querySelectorAll('tr').forEach(tr => {
     tr.addEventListener('click', (ev) => {
       if ((ev.target as HTMLElement).closest('.compare-tick')) return;
@@ -2291,7 +2297,7 @@ async function renderCompareVerdict(): Promise<void> {
           const caveat = Number.isFinite(pValue) && pValue > 0.05
             ? ` (label-shuffle p = ${pValue.toFixed(2)} — promising, not established)`
             : '';
-          across = ` Across all replicates: ${right}/${nEval} left-out recordings separate them${caveat} — see Decide → Compare for the lever.`;
+          across = ` Across all replicates: ${right}/${nEval} left-out recordings separate them${caveat} — see Analyse → Compare for the lever.`;
         }
       }
     }
@@ -3645,7 +3651,7 @@ function renderAdequacyVerdict(report: TrainingReport, similarity: { class_a: st
   const perClass = report.classes.map(c => report.recordings_per_class[c] || 0);
   const minPer = perClass.length ? Math.min(...perClass) : 0;
   if (!confusing.length && !lowAcc && minPer <= 3) {
-    html += `<div class="train-note">Small sample — ${minPer} recording${minPer === 1 ? '' : 's'} per class. A high LORO can still be chance; confirm with the label-shuffle p-value in Decide → Compare before trusting it.</div>`;
+    html += `<div class="train-note">Small sample — ${minPer} recording${minPer === 1 ? '' : 's'} per class. A high LORO can still be chance; confirm with the label-shuffle p-value in Analyse → Compare before trusting it.</div>`;
   }
   return html;
 }
@@ -4787,6 +4793,28 @@ function updateSmellSelection(): void {
   if (btn) btn.disabled = smellSel.size < 2;
 }
 
+function renderHomeGlance(): void {
+  const host = document.getElementById('homeGlance');
+  if (!host) return;
+  const named = new Set(
+    sessions
+      .map(s => (s.substance || '').trim().toLowerCase())
+      .filter(v => v && v !== 'unknown'),
+  );
+  const installed = Domain.loadInstalledIds().length;
+  host.innerHTML = [
+    '<span>Library</span>',
+    `<button type="button" data-home-go="smells">${named.size} smell${named.size === 1 ? '' : 's'}</button>`,
+    '<i>·</i>',
+    `<button type="button" data-home-go="sessions">${sessions.length} recording${sessions.length === 1 ? '' : 's'}</button>`,
+    '<i>·</i>',
+    `<button type="button" data-home-go="vials">${installed} domain Vial${installed === 1 ? '' : 's'}</button>`,
+  ].join('');
+  host.querySelectorAll<HTMLButtonElement>('[data-home-go]').forEach(btn => {
+    btn.addEventListener('click', () => showWorkspaceView(btn.dataset.homeGo || 'smells'));
+  });
+}
+
 function buildSmellCards(): void {
   const bySub = new Map<string, { display: string; records: SessionRecord[] }>();
   for (const s of sessions) {
@@ -4809,7 +4837,7 @@ function buildSmellCards(): void {
     .sort((a, b) => b.records.length - a.records.length || a.substance.localeCompare(b.substance));
   const sub = document.getElementById('smellsSub');
   if (sub) {
-    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings · the fingerprint is how this array responds, not a chemical ID`;
+    sub.textContent = `${smellCards.length} smells from ${sessions.length} recordings · grouped by substance · fingerprint = mean settled ΔR/R₀ per channel on the dominant array`;
   }
 }
 
@@ -6260,8 +6288,9 @@ function domainChartSvg(w: Extract<Domain.DomainWidget, { type: 'chart' }>, stat
     const y = T + f * (H - T - B);
     return `<line x1="${L}" y1="${y.toFixed(1)}" x2="${W - R}" y2="${y.toFixed(1)}" class="domain-chart-axis" />`;
   }).join('');
-  return `<svg class="domain-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtmlText(w.title)}">
+  return `<svg class="domain-chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtmlText(w.title)}${demo ? ' (example points)' : ''}">
     <text x="${L}" y="12" class="domain-chart-title">${escapeHtmlText(w.yLabel)}</text>
+    ${demo ? '<text x="' + (W - R) + '" y="12" text-anchor="end" class="domain-chart-demo">EXAMPLE</text>' : ''}
     ${grid}
     <line x1="${L}" y1="${H - B}" x2="${W - R}" y2="${H - B}" class="domain-chart-axis" />
     <line x1="${L}" y1="${T}" x2="${L}" y2="${H - B}" class="domain-chart-axis" />
@@ -6269,7 +6298,7 @@ function domainChartSvg(w: Extract<Domain.DomainWidget, { type: 'chart' }>, stat
     <text x="8" y="${(H - B).toFixed(1)}" class="domain-chart-label">${yMin.toFixed(1)}</text>
     <text x="${L}" y="${H - 8}" class="domain-chart-label">${xMin}</text>
     <text x="${W - R}" y="${H - 8}" text-anchor="end" class="domain-chart-label">${xMax}</text>
-    <path d="${path}" class="domain-chart-line" />
+    <path d="${path}" class="domain-chart-line${demo ? ' demo' : ''}" />
     ${dots}
   </svg>
   <div class="domain-chart-note">${escapeHtmlText(w.note)}${demo ? ' Showing example points until you add two readings.' : ''}</div>`;
@@ -6425,14 +6454,13 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
   const source = domainSourceLabel(pack);
   const gate = Domain.validateDomainPack(pack, !official);
   const gatePassed = gate.checks.filter(c => c.passed).length;
-  return `<div class="domain-card ${installed ? 'installed' : ''}">
+  return `<div class="domain-card ${installed ? 'installed' : ''}" title="${escapeHtmlText(pack.summary)}">
     <div class="domain-card-head">
       <div style="min-width:0"><div class="domain-card-name">${escapeHtmlText(pack.name)}</div><div class="domain-card-sub">v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.author)} · ${escapeHtmlText(pack.domain)}</div></div>
       <span class="domain-risk ${pack.risk}">${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}</span>
     </div>
     <div class="domain-card-tagline">${escapeHtmlText(pack.tagline)}</div>
-    <div class="domain-card-meta">${escapeHtmlText(pack.summary)}</div>
-    <div class="domain-card-meta">${origin}${escapeHtmlText(source)} · ${installed ? 'installed · log stays on this machine' : 'declarative · no executable code'} · ${pack.docs.length} docs · ${pack.citations.length} citations · ${escapeHtmlText(pack.license)} · local gate ${gatePassed}/${gate.checks.length}</div>
+    <div class="domain-card-meta">${origin}${escapeHtmlText(source)} · ${installed ? 'installed · log local' : 'declarative'} · ${pack.docs.length} docs · ${pack.citations.length} citations · ${escapeHtmlText(pack.license)} · gate ${gatePassed}/${gate.checks.length}</div>
     <div class="domain-card-actions">
       ${installed
         ? `<button class="mini-btn primary" type="button" data-domain-open="${escapeHtmlText(pack.id)}">Open workspace</button>
@@ -6732,15 +6760,17 @@ interface CommandAction {
 const COMMANDS: CommandAction[] = [
   { id: 'dashboard', group: 'Go', title: 'Home', hint: 'live rig', run: () => activateTab('dashboard') },
   { id: 'gallery', group: 'Go', title: 'Explore → Gallery', hint: 'browse fingerprints', run: () => activateSmellsView('smells') },
-  { id: 'check', group: 'Go', title: 'Decide → Check', hint: 'can this array tell two smells apart?', run: () => activateSmellsView('check') },
-  { id: 'compare', group: 'Go', title: 'Decide → Compare', hint: 'overlay saved recordings', run: () => activateSmellsView('compare') },
+  { id: 'check', group: 'Go', title: 'Analyse → Check', hint: 'can this array tell two smells apart?', run: () => activateSmellsView('check') },
+  { id: 'compare', group: 'Go', title: 'Analyse → Compare', hint: 'overlay saved recordings', run: () => activateSmellsView('compare') },
+  { id: 'recipes', group: 'Go', title: 'Analyse → Recipes', hint: 'trim, filter, normalize, export', run: () => activateSmellsView('recipes') },
   { id: 'vials', group: 'Go', title: 'Vials', hint: 'domain workspaces + decisions', run: () => activateSmellsView('vials') },
   { id: 'aromatory', group: 'Go', title: 'Vials → Aromatory', hint: 'install a domain Vial', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); window.setTimeout(() => document.getElementById('domainCatalog')?.scrollIntoView({ block: 'start' }), 80); } },
   { id: 'sessions', group: 'Go', title: 'Data → Recordings', hint: 'import + inspect sessions', run: () => activateSmellsView('sessions') },
   { id: 'datasets', group: 'Go', title: 'Data → Datasets', hint: 'public data', run: () => activateSmellsView('datasets') },
-  { id: 'train', group: 'Go', title: 'Train', hint: 'teach this array', run: () => activateTab('train') },
-  { id: 'fleet', group: 'Go', title: 'Rig → Fleet', hint: 'multiple rigs', run: () => activateSmellsView('fleet') },
-  { id: 'system', group: 'Go', title: 'Rig → System', hint: 'hardware + release', run: () => activateSmellsView('system') },
+  { id: 'train', group: 'Go', title: 'Analyse → Train', hint: 'teach this array', run: () => activateSmellsView('train') },
+  { id: 'changelog', group: 'Go', title: 'Analyse → Change Log', hint: 'what changed, when', run: () => activateSmellsView('changelog') },
+  { id: 'fleet', group: 'Go', title: 'Rigs → Fleet', hint: 'multiple rigs', run: () => activateSmellsView('fleet') },
+  { id: 'system', group: 'Go', title: 'Settings', hint: 'hardware, calibration, release', run: () => activateSmellsView('system') },
   { id: 'install-fermentation', group: 'Vials', title: 'Install Fermentation Lab', hint: 'official · high risk', run: () => installDomainVial('official.fermentation') },
   { id: 'install-plant', group: 'Vials', title: 'Install Plant Respiration', hint: 'official · medium risk', run: () => installDomainVial('official.plant') },
   { id: 'install-anomaly', group: 'Vials', title: 'Install Anomaly Watch', hint: 'official · same-device change watch', run: () => installDomainVial('official.anomaly-watch') },
@@ -7012,6 +7042,7 @@ function setVialsTab(tab: string): void {
 }
 
 function renderVials(): void {
+  renderHomeGlance();
   const list = document.getElementById('vialsList');
   const summary = document.getElementById('vialsSummary');
   if (!list) return;
@@ -7627,111 +7658,148 @@ function resampleCurve(v: number[], n = 96): number[] {
 
 /** Mean normalized trace for one array group on one channel. Descriptive: it
  *  makes the shape/level distinction visible, not a substitute for the test. */
-async function meanTraceFor(card: SmellCardData, channel: string, shape: boolean): Promise<number[] | null> {
-  const group = card.groupRecords?.length ? card.groupRecords : card.records;
-  const usable = group.filter(r => !!r.file_id);
-  const curves: number[][] = [];
-  for (const r of usable) {
-    const series = await loadCompareSeries(r.file_id!);
-    if (!series) continue;
-    const ci = series.channels.indexOf(channel);
-    if (ci < 0) continue;
-    let curve = cmpNorm(series, ci);
-    if (!curve || curve.length < 2) continue;
-    if (curve.filter(Number.isFinite).length < 2) continue;
-    if (shape) {
-      const peak = Math.max(...curve.filter(Number.isFinite).map(v => Math.abs(v)), 0);
-      if (!(peak > 1e-6)) continue;
-      curve = curve.map(v => (Number.isFinite(v) ? v / peak : NaN));
-    }
-    curves.push(resampleCurve(curve, 96));
-  }
-  if (!curves.length) return null;
-  return Array.from({ length: 96 }, (_, i) => {
-    const vals = curves.map(c => c[i]).filter(Number.isFinite);
-    return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : NaN;
-  });
+interface DetailTraceSet {
+  channels: string[];
+  /** [channel][recording] over 96 relative-time samples. */
+  curves: number[][][];
+  /** Largest number of replicate curves on any one channel. */
+  used: number;
 }
 
-function drawTraceCompare(a: number[], b: number[]): void {
-  const canvas = document.getElementById('sdTrace') as HTMLCanvasElement | null;
-  if (!canvas) return;
+/** Load the individual normalized curves behind a smell's mean fingerprint.
+ *  This is deliberately not a single averaged line: the spread between
+ *  replicates is part of what the evidence can and cannot support. */
+async function detailTraceSet(card: SmellCardData, max = 6): Promise<DetailTraceSet | null> {
+  const group = card.groupRecords?.length ? card.groupRecords : card.records;
+  const usable = group.filter(r => !!r.file_id).slice(0, max);
+  let channels: string[] = [];
+  const curves: number[][][] = [];
+  for (const rec of usable) {
+    const series = await loadCompareSeries(rec.file_id!);
+    if (!series || !series.channels.length) continue;
+    if (!channels.length) {
+      channels = series.channels.slice();
+      for (let ci = 0; ci < channels.length; ci++) curves.push([]);
+    }
+    if (series.channels.join('\u0000') !== channels.join('\u0000')) continue;
+    for (let ci = 0; ci < channels.length; ci++) {
+      const norm = cmpNorm(series, ci);
+      if (!norm || norm.length < 2) continue;
+      if (norm.filter(Number.isFinite).length < 2) continue;
+      curves[ci].push(resampleCurve(norm, 96));
+    }
+  }
+  if (!channels.length || !curves.some(c => c.length)) return null;
+  return { channels, curves, used: Math.max(0, ...curves.map(c => c.length)) };
+}
+
+function drawCurvesPlaceholder(canvas: HTMLCanvasElement, message: string): void {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
   const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(280, canvas.clientWidth || 400);
-  const h = 118;
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
+  const w = Math.max(280, canvas.clientWidth || 600);
+  const h = Math.max(140, canvas.clientHeight || 252);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const vals = [...a, ...b].filter(Number.isFinite);
-  if (!vals.length) return;
-  let lo = Math.min(...vals), hi = Math.max(...vals);
-  if (!(hi - lo > 1e-9)) { lo -= 0.5; hi += 0.5; }
-  const pad = (hi - lo) * 0.12;
-  lo -= pad; hi += pad;
-  const padL = 2, padR = 2, padT = 6, padB = 6;
-  const px = (i: number) => padL + (i / Math.max(1, a.length - 1)) * (w - padL - padR);
-  const py = (v: number) => padT + (1 - (v - lo) / (hi - lo)) * (h - padT - padB);
-  ctx.strokeStyle = 'rgba(8,8,12,0.07)';
-  ctx.lineWidth = 1;
-  for (let k = 1; k <= 3; k++) {
-    const y = padT + (k / 4) * (h - padT - padB);
-    ctx.beginPath();
-    ctx.moveTo(padL, y);
-    ctx.lineTo(w - padR, y);
-    ctx.stroke();
-  }
-  if (lo < 0 && hi > 0) {
-    ctx.strokeStyle = 'rgba(8,8,12,0.18)';
-    ctx.setLineDash([2, 3]);
-    ctx.beginPath();
-    ctx.moveTo(padL, py(0));
-    ctx.lineTo(w - padR, py(0));
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-  const draw = (curve: number[], color: string) => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.7;
-    ctx.beginPath();
-    let started = false;
-    for (let i = 0; i < curve.length; i++) {
-      if (!Number.isFinite(curve[i])) { started = false; continue; }
-      const x = px(i), y = py(curve[i]);
-      if (started) ctx.lineTo(x, y); else ctx.moveTo(x, y);
-      started = true;
-    }
-    ctx.stroke();
-  };
-  draw(a, '#0e7490');
-  draw(b, '#b45309');
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = '11px -apple-system, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(message, w / 2, h / 2);
 }
 
-async function renderTraceCompare(p: SmellPairSeparation, token: number): Promise<void> {
-  const wrap = document.getElementById('sdTraceWrap');
-  if (!wrap) return;
-  const best = p.best;
-  const channel = best?.channel || p.channels.find(c => Number.isFinite(c.d))?.channel;
-  if (!channel) return;
-  const shape = !!best && SHAPE_FEATURES.has(best.feature);
-  const [ta, tb] = await Promise.all([
-    meanTraceFor(p.a, channel, shape),
-    meanTraceFor(p.b, channel, shape),
-  ]);
-  if (token !== smellDetailToken) return;
-  if (!ta || !tb) return;
-  const title = document.getElementById('sdTraceTitle');
-  if (title) {
-    title.textContent = `Mean ${shape ? 'shape' : 'level'} on ${channel} · ${shape ? 'each replicate scaled to its own peak' : 'ΔR/R0'}`;
+/** Small multiples of the response over relative time: one panel per channel,
+ *  thin lines for individual recordings, bold line for their mean. Level and
+ *  kinetics are both visible; this replaces the decorative single radar on the
+ *  detail view. */
+function drawDetailCurves(canvas: HTMLCanvasElement, set: DetailTraceSet): void {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(280, canvas.clientWidth || 600);
+  const h = Math.max(160, canvas.clientHeight || 252);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const n = set.channels.length;
+  if (!n) return;
+  const cols = n <= 2 ? n : n <= 4 ? 2 : 3;
+  const rows = Math.ceil(n / cols);
+  const gapX = 12, gapY = 10;
+  const panelW = (w - gapX * (cols - 1)) / cols;
+  const panelH = (h - gapY * (rows - 1)) / rows;
+  ctx.textBaseline = 'top';
+  for (let ci = 0; ci < n; ci++) {
+    const col = ci % cols;
+    const row = Math.floor(ci / cols);
+    const x = col * (panelW + gapX);
+    const y = row * (panelH + gapY);
+    const curves = set.curves[ci];
+    const finite = curves.flat().filter(Number.isFinite);
+    ctx.strokeStyle = 'rgba(29,26,22,0.10)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x + 0.5, y + 0.5, panelW - 1, panelH - 1);
+    ctx.fillStyle = '#3a3630';
+    ctx.font = '600 9px ui-monospace, "SF Mono", Menlo, monospace';
+    ctx.textAlign = 'left';
+    ctx.fillText((set.channels[ci] || `CH${ci + 1}`).slice(0, 14), x + 5, y + 4);
+    ctx.fillStyle = '#8a7f6c';
+    ctx.font = '8px ui-monospace, monospace';
+    ctx.textAlign = 'right';
+    ctx.fillText(curves.length ? `n=${curves.length}` : 'n/a', x + panelW - 5, y + 4);
+    if (!finite.length) continue;
+    let lo = Math.min(...finite), hi = Math.max(...finite);
+    if (!(hi - lo > 1e-9)) { lo -= 0.5; hi += 0.5; }
+    const pad = (hi - lo) * 0.12;
+    lo -= pad; hi += pad;
+    const left = x + 5, right = x + panelW - 5;
+    const top = y + 17, bottom = y + panelH - 5;
+    const px = (i: number) => left + (i / 95) * (right - left);
+    const py = (v: number) => top + (1 - (v - lo) / (hi - lo)) * (bottom - top);
+    if (lo < 0 && hi > 0) {
+      ctx.strokeStyle = 'rgba(29,26,22,0.18)';
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(left, py(0));
+      ctx.lineTo(right, py(0));
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    const color = CHART_COLORS[ci % CHART_COLORS.length];
+    for (const curve of curves) {
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.18;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < curve.length; i++) {
+        if (!Number.isFinite(curve[i])) { started = false; continue; }
+        const X = px(i), Y = py(curve[i]);
+        if (started) ctx.lineTo(X, Y); else ctx.moveTo(X, Y);
+        started = true;
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    if (curves.length) {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < 96; i++) {
+        const vals = curves.map(c => c[i]).filter(Number.isFinite);
+        if (!vals.length) { started = false; continue; }
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const X = px(i), Y = py(mean);
+        if (started) ctx.lineTo(X, Y); else ctx.moveTo(X, Y);
+        started = true;
+      }
+      ctx.stroke();
+    }
   }
-  const legend = document.getElementById('sdTraceLegend');
-  if (legend) {
-    legend.innerHTML = `<span style="color:#0e7490">■</span> ${esc(titleCase(p.a.substance))} <span style="color:#b45309;margin-left:8px">■</span> ${esc(titleCase(p.b.substance))} <span style="color:var(--text-3)">· descriptive only</span>`;
-  }
-  wrap.hidden = false;
-  requestAnimationFrame(() => drawTraceCompare(ta, tb));
 }
 
 function closeSmellDetail(): void {
@@ -7888,8 +7956,6 @@ function hideDetailEvidence(): void {
   }
   const evidence = document.getElementById('sdEvidence');
   if (evidence) evidence.innerHTML = '';
-  const trace = document.getElementById('sdTraceWrap');
-  if (trace) trace.hidden = true;
 }
 
 async function findClosestConfusable(card: SmellCardData, token: number): Promise<void> {
@@ -7980,7 +8046,6 @@ async function findClosestConfusable(card: SmellCardData, token: number): Promis
   if (evidence) evidence.innerHTML = sepPairHtml(pick);
   const method = document.getElementById('sdMethod') as HTMLDetailsElement | null;
   if (method) method.hidden = false;
-  void renderTraceCompare(pick, token);
 }
 
 function openSmellDetail(card: SmellCardData): void {
@@ -8012,10 +8077,7 @@ function openSmellDetail(card: SmellCardData): void {
   // Clear the previous smell's fingerprint immediately; never let one smell's
   // shape sit under another smell's name while the replicates load.
   const print = document.getElementById('sdPrint') as HTMLCanvasElement | null;
-  if (print) {
-    const ctx = print.getContext('2d');
-    if (ctx) ctx.clearRect(0, 0, print.width, print.height);
-  }
+  if (print) drawCurvesPlaceholder(print, 'Reading replicate curves…');
   const bars = document.getElementById('sdBars');
   if (bars) bars.innerHTML = '<div class="hint">Reading replicates…</div>';
   const btn = document.getElementById('sdCompare') as HTMLButtonElement | null;
@@ -8038,8 +8100,13 @@ function openSmellDetail(card: SmellCardData): void {
         ? `${other} recording${other === 1 ? '' : 's'} use a different array and are not blended into this fingerprint.`
         : 'All recordings use this array.'}`;
     }
-    if (print) drawDetailFingerprint(print, fp.values, fp.channels);
     drawSignedBars(fp.values, fp.channels);
+    if (print) {
+      const traces = await detailTraceSet(card);
+      if (token !== smellDetailToken) return;
+      if (traces) drawDetailCurves(print, traces);
+      else drawCurvesPlaceholder(print, 'No comparable replicate curves on one array.');
+    }
     await findClosestConfusable(card, token);
   })();
 }
@@ -8094,13 +8161,9 @@ document.getElementById('sdCopy')?.addEventListener('click', async (ev) => {
   setTimeout(() => { btn.textContent = prev; }, 1600);
 });
 function showRecipePanel(): void {
-  document.body.dataset.workspace = 'explore';
-  document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll<HTMLElement>('.content > .tab-panel').forEach(p => p.classList.remove('active'));
-  // Keep Explore highlighted: the recipe is a property of a smell, not a
-  // top-level destination. The panel is reached from the smell detail.
-  document.querySelector<HTMLElement>('.tab-btn[data-tab="explore"]')?.classList.add('active');
-  document.getElementById('panel-recipe')?.classList.add('active');
+  // Recipes are part of the analysis workbench; opening one from a smell
+  // should not silently move the person into a hidden panel.
+  showWorkspaceView('recipes');
 }
 
 document.getElementById('recipeBack')?.addEventListener('click', () => {
@@ -8597,6 +8660,37 @@ async function selectedSessionRecord(): Promise<SessionRecord | null> {
   return s;
 }
 
+/** Open the recipe workbench with a trim step already targeted at the selected
+ *  recording. Run previews the cut; Save .osmell adds the derived recording
+ *  back to the library. This is the edit path; the original is never overwritten. */
+function openTrimEditorForSession(): void {
+  const rec = sessions[selectedSession ?? -1];
+  if (!rec?.file_id) {
+    void flashStatus('libStatus', 'Select an indexed recording first.');
+    return;
+  }
+  showWorkspaceView('recipes');
+  void (async () => {
+    await ensureRecipeOps();
+    const raw = parseFloat((rec.duration || '').replace(/[^0-9.]/g, ''));
+    const end = Number.isFinite(raw) && raw > 0 ? Math.round(raw * 10) / 10 : 10;
+    const base = (rec.substance && rec.substance !== 'unknown' ? rec.substance : rec.label) || 'Recording';
+    openRecipeEditor({
+      id: `trim-${rec.file_id!.slice(0, 8)}-${Date.now().toString(36)}`,
+      name: `${base} trimmed`,
+      version: '1.0.0',
+      source: `osmell:${rec.file_id}`,
+      steps: [{ op: 'trim.range', channel: null, params: { start: 0, end } }],
+      notes: '',
+    });
+    const msg = document.getElementById('recMsg');
+    if (msg) {
+      msg.style.color = 'var(--text-3)';
+      msg.textContent = `Trim ${base}: set start/end seconds, Run to preview, Save .osmell to keep a derived recording.`;
+    }
+  })();
+}
+
 async function flashStatus(id: string, msg: string, color?: string) {
   const el = document.getElementById(id);
   if (!el) return;
@@ -8628,6 +8722,8 @@ document.getElementById('inspDelete')!.addEventListener('click', async () => {
     await flashStatus('libStatus', `Delete failed: ${e}`, 'var(--red)');
   }
 });
+
+document.getElementById('inspTrim')?.addEventListener('click', () => openTrimEditorForSession());
 
 document.getElementById('inspExport')!.addEventListener('click', async () => {
   const s = await selectedSessionRecord();
@@ -10344,6 +10440,15 @@ function initRecipes() {
   document.getElementById('recAddStep')?.addEventListener('click', () => {
     hideRecipeResult();
     document.getElementById('recSteps')!.insertAdjacentHTML('beforeend', recipeStepRow());
+  });
+  document.getElementById('recAddTrim')?.addEventListener('click', () => {
+    hideRecipeResult();
+    document.getElementById('recSteps')!.insertAdjacentHTML('beforeend', recipeStepRow('trim.range', '', 'start=0,end=10'));
+    const msg = document.getElementById('recMsg');
+    if (msg) {
+      msg.style.color = 'var(--text-3)';
+      msg.textContent = 'Trim step added. Set start/end seconds, then Run.';
+    }
   });
   document.getElementById('recRun')?.addEventListener('click', runRecipe);
   document.getElementById('recSaveResult')?.addEventListener('click', saveRecipeResult);
