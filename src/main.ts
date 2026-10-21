@@ -4802,6 +4802,16 @@ function renderHomeGlance(): void {
       .filter(v => v && v !== 'unknown'),
   );
   const installed = Domain.loadInstalledIds().length;
+  const recent: { index: number; name: string }[] = [];
+  const seen = new Set<string>();
+  sessions.forEach((s, index) => {
+    const name = (s.substance || '').trim();
+    if (!name || name.toLowerCase() === 'unknown') return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    recent.push({ index, name });
+  });
   host.innerHTML = [
     '<span>Library</span>',
     `<button type="button" data-home-go="smells">${named.size} smell${named.size === 1 ? '' : 's'}</button>`,
@@ -4809,9 +4819,29 @@ function renderHomeGlance(): void {
     `<button type="button" data-home-go="sessions">${sessions.length} recording${sessions.length === 1 ? '' : 's'}</button>`,
     '<i>·</i>',
     `<button type="button" data-home-go="vials">${installed} domain Vial${installed === 1 ? '' : 's'}</button>`,
+    ...(recent.length ? [
+      '<span class="home-glance-break"></span>',
+      '<span>Recent</span>',
+      ...recent.slice(0, 3).flatMap((r, i) => [
+        ...(i ? ['<i>·</i>'] : []),
+        `<button type="button" data-home-recent="${r.index}">${escapeHtmlText(r.name)}</button>`,
+      ]),
+    ] : []),
   ].join('');
   host.querySelectorAll<HTMLButtonElement>('[data-home-go]').forEach(btn => {
     btn.addEventListener('click', () => showWorkspaceView(btn.dataset.homeGo || 'smells'));
+  });
+  host.querySelectorAll<HTMLButtonElement>('[data-home-recent]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const index = parseInt(btn.dataset.homeRecent || '-1', 10);
+      if (!(index >= 0) || !sessions[index]) return;
+      selectedSession = index;
+      showWorkspaceView('sessions');
+      window.setTimeout(() => {
+        const rec = sessions[index];
+        if (rec) inspectSession(rec);
+      }, 30);
+    });
   });
 }
 
