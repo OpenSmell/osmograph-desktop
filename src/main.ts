@@ -8,6 +8,19 @@ import * as VialRuntime from './vialRuntime';
 import { fetchVialRegistry, type RegistryVialEntry } from './vialRegistry';
 import { GUIDE_SECTIONS, guideSection } from './guide';
 
+// Read a design token from :root once; canvas code must not re-hardcode the
+// same colors the CSS already owns, or a future theme change silently forks.
+// Declared before PALETTE_ANCHORS, which calls it during module evaluation.
+const CSS_TOKEN_CACHE = new Map<string, string>();
+function cssToken(name: string): string {
+  let v = CSS_TOKEN_CACHE.get(name);
+  if (!v) {
+    v = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#000000';
+    CSS_TOKEN_CACHE.set(name, v);
+  }
+  return v;
+}
+
 // === Constants ===
 const MAX_TRACE = 800;
 const MAX_HISTORY = 20000; // long rolling history for scrub / rewind (beyond the 800-sample view)
@@ -118,18 +131,6 @@ const PRESETS: Record<string, { name: string; sensors: string[] }> = {
   '6-sensor-full': { name: '6-Sensor Full', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8'] },
   '8-sensor-max': { name: '8-Sensor Max', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8', 'MQ-2', 'MQ-9'] },
 };
-
-// Read a design token from :root once; canvas code must not re-hardcode the
-// same colors the CSS already owns, or a future theme change silently forks.
-const CSS_TOKEN_CACHE = new Map<string, string>();
-function cssToken(name: string): string {
-  let v = CSS_TOKEN_CACHE.get(name);
-  if (!v) {
-    v = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#000000';
-    CSS_TOKEN_CACHE.set(name, v);
-  }
-  return v;
-}
 
 // === Channel kinds ===
 // Semantic meaning per streamed column. Default: classic analog MOX. Firmware
