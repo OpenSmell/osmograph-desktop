@@ -256,6 +256,22 @@ for (const tab of tabs) {
   }
 }
 
+// Settings subpages: every item in the left rail must open a real panel.
+await page.click('.tab-btn[data-tab="settings"]').catch(() => {});
+await page.waitForTimeout(300);
+const sysNavs = await page.$$eval('.sys-nav-item[data-sys]', els => els.map(e => e.dataset.sys).filter(Boolean));
+for (const sys of sysNavs) {
+  await page.click(`.sys-nav-item[data-sys="${sys}"]`).catch(() => errors.push(`settings nav ${sys} failed`));
+  await page.waitForTimeout(220);
+  const open = await page.evaluate((s) => {
+    const el = document.getElementById(`sys-${s}`);
+    return !!el && getComputedStyle(el).display !== 'none';
+  }, sys);
+  if (!open) errors.push(`settings panel ${sys} did not open`);
+  await shot(`settings-${sys}`);
+}
+console.log('settings panels:', sysNavs.join(', '));
+
 // Open the installed Fermentation Lab workspace (real sandboxed UI, real host
 // bridge) and capture both the host chrome and the iframe surface.
 // The Home bridge test above leaves a Vial workspace open; close it so the

@@ -250,6 +250,10 @@ function toDataChannels(values: number[]): number[] {
 // === State ===
 let connected = false;
 let activeMode: 'serial' | 'wifi' | 'ble' = 'serial';
+let activePort = '';
+let activeBaud = 0;
+type SerialPortInfo = { name: string; description: string; kind: string; hw_type: string; manufacturer: string };
+let knownPorts: SerialPortInfo[] = [];
 let channelCount = 0;
 let sessionStart: number | null = null;
 let sampleCount = 0;
@@ -1768,9 +1772,70 @@ async function refreshPorts() {
       sel.appendChild(opt);
     }
     updateFwBoardLabel();
+    knownPorts = ports;
+    renderSysPorts();
   } catch (e) {
     console.error('Port refresh failed:', e);
   }
+}
+
+/** The Settings → Connection panel is a real port switchboard: it lists what
+ *  the OS reported, names the open link, and can open/close it without sending
+ *  the user to the titlebar. */
+function renderSysPorts(): void {
+  const host = document.getElementById('sysPortList');
+  const state = document.getElementById('sysConnState');
+  if (!host) return;
+  if (state) {
+    const target = activePort ? ` to <code>${escapeHtmlText(activePort)}</code>` : '';
+    const extras = [
+      activeBaud ? `${activeBaud} baud` : '',
+      `${chNames.length} ch`,
+      connected && activeMode !== 'serial' ? activeMode.toUpperCase() : '',
+    ].filter(Boolean).join(' · ');
+    state.innerHTML = connected
+      ? `<span class="sys-dot on"></span>Connected${target}${extras ? ` · ${extras}` : ''}`
+      : '<span class="sys-dot"></span>Not connected. Pick a port below to open it.';
+  }
+  if (knownPorts.length === 0) {
+    host.innerHTML = '<div class="hint">No serial ports found. Plug the rig in and refresh.</div>';
+    return;
+  }
+  host.innerHTML = knownPorts.map((p) => {
+    const here = connected && activePort === p.name;
+    const label = p.kind === 'osmograph-e-nose' ? 'ESP32 e-nose'
+      : p.kind === 'arduino_uno' ? 'Arduino Uno'
+        : p.kind === 'ch340' ? 'CH340 (confirm board in Firmware)'
+          : p.description || p.manufacturer || p.hw_type || 'USB serial';
+    return `<div class="sys-port-row${here ? ' active' : ''}">
+      <code>${escapeHtmlText(p.name)}</code>
+      <span class="sys-port-kind">${escapeHtmlText(label)}</span>
+      <span class="sys-port-desc">${escapeHtmlText(p.manufacturer || '')}</span>
+      <button class="mini-btn${here ? '' : ' primary'}" type="button" data-sys-port="${escapeHtmlText(p.name)}">${here ? 'Disconnect' : 'Connect'}</button>
+    </div>`;
+  }).join('');
+  host.querySelectorAll<HTMLButtonElement>('[data-sys-port]').forEach((btn) => {
+    btn.addEventListener('click', () => { void connectFromSettings(btn.dataset.sysPort || ''); });
+  });
+}
+
+async function connectFromSettings(port: string): Promise<void> {
+  if (!port) return;
+  if (connected && activePort === port) {
+    await toggleConnection();
+    renderSysPorts();
+    return;
+  }
+  if (connected) {
+    await toggleConnection();
+    await new Promise(r => setTimeout(r, 250));
+  }
+  const modeSel = document.getElementById('modeSelect') as HTMLSelectElement | null;
+  if (modeSel && modeSel.value !== 'serial') modeSel.value = 'serial';
+  const sel = document.getElementById('portSelect') as HTMLSelectElement | null;
+  if (sel) sel.value = port;
+  await toggleConnection();
+  renderSysPorts();
 }
 
 // === Last connection memory (Python parity: reconnect to the same port on
@@ -1834,6 +1899,7 @@ function setPlotLink(on: boolean) {
   document.getElementById('dashboardEmpty')?.classList.toggle('show', !on);
   if (!on) clearAnomalyForNoRig();
   renderVialHome();
+  renderSysPorts();
 }
 
 function clearAnomalyForNoRig(): void {
@@ -1855,6 +1921,9 @@ function clearAnomalyForNoRig(): void {
     state: 'unknown', score: null, confidence: null, alertLevel: 0,
     triggeredChannels: 0, consecutive: 0, warming: false, baselineProgress: 0,
   };
+  // Force the next detector pass to re-stamp the DOM instead of treating a
+  // stale key as "nothing changed" while the card says NO RIG.
+  lastAnomalyKey = '';
 }
 
 // Stall watchdog: if we claim to be connected but no reading has arrived for a
@@ -1917,6 +1986,8 @@ async function toggleConnection() {
       await invoke('disconnect_serial');
     }
     connected = false;
+    activePort = '';
+    activeBaud = 0;
     resetLiveBaseline();
     document.getElementById('connectBtn')!.textContent = 'Connect';
     document.getElementById('statusDot')!.className = 'status-dot';
@@ -1946,6 +2017,8 @@ async function toggleConnection() {
     try {
       await invoke('connect_wifi', { host, port: portN, nChannels: channelCount });
       activeMode = 'wifi';
+      activePort = addr;
+      activeBaud = 0;
       connected = true;
       resetLiveBaseline();
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
@@ -1975,6 +2048,8 @@ async function toggleConnection() {
     try {
       await invoke('connect_ble', { address: addr });
       activeMode = 'ble';
+      activePort = addr;
+      activeBaud = 0;
       connected = true;
       resetLiveBaseline();
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
@@ -2003,6 +2078,8 @@ async function toggleConnection() {
       try { await invoke('disconnect_serial'); } catch { /* no prior link */ }
       await invoke('connect_serial', { port, baudRate: baud, nChannels: channelCount });
       activeMode = 'serial';
+      activePort = port;
+      activeBaud = baud;
       connected = true;
       resetLiveBaseline();
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
@@ -12802,8 +12879,12 @@ function adoptLiveLink(): void {
   if (stored?.mode === 'wifi' || stored?.mode === 'ble' || stored?.mode === 'serial') {
     activeMode = stored.mode;
   }
+  if (stored?.port) activePort = stored.port;
+  if (stored?.addr) activePort = stored.addr;
+  if (stored?.baud) activeBaud = parseInt(stored.baud) || 0;
   refreshFpSource();
   updatePlotLinkState();
+  renderSysPorts();
 }
 
 listen<{ device_id: string; firmware_version: string; n_sensors: number }>('serial-info', (event) => {

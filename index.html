@@ -2873,6 +2873,28 @@
       margin-bottom: 12px;
     }
 
+    .sys-conn-state {
+      display: flex; align-items: center; gap: 6px;
+      font-family: var(--font-mono); font-size: 10px; color: var(--text-2);
+      margin: 2px 0 8px;
+    }
+    .sys-conn-state code { font-family: var(--font-mono); color: var(--text-0); }
+    .sys-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex: none; }
+    .sys-dot.on { background: var(--cyan); }
+    .sys-port-list { display: flex; flex-direction: column; }
+    .sys-port-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 0; border-top: var(--hairline) solid var(--border);
+    }
+    .sys-port-row.active { background: var(--bg-2); }
+    .sys-port-row code { font-family: var(--font-mono); font-size: 10px; color: var(--text-0); }
+    .sys-port-kind { font-size: 11px; color: var(--text-2); }
+    .sys-port-desc {
+      font-family: var(--font-mono); font-size: 9px; color: var(--text-3);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .sys-port-row .mini-btn { margin-left: auto; flex: none; }
+
     .about-link {
       color: var(--text-1);
       text-decoration: none;
@@ -4465,11 +4487,12 @@
             <h2>Connection Settings</h2>
             <div class="card">
               <h3>Serial Port</h3>
-              <div class="form-row">
-                <label>Ports</label>
+              <div class="sys-conn-state" id="sysConnState"><span class="sys-dot"></span>Scanning for serial ports…</div>
+              <div class="sys-port-list" id="sysPortList"><div class="hint">Scanning…</div></div>
+              <div class="form-row" style="margin-top:10px">
                 <button id="sysRefreshPorts">Refresh List</button>
+                <span class="hint">The titlebar carries the same link: Connect / Disconnect.</span>
               </div>
-              <p style="margin-top:8px">Select port from the titlebar and click Connect. Use Detect for auto-discovery.</p>
             </div>
             <div class="card">
               <h3>Channels</h3>
