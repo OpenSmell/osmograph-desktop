@@ -4197,6 +4197,35 @@ function currentHostSnapshot(): VialHost.VialHostSnapshot {
   };
 }
 
+function setHomeStage(on: boolean): void {
+  const panel = document.getElementById('panel-dashboard');
+  if (!panel) return;
+  panel.classList.toggle('home-stage', on);
+  if (!on) panel.classList.remove('core-open');
+}
+
+// Whether the tool drawer (core instrument widgets) is open under a stage Vial.
+const HOME_TOOLS_KEY = 'osmograph.homeTools.v1';
+function homeToolsWanted(): boolean {
+  try { return localStorage.getItem(HOME_TOOLS_KEY) === '1'; } catch { return false; }
+}
+
+function wireHomeStageTools(): void {
+  const panel = document.getElementById('panel-dashboard');
+  const btn = document.getElementById('vialHomeTools');
+  if (!panel || !btn) return;
+  if (homeToolsWanted()) {
+    panel.classList.add('core-open');
+    btn.textContent = 'Instrument tools ▾';
+  }
+  btn.addEventListener('click', () => {
+    const open = panel.classList.toggle('core-open');
+    btn.textContent = open ? 'Instrument tools ▾' : 'Instrument tools ▸';
+    try { localStorage.setItem(HOME_TOOLS_KEY, open ? '1' : '0'); } catch { /* ignore */ }
+    if (open) requestAnimationFrame(() => resizeTraces());
+  });
+}
+
 function renderVialHome(): void {
   const body = document.getElementById('vialHomeBody');
   const section = document.getElementById('vialHomeSection');
@@ -4205,13 +4234,10 @@ function renderVialHome(): void {
   const installed = Domain.loadInstalledIds()
     .map(id => Domain.domainPackById(id))
     .filter((pack): pack is Domain.DomainPack => !!pack);
-  const preferred = selectedHomeVialId();
-  const active = (preferred ? installed.find(p => p.id === preferred) : undefined)
-    || (activeDomainPackId ? installed.find(p => p.id === activeDomainPackId) : undefined)
-    || installed.find(p => p.home)
-    || installed[0];
+  const active = effectiveHomeVial(installed);
 
   if (!active) {
+    setHomeStage(false);
     destroyHomeVialRuntime();
     section?.classList.remove('stage');
     body.innerHTML = `<div class="vial-home-empty">No Vial installed. <button class="mini-btn" type="button" data-vial-action="browse">Browse Vials →</button></div>`;
@@ -4221,6 +4247,7 @@ function renderVialHome(): void {
 
   const homeHtml = active.homeUi ? resolveDomainUiHtml(active, 'home') : null;
   if (homeHtml) {
+    setHomeStage(true);
     section?.classList.add('stage');
     if (
       homeVialRuntime
@@ -4235,14 +4262,20 @@ function renderVialHome(): void {
     }
     destroyHomeVialRuntime();
     body.innerHTML = vialHomeStageHtml(active);
+    wireHomeStageTools();
     mountHomeVialRuntime(active, homeHtml);
     return;
   }
 
+  setHomeStage(false);
   section?.classList.remove('stage');
   destroyHomeVialRuntime();
   if (active.homeUi) {
-    body.innerHTML = `<div class="vial-home-empty"><b>${escapeHtmlText(active.name)}</b><br>The compact Home view is not cached. Reinstall this Vial to fetch <code>home.html</code>.<br><button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(active.id)}">Open workspace →</button></div>`;
+    body.innerHTML = `<div class="vial-home-empty"><b>${escapeHtmlText(active.name)}</b><br>The compact Home view is not cached. Reinstall this Vial to fetch <code>home.html</code>.<br><button class="mini-btn" type="button" data-vial-action="reinstall" data-vial-id="${escapeHtmlText(active.id)}">Reinstall this Vial</button> <button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(active.id)}">Open workspace →</button></div>`;
+    body.querySelector<HTMLButtonElement>('[data-vial-action="reinstall"]')?.addEventListener('click', (event) => {
+      const id = (event.currentTarget as HTMLButtonElement).dataset.vialId!;
+      void installDomainVial(id);
+    });
     body.querySelector<HTMLButtonElement>('[data-vial-action="open-workspace"]')?.addEventListener('click', (event) => {
       const id = (event.currentTarget as HTMLButtonElement).dataset.vialId!;
       showWorkspaceView('vials');
@@ -6818,12 +6851,25 @@ const HOME_VIAL_KEY = 'osmograph.homeVial.v1';
 function selectedHomeVialId(): string | null {
   try { return localStorage.getItem(HOME_VIAL_KEY) || null; } catch { return null; }
 }
+/** Which installed Vial actually renders on Home — the same fallback chain
+ *  renderVialHome applies: explicit pick > open workspace > has Home view > first. */
+function effectiveHomeVial(installed: Domain.DomainPack[]): Domain.DomainPack | undefined {
+  const preferred = selectedHomeVialId();
+  return (preferred ? installed.find(p => p.id === preferred) : undefined)
+    || (activeDomainPackId ? installed.find(p => p.id === activeDomainPackId) : undefined)
+    || installed.find(p => p.home)
+    || installed[0];
+}
 function setSelectedHomeVialId(id: string): void {
   try {
     if (id) localStorage.setItem(HOME_VIAL_KEY, id);
     else localStorage.removeItem(HOME_VIAL_KEY);
   } catch { /* ignore */ }
   renderVialHome();
+}
+function toastHomeVialSet(id: string): void {
+  const pack = Domain.domainPackById(id);
+  showToast(pack?.homeUi ? `${pack.name} owns Home.` : `${pack?.name || 'Vial'} set as Home — its workspace view is the Home stage when it has a Home UI.`);
 }
 let activeDomainState: Domain.DomainState | null = null;
 let activeDomainHotspot: string | null = null;
@@ -7095,7 +7141,7 @@ function domainSourceHost(href: string): string {
   try { return new URL(href).hostname; } catch { return ''; }
 }
 
-function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
+function domainCardHtml(pack: Domain.DomainPack, installed: boolean, isHome = false): string {
   const sourceHref = domainSourceHref(pack);
   const sourceHost = domainSourceHost(sourceHref);
   const gate = Domain.validateDomainPack(pack, true);
@@ -7107,6 +7153,7 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
        <details class="ds-row-menu domain-menu">
          <summary title="More actions">⋯</summary>
          <div class="ds-row-menu-pop">
+           <button type="button" data-domain-home="${escapeHtmlText(pack.id)}">${isHome ? '✓ Home' : 'Set as Home'}</button>
            <button type="button" data-domain-docs="${escapeHtmlText(pack.id)}">Docs</button>
            <button type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
            <button type="button" class="ds-remove" data-domain-remove="${escapeHtmlText(pack.id)}">Remove</button>
@@ -7194,7 +7241,7 @@ function renderDomainArea(): void {
   const remote = registryRemotePacks();
   if (installedHost) {
     installedHost.innerHTML = installed.length
-      ? `<div class="domain-grid">${installed.map(p => domainCardHtml(p, true)).join('')}</div>`
+      ? `<div class="domain-grid">${installed.map(p => domainCardHtml(p, true, effectiveHomeVial(installed)?.id === p.id)).join('')}</div>`
       : `<div class="domain-empty"><b>No domain Vials installed.</b><br>Install a workspace to get a protocol, a log, scope limits, and the questions the array cannot answer. <button class="text-link" type="button" data-vials-tab-go="aromatory">Open the Aromatory →</button></div>`;
   }
   if (catalogHost) {
@@ -7545,7 +7592,10 @@ function vialHomeStageHtml(pack: Domain.DomainPack): string {
   return `<div class="vial-home-stage">
     <div class="vial-home-stage-bar">
       <span class="vial-home-stage-title"><span class="vial-runtime-dot"></span>${escapeHtmlText(pack.name)}<span class="coord-tag">home/1</span></span>
+      <span class="domain-risk risk-${escapeHtmlText(pack.risk)}" title="Risk level declared in the Vial manifest">${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}</span>
+      <span class="vial-home-stage-stamp">v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.author)}</span>
       <span class="vial-home-stage-stamp" id="vialHomeStamp">starting…</span>
+      <button id="vialHomeTools" class="mini-btn" type="button" title="Show the live traces, transport and dock metrics">Instrument tools ▸</button>
       <span class="vial-home-stage-lock">host-owned data · sandboxed UI · unsigned</span>
       ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
     </div>
@@ -8123,6 +8173,13 @@ document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   if (target.closest('[data-domain-template]')) { downloadDomainTemplate(); return; }
   if (target.closest('[data-domain-submit]')) {
     void invoke('open_release_page', { url: 'https://github.com/OpenSmell/opensmell-web/issues/new?template=vial-submission.yml' });
+    return;
+  }
+  const homeVial = target.closest<HTMLElement>('[data-domain-home]');
+  if (homeVial?.dataset.domainHome) {
+    setSelectedHomeVialId(homeVial.dataset.domainHome);
+    toastHomeVialSet(homeVial.dataset.domainHome);
+    renderDomainArea();
     return;
   }
   const del = target.closest<HTMLButtonElement>('[data-domain-delete]');
@@ -10766,6 +10823,13 @@ function setRecordButton(active: boolean) {
     near.textContent = label;
     near.classList.toggle('recording', active);
     near.title = active ? 'Stop recording' : 'Start a recording session';
+  }
+  // The phase HUD belongs to the host, not the Vial: never let a stage Vial
+  // hide an in-progress recording. Opening the tool drawer surfaces it.
+  if (active) {
+    document.getElementById('panel-dashboard')?.classList.add('core-open');
+    const tools = document.getElementById('vialHomeTools');
+    if (tools) tools.textContent = 'Instrument tools ▾';
   }
 }
 
