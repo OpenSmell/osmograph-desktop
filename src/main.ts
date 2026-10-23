@@ -1477,6 +1477,16 @@ tracesCanvas?.addEventListener('mouseleave', () => { cursorPX = -1; cursorPY = -
 tracesCanvas?.addEventListener('click', () => { cursorPX = -1; cursorPY = -1; traceDirty = true; drawCrosshairReadout(null); });
 
 // === Data Ingestion ===
+// DEV-only: mirror what the UI actually receives to a local listener so the
+// developer can verify live numbers against the screen. import.meta.env.DEV
+// is statically false in production builds, so this cannot ship.
+function devTap(kind: string, payload: unknown): void {
+  if (!import.meta.env.DEV) return;
+  try {
+    void fetch('http://127.0.0.1:5501/tap', { method: 'POST', body: JSON.stringify({ kind, payload }) }).catch(() => {});
+  } catch { /* ignore */ }
+}
+
 async function ingestReading(values: number[]) {
   if (values.length === 0) return;
   // Self-heal the live buffers to the ACTUAL stream width before pushing.
@@ -12577,6 +12587,7 @@ void Promise.resolve().then(() => renderCustomPresetList());
 // === Tauri Serial Data Event ===
 listen<{ channels: number[]; timestamp: number; raw_line: string }>('serial-data', (event) => {
   const { channels } = event.payload;
+  devTap('reading', event.payload);
   if (channels.length > 0) ingestReading(channels);
 });
 
