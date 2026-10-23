@@ -5,6 +5,28 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" type="image/png" href="/favicon.png" />
   <title>Osmograph — the software for smell</title>
+  <!-- TEMP DIAGNOSTIC (remove after takeover debugging): surfaces any runtime
+       error that would otherwise silently kill UI wiring. Never blocks clicks. -->
+  <script>
+    (function () {
+      const show = (kind, msg) => {
+        let bar = document.getElementById('errTrap');
+        if (!bar) {
+          bar = document.createElement('div');
+          bar.id = 'errTrap';
+          bar.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99999;background:#e11d48;color:#fff;font:11px/1.4 monospace;padding:4px 10px;white-space:pre-wrap;border-bottom:2px solid #7f102b;pointer-events:none;max-height:40vh;overflow:hidden';
+          (document.body ? document.body : document.documentElement).appendChild(bar);
+        }
+        bar.style.display = 'block';
+        bar.textContent += (bar.textContent ? '\\n' : '') + kind + ': ' + msg;
+      };
+      window.addEventListener('error', e => show('JS ERROR', (e.message || '?') + '  @' + (e.filename || '').split('/').pop() + ':' + (e.lineno || '?')));
+      window.addEventListener('unhandledrejection', e => {
+        const r = e.reason;
+        show('REJECTION', String((r && (r.message || r.toString && r.toString())) || r).slice(0, 300));
+      });
+    })();
+  </script>
   <style>
     /* Bundled opensmell-web fonts (Geist / Geist Mono) */
     @font-face { font-family: "Geist"; src: url("/fonts/geist-latin.woff2") format("woff2"); font-weight: 100 900; font-style: normal; font-display: swap; }
