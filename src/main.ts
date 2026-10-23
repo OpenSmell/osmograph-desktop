@@ -16,7 +16,7 @@ const LIVE_WINDOW_DEFAULT = 800; // default trailing-sample window; reset-zoom t
 // readable on the warm paper canvas without going rainbow. The first 8 entries
 // are the hand-tuned anchor hues; anything beyond is generated on the fly so
 // every channel (up to 64) gets its own distinct color.
-const PALETTE_ANCHORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
+const PALETTE_ANCHORS = ['#0891b2', '#4338ca', cssToken('--cyan'), '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 let lastAnomalyKey = '';  // anomaly-card state key: only re-stamp DOM when this CHANGES
 // Wall-clock of the moment this session's detector baseline finished warming.
 // Feeds the vial contract's baseline.ageSec; null until actually observed, so
@@ -118,6 +118,18 @@ const PRESETS: Record<string, { name: string; sensors: string[] }> = {
   '6-sensor-full': { name: '6-Sensor Full', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8'] },
   '8-sensor-max': { name: '8-Sensor Max', sensors: ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8', 'MQ-2', 'MQ-9'] },
 };
+
+// Read a design token from :root once; canvas code must not re-hardcode the
+// same colors the CSS already owns, or a future theme change silently forks.
+const CSS_TOKEN_CACHE = new Map<string, string>();
+function cssToken(name: string): string {
+  let v = CSS_TOKEN_CACHE.get(name);
+  if (!v) {
+    v = getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#000000';
+    CSS_TOKEN_CACHE.set(name, v);
+  }
+  return v;
+}
 
 // === Channel kinds ===
 // Semantic meaning per streamed column. Default: classic analog MOX. Firmware
@@ -670,7 +682,7 @@ function drawTraces() {
   const gutterL = 44, gutterB = 18;
   const pw = w - gutterL, ph = h - gutterB;
 
-  tracesCtx.fillStyle = '#f6f1e7';
+  tracesCtx.fillStyle = cssToken('--bg-1');
   tracesCtx.fillRect(0, 0, w, h);
 
   // Source: frozen snapshot while paused, else the live buffer.
@@ -752,7 +764,7 @@ function drawTraces() {
     tracesCtx.stroke();
     if (!minor) {
       const label = mixed ? `${Math.round(v * 100)}%` : (Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(1)}k` : v.toFixed(0));
-      tracesCtx.fillStyle = '#9a9484';
+      tracesCtx.fillStyle = cssToken('--text-3');
       tracesCtx.fillText(label, gutterL - 6, y);
     }
   }
@@ -781,7 +793,7 @@ function drawTraces() {
       // Seconds ago relative to NOW: the window's right edge sits
       // `liveScrollSeek` samples back from the newest when rewound.
       const secs = Math.round((liveScrollSeek + (wlen - s)) / liveRateHz);
-      tracesCtx.fillStyle = '#9a9484';
+      tracesCtx.fillStyle = cssToken('--text-3');
       tracesCtx.fillText(`${secs}s`, x, ph + 4);
     }
   }
@@ -890,7 +902,7 @@ function drawCrosshair(gutterL: number, pw: number, ph: number, wlen: number) {
   const tbx0 = Math.max(gutterL, Math.min(gutterL + pw - tw - 6, x - tw / 2 - 3));
   tracesCtx.fillStyle = '#0891b2';
   tracesCtx.fillRect(tbx0, 2, tw + 6, 12);
-  tracesCtx.fillStyle = '#f6f1e7';
+  tracesCtx.fillStyle = cssToken('--bg-1');
   tracesCtx.textAlign = 'left';
   tracesCtx.textBaseline = 'middle';
   tracesCtx.fillText(tboxTxt, tbx0 + 3, 8);
@@ -987,7 +999,7 @@ function drawFingerprint(values: number[]) {
 
   // Grid rings
   for (let ring = 1; ring <= 4; ring++) {
-    fpCtx.strokeStyle = '#d7cdba';
+    fpCtx.strokeStyle = cssToken('--border');
     fpCtx.lineWidth = 1;
     fpCtx.beginPath();
     for (let i = 0; i <= n; i++) {
@@ -1003,7 +1015,7 @@ function drawFingerprint(values: number[]) {
   // Axes
   for (let i = 0; i < n; i++) {
     const angle = (i / n) * Math.PI * 2 - Math.PI / 2;
-    fpCtx.strokeStyle = '#d7cdba';
+    fpCtx.strokeStyle = cssToken('--border');
     fpCtx.beginPath();
     fpCtx.moveTo(cx, cy);
     fpCtx.lineTo(cx + Math.cos(angle) * r, cy + Math.sin(angle) * r);
@@ -1027,7 +1039,7 @@ function drawFingerprint(values: number[]) {
 
   // Fill — cyan (live monitoring data accent), per the paper & ink discipline
   fpCtx.fillStyle = 'rgba(14, 116, 144, 0.12)';
-  fpCtx.strokeStyle = '#0e7490';
+  fpCtx.strokeStyle = cssToken('--cyan');
   fpCtx.lineWidth = 2;
   fpCtx.beginPath();
   for (let i = 0; i <= n; i++) {
@@ -2204,7 +2216,7 @@ function autoInspectOwnRig(): void {
 // Session colours must be tellable apart at a glance; the channel palette is
 // deliberately all cool tones, which is wrong for overlaying four recordings.
 const CHART_COLORS = [
-  '#0e7490', // deep cyan
+  cssToken('--cyan'), // deep cyan
   '#b45309', // amber
   '#6d28d9', // violet
   '#15803d', // green
@@ -3457,10 +3469,10 @@ function renderRigSchematic() {
   const stamp = document.getElementById('schStamp');
   if (!svg) return;
   const ink = themeCssVar('--text-1') || '#201f1c';
-  const dim = themeCssVar('--text-3') || '#9a9484';
-  const faint = themeCssVar('--border') || '#d7cdba';
+  const dim = themeCssVar('--text-3') || cssToken('--text-3');
+  const faint = themeCssVar('--border') || cssToken('--border');
   const fillA = themeCssVar('--bg-2') || '#efe8dc';
-  const fillB = themeCssVar('--bg-1') || '#f6f1e7';
+  const fillB = themeCssVar('--bg-1') || cssToken('--bg-1');
   const n = rigChannelCount();
   const auto = n === 0;
   const pins = presetPins(auto ? 6 : n);
@@ -5167,7 +5179,7 @@ function drawFingerprintInto(
   ctx.closePath();
   ctx.fillStyle = 'rgba(14,116,144,0.10)';
   ctx.fill();
-  ctx.strokeStyle = compact ? '#0f6f86' : '#0e7490';
+  ctx.strokeStyle = compact ? '#0f6f86' : cssToken('--cyan');
   ctx.lineWidth = compact ? 1.4 : 2;
   ctx.lineJoin = 'round';
   ctx.stroke();
@@ -5599,7 +5611,7 @@ function drawCheckDifferenceMessage(canvas: HTMLCanvasElement | null, message: s
   canvas.height = Math.floor(h * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#9a9484';
+  ctx.fillStyle = cssToken('--text-3');
   ctx.font = '500 11px "Geist", "Inter", system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -6186,10 +6198,10 @@ function drawCheckCardCanvas(c: CheckCurrent): HTMLCanvasElement | null {
   }
 
   // Verdict panel — the decision, not just a score.
-  const badgeFill = p.verdict === 'separable' ? '#1a1a17'
+  const badgeFill = p.verdict === 'separable' ? cssToken('--text-0')
     : p.verdict === 'fragile' ? '#f6e3bc'
-      : p.verdict === 'confusable' ? '#e11d48' : '#e7dfd0';
-  const badgeText = p.verdict === 'separable' ? '#fbf8f2'
+      : p.verdict === 'confusable' ? cssToken('--red') : '#e7dfd0';
+  const badgeText = p.verdict === 'separable' ? cssToken('--bg-0')
     : p.verdict === 'fragile' ? '#7a5208'
       : p.verdict === 'confusable' ? '#fff' : '#5a5750';
   ctx.fillStyle = badgeFill;
@@ -9002,7 +9014,7 @@ function drawSignedBars(values: number[], channels: string[]): void {
     const frac = Math.min(1, Math.abs(v) / max);
     const width = (frac * 50).toFixed(1);
     const left = v >= 0 ? 50 : 50 - frac * 50;
-    const color = v >= 0 ? '#0e7490' : '#b45309';
+    const color = v >= 0 ? cssToken('--cyan') : '#b45309';
     return `<div class="sd-bar-row">
       <span class="sd-bar-name" title="${esc(ch)}">${esc(ch)}</span>
       <span class="sd-bar-track"><span class="sd-bar-zero"></span><span class="sd-bar-fill" style="left:${left}%;width:${width}%;background:${color}"></span></span>
@@ -10536,7 +10548,7 @@ interface PhaseRecordingSummary {
 
 const PHASE_ORDER = ['baseline', 'exposure', 'recovery'];
 const PHASE_LABELS: Record<string, string> = { baseline: 'Before', exposure: 'During', recovery: 'After' };
-const PHASE_COLORS: Record<string, string> = { baseline: '#1a1a17', exposure: '#e11d48', recovery: '#0e7490' };
+const PHASE_COLORS: Record<string, string> = { baseline: cssToken('--text-0'), exposure: cssToken('--red'), recovery: cssToken('--cyan') };
 
 function phaseLabelOf(name: string): string { return PHASE_LABELS[name] ?? name; }
 function phaseColorOf(name: string): string { return PHASE_COLORS[name] ?? '#888'; }
@@ -12841,7 +12853,7 @@ function drawReplay() {
   replayCanvas.height = Math.max(1, Math.floor(rect.height - 4));
   const w = replayCanvas.width, h = replayCanvas.height;
   const ctx = replayCtx;
-  ctx.fillStyle = '#f6f1e7';
+  ctx.fillStyle = cssToken('--bg-1');
   ctx.fillRect(0, 0, w, h);
 
   ctx.strokeStyle = '#ece4d4';
