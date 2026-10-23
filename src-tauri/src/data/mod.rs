@@ -58,53 +58,53 @@ pub fn recordings_dir() -> PathBuf {
 /// Count the numeric CSV fields on a raw device line, without padding or
 /// truncation. Returns `None` when the line isn't a plausible data line
 /// (fewer than `MIN_DATA_VALUES` numeric tokens, or more than
-/// `MAX_CHANNELS`). Mirrors the lenient `parse_osm_line` tokenizer so a plain
+/// `MAX_CHANNELS`). Mirrors the strict `parse_osm_line` tokenizer so a plain
 /// Arduino/CSV stream (no `OSM` header) is detected exactly like a data line.
 pub fn count_numeric_fields(line: &str) -> Option<usize> {
-    let decoded = line.trim().replace(EXPECTED_HEADER, "");
-    let mut count = 0usize;
-    for part in decoded.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if part.parse::<f64>().is_ok() {
-            count += 1;
-        }
+    let parts = data_tokens(line)?;
+    let all_numeric = parts.iter().all(|part| {
+        part.parse::<f64>().map(|v| v.is_finite()).unwrap_or(false)
+    });
+    if !all_numeric {
+        return None;
     }
-    if count >= MIN_DATA_VALUES && count <= MAX_CHANNELS {
-        Some(count)
+    if parts.len() >= MIN_DATA_VALUES && parts.len() <= MAX_CHANNELS {
+        Some(parts.len())
     } else {
         None
     }
 }
 
-pub fn parse_osm_line(line: &str, expected_channels: usize) -> Option<Vec<f64>> {
+/// Tokenize a data frame. A replacement character means the reader lost bytes
+/// mid-frame; every token must be present, so ragged frames never become data.
+fn data_tokens(line: &str) -> Option<Vec<&str>> {
     let decoded = line.trim();
-    if decoded.is_empty() {
+    if decoded.is_empty() || decoded.contains('\u{FFFD}') {
         return None;
     }
-    let binding = decoded.replace(EXPECTED_HEADER, "");
-    let cleaned = binding.trim();
-
-    let mut values: Vec<f64> = Vec::new();
-    for part in cleaned.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            continue;
-        }
-        if let Ok(v) = part.parse::<f64>() {
-            values.push(v);
-        }
+    let mut parts: Vec<&str> = decoded.split(',').map(str::trim).collect();
+    if parts.first().map(|p| p.eq_ignore_ascii_case(EXPECTED_HEADER)).unwrap_or(false) {
+        parts.remove(0);
     }
-
-    if values.len() < MIN_DATA_VALUES {
+    if parts.is_empty() || parts.iter().any(|part| part.is_empty()) {
         return None;
     }
+    Some(parts)
+}
 
-    values.truncate(expected_channels);
-    while values.len() < expected_channels {
-        values.push(0.0);
+pub fn parse_osm_line(line: &str, expected_channels: usize) -> Option<Vec<f64>> {
+    let parts = data_tokens(line)?;
+    let mut values: Vec<f64> = Vec::with_capacity(parts.len());
+    for part in parts {
+        let value = part.parse::<f64>().ok()?;
+        if !value.is_finite() {
+            return None;
+        }
+        values.push(value);
+    }
+
+    if values.len() < MIN_DATA_VALUES || values.len() != expected_channels {
+        return None;
     }
     Some(values)
 }
@@ -494,22 +494,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lenient_parse_drops_non_numeric() {
-        let v = parse_osm_line("OSM,1.0,abc,2.0,3.0", 6).unwrap();
-        assert_eq!(v, vec![1.0, 2.0, 3.0, 0.0, 0.0, 0.0]);
+    fn strict_parse_rejects_non_numeric() {
+        assert!(parse_osm_line("OSM,1.0,abc,2.0,3.0", 3).is_none());
+        assert!(parse_osm_line("OSM,1.0,,2.0,3.0", 3).is_none());
     }
 
     #[test]
-    fn lenient_parse_requires_three() {
+    fn strict_parse_requires_exact_width() {
         assert!(parse_osm_line("OSM,1.0,2.0", 6).is_none());
-        assert!(parse_osm_line("INFO,device,1.2.3", 6).is_none());
+        assert!(parse_osm_line("OSM,1,2,3,4,5,6,7,8", 6).is_none());
+        assert_eq!(parse_osm_line("1710,205,0,0,0,0", 6).unwrap().len(), 6);
+        assert_eq!(parse_osm_line("OSM,1,2,3", 3).unwrap(), vec![1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn strict_parse_rejects_corrupt_frames() {
+        assert!(parse_osm_line("OSM,1.0,\u{FFFD}\u{FFFD},3.0", 3).is_none());
+        assert!(parse_osm_line("OSM,1.0,NaN,3.0", 3).is_none());
+        assert!(parse_osm_line("OSM,1.0,inf,3.0", 3).is_none());
+        assert!(parse_osm_line("INFO,device,1.2.3", 3).is_none());
         assert!(parse_osm_line("", 6).is_none());
     }
 
     #[test]
-    fn lenient_parse_truncates_to_channels() {
-        let v = parse_osm_line("OSM,1,2,3,4,5,6,7,8", 6).unwrap();
-        assert_eq!(v.len(), 6);
+    fn field_count_reflects_strict_tokens() {
+        assert_eq!(count_numeric_fields("1710,205,0,0,0,0"), Some(6));
+        assert_eq!(count_numeric_fields("OSM,1710,205,0"), Some(3));
+        assert_eq!(count_numeric_fields("OSM,1710,\u{FFFD},0"), None);
+        assert_eq!(count_numeric_fields("RIG,1710,205,0"), None);
+        assert_eq!(count_numeric_fields("1710,205"), None);
     }
 
     #[test]
