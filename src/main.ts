@@ -1548,6 +1548,7 @@ function devTap(kind: string, payload: unknown): void {
     void fetch('http://127.0.0.1:5501/tap', { method: 'POST', body: JSON.stringify({ kind, payload }) }).catch(() => {});
   } catch { /* ignore */ }
 }
+let lastDetectorTapAt = 0;
 
 async function ingestReading(values: number[]) {
   if (values.length === 0) return;
@@ -1606,6 +1607,24 @@ async function ingestReading(values: number[]) {
       baselineProgress: result.baseline_progress ?? 0,
     };
     const stateKey = `${result.warming_up ? 1 : 0}:${result.is_anomaly ? 1 : 0}:${result.alert_level}`;
+    if (import.meta.env.DEV) {
+      const now = Date.now();
+      if (now - lastDetectorTapAt > 1000) {
+        lastDetectorTapAt = now;
+        devTap('detector', {
+          ch: chNames.length,
+          score: result.raw_score,
+          conf: result.calibrated_confidence,
+          anomaly: result.is_anomaly,
+          alert: result.alert_level,
+          triggered: result.triggered_channels,
+          warming: result.warming_up,
+          progress: result.baseline_progress,
+          samples: sampleCount,
+          connected,
+        });
+      }
+    }
     const anomalyStateChanged = stateKey !== lastAnomalyKey;
     if (anomalyStateChanged) {
       lastAnomalyKey = stateKey;
@@ -1965,6 +1984,10 @@ async function toggleConnection() {
 
   if (port) {
     try {
+      // A previous UI lifetime can leave the Rust serial task holding the port
+      // while its reader is silent, so Connect must start from a clean handle.
+      // Disconnecting a link that is not there is harmless.
+      try { await invoke('disconnect_serial'); } catch { /* no prior link */ }
       await invoke('connect_serial', { port, baudRate: baud, nChannels: channelCount });
       activeMode = 'serial';
       connected = true;
@@ -4292,6 +4315,7 @@ function renderVialHome(): void {
     || installed[0];
 
   if (!active) {
+    if (homeTakeoverVialId) clearHomeTakeover();
     destroyHomeVialRuntime();
     section?.classList.remove('stage');
     body.innerHTML = `<div class="vial-home-empty">No Vial installed. <button class="mini-btn" type="button" data-vial-action="browse">Browse Vials →</button></div>`;
@@ -4301,31 +4325,25 @@ function renderVialHome(): void {
 
   const homeHtml = active.homeUi ? resolveDomainUiHtml(active, 'home') : null;
   if (homeHtml) {
-    section?.classList.add('stage');
-    if (
-      homeVialRuntime
-      && !homeVialRuntime.destroyed
-      && homeVialRuntime.pack.id === active.id
-      && homeVialRuntime.pack.version === active.version
-      && homeVialRuntime.uiHtml === homeHtml
-      && homeVialRuntime.iframe.isConnected
-    ) {
-      applyHomeVialMin();
-      void sendVialData(homeVialRuntime, true);
+    if (homeTakeoverVialId === active.id) {
+      renderHomeTakeover(active, homeHtml);
       return;
     }
+    if (homeTakeoverVialId) clearHomeTakeover();
     destroyHomeVialRuntime();
-    body.innerHTML = vialHomeStageHtml(active);
-    document.getElementById('vialHomeMin')?.addEventListener('click', () => {
-      try { localStorage.setItem(HOME_MIN_KEY, homeVialMinimized() ? '0' : '1'); } catch { /* ignore */ }
-      applyHomeVialMin();
+    section?.classList.remove('stage');
+    body.innerHTML = vialHomeBarHtml(active);
+    body.querySelector<HTMLButtonElement>('[data-vial-action="takeover"]')?.addEventListener('click', () => {
+      activateHomeTakeover(active.id);
     });
-    applyHomeVialMin();
-    mountHomeVialRuntime(active, homeHtml);
+    body.querySelector<HTMLButtonElement>('[data-vial-action="open-workspace"]')?.addEventListener('click', () => {
+      showWorkspaceView('vials');
+      openDomainWorkspace(active.id);
+    });
     return;
   }
 
-  section?.classList.remove('stage');
+  if (homeTakeoverVialId) clearHomeTakeover();
   destroyHomeVialRuntime();
   if (active.homeUi) {
     body.innerHTML = `<div class="vial-home-empty"><b>${escapeHtmlText(active.name)}</b><br>The compact Home view is not cached. Reinstall this Vial to fetch <code>home.html</code>.<br><button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(active.id)}">Open workspace →</button></div>`;
@@ -7349,6 +7367,9 @@ interface ActiveVialRuntime {
 const VIAL_SOURCE_KEY = 'osmograph.vial.source.';
 let activeVialRuntime: ActiveVialRuntime | null = null;
 let homeVialRuntime: ActiveVialRuntime | null = null;
+/** Which Vial currently owns Home, if any. Deliberately in-memory: a takeover
+ *  ends when the app restarts, so Home always comes back as the instrument. */
+let homeTakeoverVialId: string | null = null;
 
 function uiCacheKey(id: string, kind: 'workspace' | 'home'): string {
   return kind === 'home' ? `${id}::home` : id;
@@ -7625,36 +7646,99 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
   });
 }
 
-// The Home Vial panel can be collapsed to its title bar without uninstalling.
-// Dismiss is not delete: the manifest, workspace and log all stay.
-const HOME_MIN_KEY = 'osmograph.homeVialMin.v1';
-function homeVialMinimized(): boolean {
-  try { return localStorage.getItem(HOME_MIN_KEY) === '1'; } catch { return false; }
-}
-function applyHomeVialMin(): void {
-  const stage = document.querySelector('#vialHomeBody .vial-home-stage');
-  const btn = document.getElementById('vialHomeMin');
-  const min = homeVialMinimized();
-  stage?.classList.toggle('min', min);
-  if (btn) btn.textContent = min ? 'Expand ▾' : 'Minimize ▴';
-}
-
-function vialHomeStageHtml(pack: Domain.DomainPack): string {  const sourceHref = domainSourceHref(pack);
+// Home belongs to the instrument. A Vial with a home.html gets one compact
+// line; taking over Home is an explicit, reversible act, not a permanent
+// panel that squeezes the live traces.
+function vialHomeBarHtml(pack: Domain.DomainPack): string {
+  const sourceHref = domainSourceHref(pack);
   const sourceHost = domainSourceHost(sourceHref);
-  return `<div class="vial-home-stage">
-    <div class="vial-home-stage-bar">
-      <span class="vial-home-stage-title"><span class="vial-runtime-dot"></span>${escapeHtmlText(pack.name)}<span class="coord-tag">home/1</span></span>
-      <span class="vial-home-stage-stamp" id="vialHomeStamp">starting…</span>
-      <button id="vialHomeMin" class="mini-btn" type="button" title="Collapse the panel to its title bar (the Vial stays installed and its log is kept)">Minimize ▴</button>
-      <span class="vial-home-stage-lock">host-owned data · sandboxed UI · unsigned</span>
-      ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
-    </div>
-    <iframe id="vialHomeFrame" class="vial-home-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="${escapeHtmlText(pack.name)} sandboxed Home view"></iframe>
+  return `<div class="vial-home-bar">
+    <span class="vial-home-stage-title"><span class="vial-runtime-dot"></span>${escapeHtmlText(pack.name)}<span class="coord-tag">home/1</span></span>
+    <span class="vial-home-bar-note">host-owned data · sandboxed UI · unsigned</span>
+    <span class="vial-takeover-fill"></span>
+    ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
+    <button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(pack.id)}">Workspace</button>
+    <button class="mini-btn primary" type="button" data-vial-action="takeover" data-vial-id="${escapeHtmlText(pack.id)}" title="Fill Home with this Vial's sandboxed Home view (exit any time)">Take over Home</button>
   </div>`;
 }
 
-function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
-  const iframe = document.getElementById('vialHomeFrame') as HTMLIFrameElement | null;
+function activateHomeTakeover(id: string): void {
+  const pack = Domain.domainPackById(id);
+  if (!pack?.homeUi) return;
+  if (!resolveDomainUiHtml(pack, 'home')) {
+    showToast('This Vial’s Home view is not cached. Reinstall it to fetch home.html.');
+    return;
+  }
+  activateWorkspace('dashboard');
+  homeTakeoverVialId = id;
+  setSelectedHomeVialId(id);
+  document.getElementById('vialTakeoverExit')?.focus();
+}
+
+function clearHomeTakeover(): void {
+  homeTakeoverVialId = null;
+  document.getElementById('panel-dashboard')?.classList.remove('vial-takeover');
+  const shell = document.getElementById('vialTakeover');
+  if (shell) shell.hidden = true;
+  destroyHomeVialRuntime();
+}
+
+function exitHomeTakeover(notify = true): void {
+  if (!homeTakeoverVialId) return;
+  clearHomeTakeover();
+  renderVialHome();
+  if (notify) showToast('Home returned to the instrument.');
+}
+
+function renderHomeTakeover(pack: Domain.DomainPack, homeHtml: string): void {
+  const panel = document.getElementById('panel-dashboard');
+  const shell = document.getElementById('vialTakeover');
+  if (!panel || !shell) return;
+  panel.classList.add('vial-takeover');
+  shell.hidden = false;
+
+  const name = document.getElementById('vialTakeoverName');
+  if (name) name.textContent = pack.name;
+  const tag = document.getElementById('vialTakeoverTag');
+  if (tag) tag.textContent = `v${pack.version} · home/1`;
+
+  const source = document.getElementById('vialTakeoverSource') as HTMLAnchorElement | null;
+  const href = domainSourceHref(pack);
+  if (source) {
+    if (href) {
+      source.href = href;
+      source.textContent = `${domainSourceHost(href)} ↗`;
+      source.hidden = false;
+    } else {
+      source.hidden = true;
+    }
+  }
+
+  const exit = document.getElementById('vialTakeoverExit');
+  if (exit) exit.onclick = () => exitHomeTakeover();
+  const workspace = document.getElementById('vialTakeoverWorkspace');
+  if (workspace) workspace.onclick = () => {
+    showWorkspaceView('vials');
+    openDomainWorkspace(pack.id);
+  };
+
+  if (
+    homeVialRuntime
+    && !homeVialRuntime.destroyed
+    && homeVialRuntime.pack.id === pack.id
+    && homeVialRuntime.pack.version === pack.version
+    && homeVialRuntime.uiHtml === homeHtml
+    && homeVialRuntime.iframe.isConnected
+  ) {
+    void sendVialData(homeVialRuntime, true);
+    return;
+  }
+  destroyHomeVialRuntime();
+  mountHomeVialRuntime(pack, homeHtml, 'vialTakeoverFrame');
+}
+
+function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: string): void {
+  const iframe = document.getElementById(frameId) as HTMLIFrameElement | null;
   if (!iframe) return;
   destroyHomeVialRuntime(false);
   const sources = runtimeSourceOptions();
@@ -7675,7 +7759,6 @@ function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
     uiHtml,
   };
   homeVialRuntime = runtime;
-  iframe.style.height = `${pack.homeUi?.height || 420}px`;
   iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
   iframe.addEventListener('load', () => {
     if (runtime.destroyed) return;
@@ -8172,6 +8255,10 @@ document.addEventListener('keydown', (ev) => {
   if (ev.key === 'Escape') {
     closeCommandPalette();
     closeGuide();
+    if (homeTakeoverVialId) {
+      ev.preventDefault();
+      exitHomeTakeover();
+    }
     return;
   }
   if (!commandOpen) return;
@@ -12678,8 +12765,33 @@ void Promise.resolve().then(() => renderCustomPresetList());
 listen<{ channels: number[]; timestamp: number; raw_line: string }>('serial-data', (event) => {
   const { channels } = event.payload;
   devTap('reading', event.payload);
+  if (!connected && channels.length > 0) {
+    // The backend can still be streaming when this UI has no link state (hot
+    // reload, or a connect that raced the previous lifetime). Incoming data is
+    // ground truth: adopt the link instead of claiming NO LINK while plotting.
+    adoptLiveLink();
+  }
   if (channels.length > 0) ingestReading(channels);
 });
+
+function adoptLiveLink(): void {
+  if (connected) return;
+  connected = true;
+  devTap('link', { connected: true, adopted: true, mode: activeMode });
+  lastDataAt = Date.now();
+  resetLiveBaseline();
+  const btn = document.getElementById('connectBtn');
+  if (btn) btn.textContent = 'Disconnect';
+  const dot = document.getElementById('statusDot');
+  if (dot) dot.className = 'status-dot ok';
+  setPlotLink(true);
+  const stored = restoreLastConnection();
+  if (stored?.mode === 'wifi' || stored?.mode === 'ble' || stored?.mode === 'serial') {
+    activeMode = stored.mode;
+  }
+  refreshFpSource();
+  updatePlotLinkState();
+}
 
 listen<{ device_id: string; firmware_version: string; n_sensors: number }>('serial-info', (event) => {
   const { device_id, firmware_version, n_sensors } = event.payload;
@@ -14264,7 +14376,34 @@ function bootDone(): void {
 }
 bootLog('initializing UI…');
 bootLog('scanning ports…');
-refreshPorts().then(() => maybeAutoReconnect());
+refreshPorts().then(() => {
+  maybeAutoReconnect();
+  // A single USB-serial instrument is unambiguous: open it instead of sitting
+  // on an empty cockpit until the user hunts for Connect. Saved connections
+  // get first refusal above; this only fires when nothing claimed the port.
+  setTimeout(() => { void autoConnectSoleRig(); }, 1400);
+});
+
+let autoConnectTried = false;
+async function autoConnectSoleRig(): Promise<void> {
+  if (connected || autoConnectTried) return;
+  const mode = (document.getElementById('modeSelect') as HTMLSelectElement | null)?.value;
+  if (mode && mode !== 'serial') return;
+  const sel = document.getElementById('portSelect') as HTMLSelectElement | null;
+  if (!sel) return;
+  const ports = Array.from(sel.options)
+    .map(o => o.value)
+    .filter(v => /^(?:\/dev\/tty(?:USB|ACM)\d+|COM\d+)$/i.test(v));
+  if (ports.length !== 1) return;
+  autoConnectTried = true;
+  sel.value = ports[0];
+  const msg = document.getElementById('connMsg');
+  if (msg) {
+    msg.textContent = `Detected ${ports[0]} — connecting…`;
+    msg.style.color = 'var(--text-2)';
+  }
+  await toggleConnection();
+}
 
 // Restore the last connection and, for serial, reconnect automatically once the
 // remembered port shows up (Python parity). Non-critical — silently no-ops

@@ -532,6 +532,9 @@
       gap: 8px;
       min-width: 0;
       min-height: 0;
+      /* The Vial Home view expands inside this column; scroll the column rather
+         than letting its fixed height crush the trace canvas. */
+      overflow-y: auto;
     }
     .traces-header {
       display: flex;
@@ -643,7 +646,7 @@
       background: var(--bg-0);
       border: var(--hairline) solid var(--border);
       overflow: hidden;
-      min-height: 0;
+      min-height: 280px;
     }
     canvas#traces {
       width: 100%;
@@ -1132,6 +1135,7 @@
     .vial-home-empty button { margin-top: 5px; }
     .vial-ribbon {
       display: flex; align-items: center; gap: 10px; min-height: 30px;
+      flex-shrink: 0;
       padding: 4px 8px; border-top: var(--hairline) solid var(--border);
       border-bottom: var(--hairline) solid var(--border); background: var(--bg-1);
     }
@@ -1160,9 +1164,23 @@
     .vial-ribbon .vial-home-limit { display: none; }
     .vial-ribbon .vial-home-empty { display: flex; align-items: center; gap: 8px; font-size: 10px; }
     .vial-ribbon .vial-home-empty button { margin-top: 0; }
-    .vial-ribbon.stage { display: block; padding: 0; background: var(--bg-1); }
-    .vial-ribbon.stage .vial-ribbon-label { display: none; }
-    .vial-home-stage { border-top: var(--hairline) solid var(--border); }
+    .vial-home-bar { display: flex; align-items: center; gap: 10px; min-width: 0; width: 100%; }
+    .vial-home-bar .vial-takeover-fill { flex: 1; }
+    .vial-home-bar-note { font-family: var(--font-mono); font-size: 8px; color: var(--text-3); white-space: nowrap; }
+    /* Takeover: the Vial's Home view replaces the instrument, never sits under it. */
+    #panel-dashboard.vial-takeover .dashboard { display: none; }
+    .vial-takeover {
+      flex: 1; min-height: 0; display: none; flex-direction: column;
+      margin: 10px; border: var(--hairline) solid var(--border); background: var(--bg-1);
+    }
+    .vial-takeover[hidden] { display: none; }
+    #panel-dashboard.vial-takeover .vial-takeover { display: flex; }
+    .vial-takeover-bar {
+      display: flex; align-items: center; gap: 9px; flex: none; min-height: 30px;
+      padding: 3px 9px; border-bottom: var(--hairline) solid var(--border); background: var(--bg-2);
+    }
+    .vial-takeover-fill { flex: 1; }
+    .vial-takeover-frame { flex: 1; width: 100%; min-height: 0; border: 0; display: block; }
     .vial-home-stage-bar {
       display: flex; align-items: center; gap: 9px; min-height: 26px; padding: 3px 9px;
       border-bottom: var(--hairline) solid var(--border); background: var(--bg-2);
@@ -3635,6 +3653,21 @@
           <span class="bb-fill"></span>
           <button id="bootToFlash" class="green">Flash firmware</button>
           <button id="bootDismiss">Dismiss</button>
+        </div>
+        <!-- Opt-in Vial takeover: a Vial's sandboxed Home view can own this
+             area, but only while the user keeps it activated. Home is the
+             instrument by default. -->
+        <div class="vial-takeover" id="vialTakeover" hidden>
+          <div class="vial-takeover-bar">
+            <span class="vial-home-stage-title"><span class="vial-runtime-dot"></span><b id="vialTakeoverName"></b><span class="coord-tag" id="vialTakeoverTag">home/1</span></span>
+            <span class="vial-home-stage-stamp" id="vialHomeStamp">starting…</span>
+            <span class="vial-takeover-fill"></span>
+            <span class="vial-home-stage-lock">host-owned data · sandboxed UI · unsigned</span>
+            <a class="text-link" id="vialTakeoverSource" target="_blank" rel="noopener noreferrer" hidden></a>
+            <button class="mini-btn" type="button" id="vialTakeoverWorkspace">Workspace</button>
+            <button class="mini-btn primary" type="button" id="vialTakeoverExit" title="Return Home to the live instrument (Esc)">Exit vial view</button>
+          </div>
+          <iframe id="vialTakeoverFrame" class="vial-takeover-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="Sandboxed Vial Home view"></iframe>
         </div>
         <div class="dashboard">
           <div class="traces-area">

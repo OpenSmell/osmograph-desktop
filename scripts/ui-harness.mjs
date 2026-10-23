@@ -21,6 +21,38 @@ const URL_ = arg('url', 'http://localhost:5173');
 const OUT = arg('out', '/tmp/opencode/ui');
 fs.mkdirSync(OUT, { recursive: true });
 
+// Install the real published vials into the test profile (same localStorage
+// contract the Aromatory uses) so the harness exercises the actual sandboxed
+// home/workspace UIs rather than an empty Vials tab.
+const VIALS_DIR = process.env.OSMO_VIALS_DIR || '/home/praisejamesx/Documents/Documents/code/osmograph-vials';
+function readVial(name) {
+  const dir = path.join(VIALS_DIR, name);
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'vial.json'), 'utf8'));
+    const read = (f) => fs.existsSync(path.join(dir, f)) ? fs.readFileSync(path.join(dir, f), 'utf8') : null;
+    return { manifest, ui: read('ui.html'), home: read('home.html') };
+  } catch {
+    return null;
+  }
+}
+const seeded = ['fermentation-lab', 'plant-respiration'].map(readVial).filter(Boolean);
+const seedPacks = seeded.map(v => ({
+  ...v.manifest,
+  sourceUrl: `https://raw.githubusercontent.com/praisejamesx/${v.manifest.id.split('.')[1]}/main/vial.json`,
+}));
+const seedInstalled = seedPacks.map(p => p.id);
+const seedUi = {};
+for (const v of seeded) {
+  if (v.ui) seedUi[v.manifest.id] = { version: v.manifest.version, html: v.ui, fetchedAt: Date.now() };
+  if (v.home) seedUi[v.manifest.id + '::home'] = { version: v.manifest.version, html: v.home, fetchedAt: Date.now() };
+}
+const SEED = `try {
+  localStorage.setItem('osmograph.wizard.seen.v1', '1');
+  localStorage.setItem('osmograph.domain.packs.v1', ${JSON.stringify(JSON.stringify(seedPacks))});
+  localStorage.setItem('osmograph.domain.installed.v1', ${JSON.stringify(JSON.stringify(seedInstalled))});
+  localStorage.setItem('osmograph.domain.ui.v1', ${JSON.stringify(JSON.stringify(seedUi))});
+} catch (e) {}`;
+
 
 
 const browser = await chromium.launch();
@@ -30,8 +62,8 @@ page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.
 page.on('pageerror', e => errors.push('pageerror: ' + (e.stack || e.message)));
 
 await page.addInitScript({ content: MOCK });
-// First-run onboarding must not block automation: mark it seen before boot.
-await page.addInitScript({ content: `try { localStorage.setItem('osmograph.wizard.seen.v1', '1'); } catch (e) {}` });
+// Onboarding + the published vials are installed before the app boots.
+await page.addInitScript({ content: SEED });
 await page.setDefaultTimeout(6000);
 await page.goto(URL_, { waitUntil: 'domcontentloaded' });
 // Boot overlay is removed when init completes; cap the wait so a hang is visible.
@@ -99,6 +131,71 @@ await shot('02-live-after-stream');
 await page.click('.tab-btn[data-tab="dashboard"]').catch(() => {});
 await page.waitForTimeout(500);
 await shot('03-home-live');
+// Home Vial: inert by default (one compact line), takeover only by explicit
+// activation, and a clean exit back to the instrument. The takeover must
+// replace the dashboard rather than squeeze the traces.
+const takeoverBtn = await page.$('[data-vial-action="takeover"]');
+if (takeoverBtn) {
+  const barTraces = await page.evaluate(() => Math.round(document.getElementById('traces')?.getBoundingClientRect().height || 0));
+  console.log('traces height with compact vial bar:', barTraces);
+  await shot('03b-home-vial-bar');
+  await takeoverBtn.click();
+  await page.waitForTimeout(1000);
+  await shot('03c-home-takeover');
+  const take = await page.evaluate(() => {
+    const frame = document.getElementById('vialTakeoverFrame');
+    const rect = frame?.getBoundingClientRect();
+    const dash = document.querySelector('#panel-dashboard .dashboard');
+    return {
+      active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      dashboard: dash ? getComputedStyle(dash).display : 'missing',
+      frame: rect ? [Math.round(rect.width), Math.round(rect.height)] : [0, 0],
+    };
+  });
+  console.log('takeover state:', JSON.stringify(take));
+  if (!take.active || take.dashboard !== 'none') errors.push('takeover did not replace the instrument');
+  if (take.frame[1] < 320) errors.push(`takeover frame too small: ${take.frame[1]}px`);
+
+  // Drive the sandboxed Vial's own button and verify the host acts on it.
+  let bridgeWorkspace = null;
+  for (const f of page.frames()) {
+    if (f === page.mainFrame()) continue;
+    const btn = f.locator('[data-action="open-workspace"]');
+    if (await btn.count()) {
+      await btn.first().click().catch(() => {});
+      await page.waitForTimeout(800);
+      bridgeWorkspace = await page.evaluate(() => document.body.dataset.workspace || '');
+      break;
+    }
+  }
+  console.log('vial bridge -> workspace:', bridgeWorkspace);
+  if (bridgeWorkspace !== 'vials') errors.push('vial bridge: open-workspace did not reach the host');
+  await shot('03d-home-action');
+
+  await page.evaluate(() => document.querySelector('.tab-btn[data-tab="dashboard"]')?.click());
+  await page.waitForTimeout(600);
+  if (!(await page.$('#vialTakeoverExit'))) {
+    errors.push('exit takeover control missing');
+  } else {
+    await page.click('#vialTakeoverExit').catch(() => errors.push('exit takeover not clickable'));
+    await page.waitForTimeout(500);
+  }
+  const back = await page.evaluate(() => {
+    const dash = document.querySelector('#panel-dashboard .dashboard');
+    return {
+      active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      dashboard: dash ? getComputedStyle(dash).display : 'missing',
+      bar: !!document.querySelector('[data-vial-action="takeover"]'),
+    };
+  });
+  console.log('after exit:', JSON.stringify(back));
+  if (back.active || back.dashboard === 'none' || !back.bar) errors.push('takeover exit did not restore Home');
+  await shot('03e-home-exit');
+} else {
+  errors.push('no Vial takeover control found on Home');
+}
+const hCollapsed = await page.evaluate(() => Math.round(document.getElementById('traces')?.getBoundingClientRect().height || 0));
+console.log('traces height collapsed:', hCollapsed);
 const canv = await page.evaluate(() => {
   const out = {};
   for (const id of ['traces', 'fingerprint', 'phenoBars']) {
@@ -127,6 +224,45 @@ for (const tab of tabs) {
     await page.click(`.src-subnav-btn[data-src="${src}"]`).catch(() => errors.push(`click subnav ${src} failed`));
     await shot(`view-${src}`);
   }
+}
+
+// Open the installed Fermentation Lab workspace (real sandboxed UI, real host
+// bridge) and capture both the host chrome and the iframe surface.
+// The Home bridge test above leaves a Vial workspace open; close it so the
+// list (and its Open buttons) is reachable again.
+await page.evaluate(() => {
+  const back = document.getElementById('domainBack');
+  const ws = document.getElementById('domainWorkspace');
+  if (back && ws && getComputedStyle(ws).display !== 'none') back.click();
+});
+await page.waitForTimeout(400);
+await page.click('.tab-btn[data-tab="vials"]').catch(() => {});
+await page.waitForTimeout(400);
+const openSel = '[data-domain-open="praisejamesx.fermentation"]';
+const openBtn = page.locator(openSel);
+if (!(await openBtn.isVisible().catch(() => false))) {
+  await page.click('[data-vials-tab="workspaces"]').catch(() => {});
+  await page.waitForTimeout(400);
+}
+if (await openBtn.isVisible().catch(() => false)) {
+  await openBtn.click().catch(e => errors.push('open vial workspace: ' + e.message));
+  await page.waitForTimeout(1000);
+  await shot('06-vial-workspace');
+  const frames = await page.$$('iframe');
+  for (let i = 0; i < frames.length; i++) {
+    await frames[i].screenshot({ path: path.join(OUT, `06-vial-frame-${i}.png`) }).catch(() => {});
+  }
+  console.log('vial iframes:', frames.length);
+} else {
+  await shot('06-vials-state');
+  console.log('vials state:', JSON.stringify(await page.evaluate(() => ({
+    ws: document.body.dataset.workspace,
+    vialsTabs: [...document.querySelectorAll('[data-vials-tab]')].map(b => ({ t: b.dataset.vialsTab, active: b.classList.contains('active') })),
+    panes: ['vialsWorkspacesPane', 'vialsAromatoryPane', 'vialsDecisionsPane'].map(id => ({ id, visible: !!document.getElementById(id)?.offsetHeight })),
+    openBtns: [...document.querySelectorAll('[data-domain-open]')].map(b => ({ id: b.dataset.domainOpen, visible: !!(b.offsetWidth || b.offsetHeight) })),
+    workspaceEl: !!document.querySelector('.domain-workspace, #domainWorkspace'),
+  }))));
+  errors.push('vial workspace: Open button for praisejamesx.fermentation not found');
 }
 
 fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ errors, tabs }, null, 2));
