@@ -139,7 +139,9 @@ const PRESETS: Record<string, { name: string; sensors: string[] }> = {
 // Kinds drive honest unit tags and keep a mixed MQ+MEMS array comparable.
 type ChannelKind = 'analog_mox' | 'mems_index' | 'env_temp' | 'env_hum' | 'fan';
 const KIND_META: Record<ChannelKind, { unit: string; tag: string }> = {
-  analog_mox: { unit: 'ΔR/R₀', tag: 'MOX' },
+  // The live trace and crosshair plot the raw ADC counts the rig sends; the
+  // normalized ΔR/R₀ is computed for fingerprints and comparisons, not here.
+  analog_mox: { unit: 'ADC', tag: 'MOX' },
   mems_index: { unit: 'idx', tag: 'I²C' },
   env_temp: { unit: '°C', tag: 'T' },
   env_hum: { unit: '%RH', tag: 'RH' },
@@ -541,7 +543,12 @@ function activateWorkspace(ws: WorkspaceKey): void {
   panel.classList.add('active');
   document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(b => b.classList.remove('active'));
   document.querySelector<HTMLElement>(`.tab-btn[data-tab="${ws}"]`)?.classList.add('active');
-  if (ws === 'dashboard') requestAnimationFrame(() => resizeTraces());
+  if (ws === 'dashboard') {
+    requestAnimationFrame(() => {
+      resizeTraces();
+      redrawFingerprintIfReady();
+    });
+  }
 }
 
 function showWorkspaceView(src: string): void {
@@ -790,7 +797,7 @@ function drawTraces() {
     tracesCtx.moveTo(x, 0);
     tracesCtx.lineTo(x, ph);
     tracesCtx.stroke();
-    if (major) {
+    if (major && x < gutterL + pw - 30) {
       // Seconds ago relative to NOW: the window's right edge sits
       // `liveScrollSeek` samples back from the newest when rewound.
       const secs = Math.round((liveScrollSeek + (wlen - s)) / liveRateHz);
@@ -798,6 +805,12 @@ function drawTraces() {
       tracesCtx.fillText(`${secs}s`, x, ph + 4);
     }
   }
+  // Tick alignment can skip the right edge, which made the axis read as if it
+  // ended in the past ("65s … 21s"). Name the present explicitly.
+  const rightSecs = Math.round(liveScrollSeek / liveRateHz);
+  tracesCtx.textAlign = 'right';
+  tracesCtx.fillStyle = cssToken('--text-3');
+  tracesCtx.fillText(rightSecs <= 0 ? 'now' : `${rightSecs}s ago`, gutterL + pw - 2, ph + 4);
   tracesCtx.textAlign = 'left';
   tracesCtx.textBaseline = 'alphabetic';
 
@@ -942,10 +955,11 @@ function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
 // === Canvas: Fingerprint (radar) ===
 const fpCanvas = document.getElementById('fingerprint') as HTMLCanvasElement;
 const fpCtx = fpCanvas.getContext('2d')!;
-// Stable per-channel scale for the live fingerprint radar (peak-hold with slow
-// decay), so a single noisy sample cannot re-normalize the whole radar and make
-// the shape "breathe" or jerk sample to sample.
-let fingerprintScale: number[] = [];
+// One shared peak for the live radar (peak-hold with slow decay), matching how
+// a recorded fingerprint is scaled. Per-channel normalization made every
+// channel look equally responsive: the shape could never say "CH6 moved 4×
+// more than CH1", which is the only thing the radar is for.
+let fingerprintPeak = 0;
 // Where the values currently ON the radar came from. The radar is a live-
 // monitoring surface; a replayed recording may drive it, but then the stamp
 // says REPLAY — cyan never marks replayed data, and a connected rig always
@@ -954,8 +968,45 @@ type FpSource = 'live' | 'replay' | 'capture' | 'idle';
 let fpSource: FpSource = 'idle';
 let lastFpValues: number[] | null = null;
 
+// Live response baseline: the mean of this link's first samples, frozen until
+// the next connect. Raw ADC magnitudes are near-identical across MQ channels,
+// so normalizing by them drew a full hexagon no matter what the array smelled.
+let liveBaseline: number[] | null = null;
+let liveBaselineSum: number[] = [];
+let liveBaselineN = 0;
+const LIVE_BASELINE_SAMPLES = 30;
+
+function resetLiveBaseline(): void {
+  liveBaseline = null;
+  liveBaselineSum = [];
+  liveBaselineN = 0;
+  fingerprintPeak = 0;
+}
+
+function liveResponse(values: number[]): number[] {
+  if (liveBaselineSum.length !== values.length) {
+    liveBaseline = null;
+    liveBaselineSum = new Array(values.length).fill(0);
+    liveBaselineN = 0;
+  }
+  if (!liveBaseline) {
+    liveBaselineN += 1;
+    for (let i = 0; i < values.length; i++) {
+      liveBaselineSum[i] = (liveBaselineSum[i] || 0) + (Number.isFinite(values[i]) ? values[i] : 0);
+    }
+    if (liveBaselineN >= LIVE_BASELINE_SAMPLES) {
+      liveBaseline = liveBaselineSum.map(s => s / liveBaselineN);
+    }
+  }
+  const base = liveBaseline;
+  return values.map((v, i) => {
+    const r0 = base ? base[i] : 0;
+    return r0 > 0 && Number.isFinite(v) ? (v - r0) / r0 : 0;
+  });
+}
+
 const FP_SOURCE_META: Record<FpSource, { text: string; cls: string; title: string }> = {
-  live: { text: 'LIVE', cls: 'fp-source live', title: 'Live monitoring data from the connected rig' },
+  live: { text: 'LIVE', cls: 'fp-source live', title: 'Live per-channel response (ΔR/R₀) against the first 30 samples of this link' },
   replay: { text: 'REPLAY', cls: 'fp-source replay', title: 'Replayed recording — not live data; the detector is not evaluating it' },
   capture: { text: 'CAPTURE', cls: 'fp-source capture', title: 'Tail of previously captured samples — no rig connected' },
   idle: { text: '—', cls: 'fp-source', title: 'No data has reached the radar yet' },
@@ -989,6 +1040,10 @@ function refreshFpSource(): void {
 function drawFingerprint(values: number[]) {
   lastFpValues = values.slice();
   const rect = fpCanvas.parentElement!.getBoundingClientRect();
+  // A hidden tab reports a 0×0 box; sizing the canvas there bakes a 1-px-wide
+  // buffer that CSS then stretches into a sliver. Keep the values and wait for
+  // the ResizeObserver below to fire once the dock is actually visible.
+  if (rect.width < 40 || rect.height < 40) return;
   fpCanvas.width = Math.max(1, Math.floor(rect.width - 8));
   fpCanvas.height = Math.max(80, Math.floor(rect.height - 8));
   const w = fpCanvas.width, h = fpCanvas.height;
@@ -1025,18 +1080,12 @@ function drawFingerprint(values: number[]) {
 
   if (values.length === 0) return;
 
-  // Peak-hold scale per channel with slow decay; seed on first sight. Norming
-  // each axis against its own scale (not one global max) keeps the radar shape
-  // stable while a single channel spikes or the rig idles at baseline.
-  if (fingerprintScale.length !== n) fingerprintScale = new Array(n).fill(0);
-  const norms: number[] = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const mag = Math.abs(values[i] ?? 0);
-    fingerprintScale[i] = fingerprintScale[i] <= 0
-      ? (mag || 1e-9)
-      : Math.max(fingerprintScale[i] * 0.99, mag);
-    norms[i] = fingerprintScale[i] > 0 ? Math.abs(values[i] ?? 0) / fingerprintScale[i] : 0;
-  }
+  // Shared peak-hold scale: a channel responding three times harder must reach
+  // three times farther out. Decay keeps an old burst from flattening the next.
+  const peak = values.reduce((m, v) => Math.max(m, Math.abs(v ?? 0)), 0);
+  fingerprintPeak = Math.max(fingerprintPeak * 0.99, peak, 1e-4);
+  const norms: number[] = values.map(v =>
+    Math.min(1, Math.abs(v ?? 0) / fingerprintPeak));
 
   // Fill — cyan (live monitoring data accent), per the paper & ink discipline
   fpCtx.fillStyle = 'rgba(14, 116, 144, 0.12)';
@@ -1074,6 +1123,19 @@ function drawFingerprint(values: number[]) {
     fpCtx.fillStyle = '#666';
     fpCtx.fillText(chNames[i] || `CH${i}`, lx, ly + 3);
   }
+}
+
+function redrawFingerprintIfReady(): void {
+  if (lastFpValues && lastFpValues.length && fpCanvas.offsetParent !== null) {
+    drawFingerprint(lastFpValues);
+  }
+}
+
+// Home's dock is hidden while another tab is open. Without this, a stream that
+// arrives entirely in the background leaves the fingerprint canvas at 1×N
+// until the next reading — which never comes once the recording stops.
+if (typeof ResizeObserver !== 'undefined') {
+  new ResizeObserver(() => redrawFingerprintIfReady()).observe(fpCanvas.parentElement!);
 }
 
 // === Canvas: Session Fingerprint ===
@@ -1511,7 +1573,7 @@ async function ingestReading(values: number[]) {
   if (samplesEl) samplesEl.textContent = `${sampleCount.toLocaleString()} SAMP`;
 
   // Update fingerprint
-  drawFingerprint(values);
+  drawFingerprint(liveResponse(values));
   refreshFpSource();
 
   try {
@@ -1823,6 +1885,7 @@ async function toggleConnection() {
       await invoke('disconnect_serial');
     }
     connected = false;
+    resetLiveBaseline();
     document.getElementById('connectBtn')!.textContent = 'Connect';
     document.getElementById('statusDot')!.className = 'status-dot';
     setPlotLink(false);
@@ -1852,6 +1915,7 @@ async function toggleConnection() {
       await invoke('connect_wifi', { host, port: portN, nChannels: channelCount });
       activeMode = 'wifi';
       connected = true;
+      resetLiveBaseline();
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
       document.getElementById('statusDot')!.className = 'status-dot ok';
       setPlotLink(true);
@@ -1880,6 +1944,7 @@ async function toggleConnection() {
       await invoke('connect_ble', { address: addr });
       activeMode = 'ble';
       connected = true;
+      resetLiveBaseline();
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
       document.getElementById('statusDot')!.className = 'status-dot ok';
       setPlotLink(true);
@@ -1903,6 +1968,7 @@ async function toggleConnection() {
       await invoke('connect_serial', { port, baudRate: baud, nChannels: channelCount });
       activeMode = 'serial';
       connected = true;
+      resetLiveBaseline();
       document.getElementById('connectBtn')!.textContent = 'Disconnect';
       document.getElementById('statusDot')!.className = 'status-dot ok';
       setPlotLink(true);
@@ -3202,12 +3268,15 @@ function renderFleet() {
   const summary = document.getElementById('fleetSummary')!;
   const recognized = fleetDevices.filter(d => d.is_recognized).length;
   const online = fleetDevices.filter(d => d.status === 'online').length;
-  summary.textContent = `${fleetDevices.length} device(s) · ${recognized} recognized · ${online} online`;
+  summary.textContent = `${fleetDevices.length} device(s) · ${recognized} recognized · ${online} online${connected ? ' · local rig connected' : ''}`;
   if (fleetDevices.length === 0) {
     grid.innerHTML = `<div class="fleet-empty">
-      <b>No device on this link.</b>
-      <p>USB, local network, or a remote host:port. Fleet is where a device stays attached to its source and to the Vial applied to its live stream.</p>
+      <b>No fleet devices registered.</b>
+      <p>${connected
+        ? 'Your rig is connected and streaming on Home. Fleet is where devices stay attached to their source and to the Vial applied to their live stream.'
+        : 'USB, local network, or a remote host:port. Fleet is where a device stays attached to its source and to the Vial applied to its live stream.'}</p>
       <div class="fleet-empty-actions">
+        ${connected ? '<button class="mini-btn" id="fleetEmptyHome" type="button">Open Home</button>' : ''}
         <button class="mini-btn primary" id="fleetEmptyScan" type="button">Scan network</button>
         <button class="mini-btn" id="fleetEmptyRemote" type="button">Connect remote</button>
         <button class="mini-btn" id="fleetEmptySmells" type="button">Explore smells →</button>
@@ -4241,11 +4310,17 @@ function renderVialHome(): void {
       && homeVialRuntime.uiHtml === homeHtml
       && homeVialRuntime.iframe.isConnected
     ) {
+      applyHomeVialMin();
       void sendVialData(homeVialRuntime, true);
       return;
     }
     destroyHomeVialRuntime();
     body.innerHTML = vialHomeStageHtml(active);
+    document.getElementById('vialHomeMin')?.addEventListener('click', () => {
+      try { localStorage.setItem(HOME_MIN_KEY, homeVialMinimized() ? '0' : '1'); } catch { /* ignore */ }
+      applyHomeVialMin();
+    });
+    applyHomeVialMin();
     mountHomeVialRuntime(active, homeHtml);
     return;
   }
@@ -5077,7 +5152,7 @@ function sepPairHtml(p: SmellPairSeparation): string {
     </div>
     <div class="sep-sub">${Number.isFinite(p.acc)
       ? `${Math.round(p.acc * p.nEval)}/${p.nEval} left-out recordings match their own smell${lowerText} · ${comparable} on this array`
-      : `${comparable} recordings on this array — add a second of each for a verdict`}</div>
+      : `${comparable} recordings on this array — add a second recording of each for a verdict`}</div>
     <div class="sep-chans">
       ${active.map(c => `<span class="sep-ch ${c.d >= 2 ? 'good' : c.d >= 1 ? 'mid' : 'poor'}" title="${c.channel} · ${c.feature} · ${c.d.toFixed(1)}σ separation">${c.channel}${c.feature && c.feature !== 'settled' ? ` ${c.feature}` : ''} ${c.d.toFixed(1)}σ</span>`).join('')}
     </div>
@@ -7550,13 +7625,27 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
   });
 }
 
-function vialHomeStageHtml(pack: Domain.DomainPack): string {
-  const sourceHref = domainSourceHref(pack);
+// The Home Vial panel can be collapsed to its title bar without uninstalling.
+// Dismiss is not delete: the manifest, workspace and log all stay.
+const HOME_MIN_KEY = 'osmograph.homeVialMin.v1';
+function homeVialMinimized(): boolean {
+  try { return localStorage.getItem(HOME_MIN_KEY) === '1'; } catch { return false; }
+}
+function applyHomeVialMin(): void {
+  const stage = document.querySelector('#vialHomeBody .vial-home-stage');
+  const btn = document.getElementById('vialHomeMin');
+  const min = homeVialMinimized();
+  stage?.classList.toggle('min', min);
+  if (btn) btn.textContent = min ? 'Expand ▾' : 'Minimize ▴';
+}
+
+function vialHomeStageHtml(pack: Domain.DomainPack): string {  const sourceHref = domainSourceHref(pack);
   const sourceHost = domainSourceHost(sourceHref);
   return `<div class="vial-home-stage">
     <div class="vial-home-stage-bar">
       <span class="vial-home-stage-title"><span class="vial-runtime-dot"></span>${escapeHtmlText(pack.name)}<span class="coord-tag">home/1</span></span>
       <span class="vial-home-stage-stamp" id="vialHomeStamp">starting…</span>
+      <button id="vialHomeMin" class="mini-btn" type="button" title="Collapse the panel to its title bar (the Vial stays installed and its log is kept)">Minimize ▴</button>
       <span class="vial-home-stage-lock">host-owned data · sandboxed UI · unsigned</span>
       ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
     </div>
@@ -10411,6 +10500,7 @@ document.getElementById('fleetGrid')?.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement;
   if (t.id === 'fleetEmptyScan') document.getElementById('fleetScan')?.click();
   else if (t.id === 'fleetEmptyRemote') setFleetRemotePanel(true);
+  else if (t.id === 'fleetEmptyHome') activateWorkspace('dashboard');
   else if (t.id === 'fleetEmptySmells') showWorkspaceView('smells');
   else if (t.closest('[data-fleet-live]')) activateWorkspace('dashboard');
   else if (t.closest('[data-fleet-vials]')) showWorkspaceView('vials');

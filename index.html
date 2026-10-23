@@ -1173,6 +1173,8 @@
     }
     .vial-home-stage-stamp { font-family: var(--font-mono); font-size: 8px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .vial-home-stage-lock { margin-left: auto; font-family: var(--font-mono); font-size: 8px; color: var(--text-3); white-space: nowrap; }
+    .vial-home-stage.min .vial-home-frame { display: none; }
+    .vial-home-stage.min .vial-home-stage-bar { border-bottom: 0; }
     .vial-home-frame { display: block; width: 100%; border: 0; background: var(--bg-1); }
     @media (max-width: 980px) {
       .vial-ribbon .vial-home-headline, .vial-ribbon .vial-home-metric:nth-child(n+3) { display: none; }
@@ -3729,7 +3731,7 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell grow" id="phenoBound">
-                    <div class="pheno-cell-head">Fingerprint <span id="fpSource" class="fp-source">—</span><span class="fp-hint">ⓘ</span><button id="exportFingerprintPng" class="mini fp-save" title="Save this fingerprint as an image" aria-label="Save fingerprint as image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button></div>
+                    <div class="pheno-cell-head">Fingerprint <span id="fpSource" class="fp-source">—</span><span class="fp-hint" title="Per-channel response (ΔR/R₀) against the mean of this link's first 30 samples — the same normalization the recorded fingerprint uses. Raw counts are in the crosshair readout.">ⓘ</span><button id="exportFingerprintPng" class="mini fp-save" title="Save this fingerprint as an image" aria-label="Save fingerprint as image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button></div>
                     <canvas id="fingerprint"></canvas>
                   </div>
                 </div>
