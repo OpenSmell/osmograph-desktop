@@ -563,19 +563,10 @@ function showWorkspaceDefault(ws: WorkspaceKey): void {
 
 installWorkspaceShell();
 
-// Top-level navigation. Legacy aliases (`library`, `compare`, `check`, `train`,
-// `fleet`, `system`, `decide`) stay live for saved commands and deep links.
+// Top-level navigation.
 document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(btn => {
   btn.addEventListener('click', () => {
     const tab = btn.dataset.tab!;
-    if (tab === 'library') { showWorkspaceView('smells'); return; }
-    if (tab === 'compare') { showWorkspaceView('compare'); return; }
-    if (tab === 'check') { showWorkspaceView('check'); return; }
-    if (tab === 'train') { showWorkspaceView('train'); return; }
-    if (tab === 'fleet') { showWorkspaceView('fleet'); return; }
-    if (tab === 'system') { showWorkspaceView('system'); return; }
-    if (tab === 'data') { showWorkspaceView('sessions'); return; }
-    if (tab === 'decide') { showWorkspaceDefault('analyse'); return; }
     if (tab === 'explore' || tab === 'analyse' || tab === 'vials' || tab === 'rig' || tab === 'settings') {
       showWorkspaceDefault(tab as WorkspaceKey);
       return;
@@ -650,7 +641,7 @@ document.getElementById('exportFingerprintPng')?.addEventListener('click', () =>
   document.getElementById('wizardSkip')?.addEventListener('click', close);
   next.addEventListener('click', () => {
     if (step < slides.length - 1) { step++; draw(); }
-    else { close(); (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click(); }
+    else { close(); void showWorkspaceView('smells'); }
   });
   back.addEventListener('click', () => { if (step > 0) { step--; draw(); } });
   draw();
@@ -9383,8 +9374,7 @@ document.getElementById('sdCheck')?.addEventListener('click', () => {
   const b = detailNeighbor && detailNeighbor.key !== a.key ? detailNeighbor : null;
   checkPrefill = { ref: a.key, sample: b?.key };
   closeSmellDetail();
-  document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
-  document.querySelector<HTMLElement>('.src-subnav-btn[data-src="check"]')?.click();
+  showWorkspaceView('check');
 });
 document.getElementById('sdCompare')?.addEventListener('click', () => {
   const a = detailCard;
@@ -9402,8 +9392,8 @@ document.getElementById('sdCompare')?.addEventListener('click', () => {
   if (!ids.length) return;
   closeSmellDetail();
   compareFiles = ids;
-  document.querySelector<HTMLElement>('.tab-btn[data-tab="compare"]')?.click();
-  updateCompare();
+  showWorkspaceView('compare');
+
 });
 
 document.getElementById('smellCompare')?.addEventListener('click', () => {
@@ -9414,8 +9404,7 @@ document.getElementById('smellCompare')?.addEventListener('click', () => {
     .filter(c => smellSel.has(c.key))
     .map(c => (c.groupRecords?.length ? c.groupRecords : c.records).find(r => !!r.file_id)?.file_id)
     .filter((f): f is string => !!f);
-  document.querySelector<HTMLElement>('.tab-btn[data-tab="compare"]')?.click();
-  updateCompare();
+  showWorkspaceView('compare');
 });
 document.getElementById('smellClearSel')?.addEventListener('click', () => {
   smellSel.clear();
@@ -10303,7 +10292,7 @@ document.getElementById('fleetGrid')?.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement;
   if (t.id === 'fleetEmptyScan') document.getElementById('fleetScan')?.click();
   else if (t.id === 'fleetEmptyRemote') setFleetRemotePanel(true);
-  else if (t.id === 'fleetEmptySmells') document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
+  else if (t.id === 'fleetEmptySmells') showWorkspaceView('smells');
   else if (t.closest('[data-fleet-live]')) activateWorkspace('dashboard');
   else if (t.closest('[data-fleet-vials]')) showWorkspaceView('vials');
 });
@@ -12656,8 +12645,7 @@ document.getElementById('bootDismiss')?.addEventListener('click', () => {
 
 document.getElementById('bootToFlash')?.addEventListener('click', () => {
   document.getElementById('bootBanner')?.classList.remove('show');
-  const tab = document.querySelector<HTMLElement>('.tab-btn[data-tab="system"]');
-  tab?.click();
+  showWorkspaceView('system');
   const port = (document.getElementById('portSelect') as HTMLSelectElement).value;
   const fwPort = document.getElementById('fwPort');
   if (fwPort) fwPort.textContent = port || 'No port selected';
