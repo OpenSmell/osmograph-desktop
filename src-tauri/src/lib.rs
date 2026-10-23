@@ -2452,37 +2452,7 @@ fn analyze_session_file(path: &str) -> Result<opensmell::quality::QualityReport,
 /// quality scorer instead of guessing them from a raw CSV.
 fn analyze_osmell_file(p: &std::path::Path) -> Result<opensmell::quality::QualityReport, String> {
     let b = data::osmell_read::read_osmell(p)?;
-    let channels: Vec<opensmell::ChannelSeries> = b
-        .channels
-        .iter()
-        .map(|(id, values)| opensmell::ChannelSeries::new(id.clone(), values.clone()))
-        .collect();
-    // Estimate a fallback sampling rate from the time series when the manifest
-    // does not declare one, so the scorer never sees a zero guess for a valid
-    // bundle (mirrors the CSV parser's heuristic-rate behavior).
-    let fallback_rate = b.sampling_rate_hz.or_else(|| {
-        if b.time.len() >= 2 {
-            let dt = (b.time[1] - b.time[0]).abs();
-            if dt > 0.0 {
-                Some(1.0 / dt)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
-    }).unwrap_or(0.0);
-    let params = opensmell::QualityParams {
-        adc_max: b.adc_max,
-        sampling_rate_hz: b.sampling_rate_hz,
-        guess_sampling_rate_hz: fallback_rate,
-        role: b.role.clone(),
-        baseline_source: b.baseline_source.clone(),
-        r0_samples: b.r0_samples,
-        unsorted_rows: false,
-        non_finite_samples: 0,
-    };
-    Ok(opensmell::compute_quality(&b.time, &channels, &params))
+    Ok(data::osmell_read::score_bundle(&b))
 }
 
 #[tauri::command]

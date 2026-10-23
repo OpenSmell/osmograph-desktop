@@ -24,6 +24,39 @@ pub struct OsmellBundle {
     #[allow(dead_code)] pub events: Vec<Value>,
 }
 
+/// Score a parsed bundle with the 7-factor quality engine. Shared by the
+/// analyze command and the recorder so a saved `.osmell` ships its own
+/// `quality.json` built with the same inference any later re-analysis gets.
+pub fn score_bundle(b: &OsmellBundle) -> opensmell::quality::QualityReport {
+    let channels: Vec<opensmell::ChannelSeries> = b
+        .channels
+        .iter()
+        .map(|(id, values)| opensmell::ChannelSeries::new(id.clone(), values.clone()))
+        .collect();
+    // Estimate a fallback sampling rate from the time series when the manifest
+    // does not declare one, so the scorer never sees a zero guess for a valid
+    // bundle (mirrors the CSV parser's heuristic-rate behavior).
+    let fallback_rate = b.sampling_rate_hz.or_else(|| {
+        if b.time.len() >= 2 {
+            let dt = (b.time[1] - b.time[0]).abs();
+            if dt > 0.0 { Some(1.0 / dt) } else { None }
+        } else {
+            None
+        }
+    }).unwrap_or(0.0);
+    let params = opensmell::QualityParams {
+        adc_max: b.adc_max,
+        sampling_rate_hz: b.sampling_rate_hz,
+        guess_sampling_rate_hz: fallback_rate,
+        role: b.role.clone(),
+        baseline_source: b.baseline_source.clone(),
+        r0_samples: b.r0_samples,
+        unsorted_rows: false,
+        non_finite_samples: 0,
+    };
+    opensmell::compute_quality(&b.time, &channels, &params)
+}
+
 /// Read a `.osmell` bundle from disk (io.py::parse_osmell_file).
 pub fn read_osmell(path: &Path) -> Result<OsmellBundle, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;

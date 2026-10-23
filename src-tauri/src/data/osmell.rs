@@ -561,7 +561,7 @@ impl OsmellRecorder {
         };
         let data_csv = serialize_csv(&all_ts, &data);
 
-        match write_bundle(&path, &manifest_json, &data_csv, &events_json) {
+        match write_scored_bundle(&path, &manifest_json, &data_csv, &events_json) {
             Ok(()) => {
                 self.saved_path = Some(path.clone());
                 log::info!(
@@ -647,11 +647,12 @@ fn serialize_csv(time: &[f64], data: &[(String, Vec<f64>)]) -> String {
     out
 }
 
-/// ZIP bundle writer: manifest.json + data.csv + events.json, DEFLATE.
+/// ZIP bundle writer: manifest.json + data.csv + events.json + (quality.json
+/// when scored), DEFLATE.
 ///
 /// Mirrors `build_osmell`/`write_osmell` (io.py:72-87). MIME type is
 /// `application/vnd.opensmell.osmell`.
-fn write_bundle(path: &Path, manifest: &str, data_csv: &str, events: &str) -> Result<(), String> {
+fn write_bundle(path: &Path, manifest: &str, data_csv: &str, events: &str, quality: Option<&str>) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -669,7 +670,29 @@ fn write_bundle(path: &Path, manifest: &str, data_csv: &str, events: &str) -> Re
     zip.start_file("events.json", opts).map_err(|e| e.to_string())?;
     zip.write_all(events.as_bytes()).map_err(|e| e.to_string())?;
 
+    if let Some(q) = quality {
+        zip.start_file("quality.json", opts).map_err(|e| e.to_string())?;
+        zip.write_all(q.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
     zip.finish().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Write a bundle, then score it and rewrite with its own `quality.json`.
+/// Scoring runs on the assembled bytes (the bundle reader applies the same
+/// channel/ADC inference for recorder saves as for later analysis), so a
+/// saved session always carries the report the library and the training gate
+/// would otherwise compute on demand.
+fn write_scored_bundle(path: &Path, manifest: &str, data_csv: &str, events: &str) -> Result<(), String> {
+    write_bundle(path, manifest, data_csv, events, None)?;
+    let report = super::osmell_read::read_osmell(path).ok()
+        .map(|b| super::osmell_read::score_bundle(&b));
+    if let Some(report) = report {
+        if let Ok(q) = serde_json::to_string_pretty(&report) {
+            write_bundle(path, manifest, data_csv, events, Some(&q))?;
+        }
+    }
     Ok(())
 }
 
@@ -842,7 +865,7 @@ pub fn build_osmell_from_journal(j: &JournalSession) -> Result<PathBuf, String> 
     let events_json = serde_json::to_string_pretty(&json!(events)).map_err(|e| e.to_string())?;
     let data_csv = serialize_csv(&all_ts, &data);
 
-    write_bundle(&path, &manifest_json, &data_csv, &events_json)?;
+    write_scored_bundle(&path, &manifest_json, &data_csv, &events_json)?;
     let _ = std::fs::remove_file(&j.path);
     log::info!("Recovered {} -> {}", j.path.display(), path.display());
     Ok(path)
@@ -947,7 +970,14 @@ mod tests {
         let mut archive = zip::ZipArchive::new(file).unwrap();
         let mut names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
         names.sort();
-        assert_eq!(names, vec!["data.csv", "events.json", "manifest.json"]);
+        // quality.json ships in every recorder bundle — the scorer runs at save
+        // time so the library and the training gate never need a re-analysis.
+        assert_eq!(names, vec!["data.csv", "events.json", "manifest.json", "quality.json"]);
+        let quality: Value = serde_json::from_slice(&read_entry(&mut archive, "quality.json"))
+            .expect("valid quality JSON");
+        assert_eq!(quality["format"], "opensmell-quality");
+        assert!(quality["total"].is_number() || quality["total"].is_null());
+        assert!(quality["badge"].is_string());
 
         let manifest: Value = serde_json::from_slice(&read_entry(&mut archive, "manifest.json"))
             .expect("valid manifest JSON");

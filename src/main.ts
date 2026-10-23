@@ -7726,6 +7726,7 @@ function armOrDeleteDomainPack(id: string, button: HTMLButtonElement): void {
     Domain.deleteCustomPack(id);
     Domain.deleteDomainState(id);
     Domain.clearDomainUi(id);
+    localStorage.removeItem(`osmograph.vial.source.${id}`);
     if (activeDomainPackId === id) closeDomainWorkspace();
     else renderVials();
     renderVialHome();
@@ -8543,6 +8544,9 @@ function armOrDeleteVial(id: string, button: HTMLButtonElement): void {
     window.clearTimeout(vialDeleteArm.timer);
     vialDeleteArm = null;
     Vial.deleteVial(id);
+    // The runtime caches the chosen source per pack; leaving it behind makes a
+    // reinstalled vial with the same id silently inherit stale state.
+    localStorage.removeItem(`osmograph.vial.source.${id}`);
     renderVials();
     closeVialDetail();
     showToast('Vial deleted.');

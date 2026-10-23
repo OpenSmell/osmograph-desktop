@@ -16,7 +16,8 @@ A Tauri v2 desktop app: Rust core in `src-tauri/`, TypeScript UI in `src/` + `in
 - Do not add comments unless they explain *why*.
 - Frontend-only edits hot-reload instantly; editing Rust or `tauri.conf.json` forces a full rebuild.
 - Tauri commands are registered in `src-tauri/src/lib.rs`; keep each JS `invoke('name', {…})` and its Rust handler in sync.
-- The `.osmell` bundle is a ZIP of `manifest.json` + `data.csv` + `events.json`.
+- The `.osmell` bundle is a ZIP of `manifest.json` + `data.csv` + `events.json`
+  + `quality.json` (scored at save time; recorder + recovery paths only).
 - **Never rehost restrictive datasets** — link only. See `NOTICE.md`.
 
 ## Environment note
