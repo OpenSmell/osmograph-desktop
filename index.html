@@ -1162,23 +1162,6 @@
     .vial-ribbon .vial-home-empty button { margin-top: 0; }
     .vial-ribbon.stage { display: block; padding: 0; background: var(--bg-1); }
     .vial-ribbon.stage .vial-ribbon-label { display: none; }
-    /* Vial-owns-Home: when a stage Vial is active, its content is the primary
-       Home surface and the core instrument widgets (traces, transport, dock)
-       collapse into a tool drawer. The host-owned sidebar — detector state,
-       sensor health — never collapses. The titlebar Record button stays
-       one click away either way. */
-    #panel-dashboard.home-stage .dash-core { display: none; }
-    #panel-dashboard.home-stage .vial-ribbon.stage {
-      flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column;
-      border: var(--hairline) solid var(--border); background: var(--bg-1);
-    }
-    #panel-dashboard.home-stage .vial-home-stage { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; border-top: 0; }
-    #panel-dashboard.home-stage .vial-home-frame { flex: 1 1 auto; min-height: 340px; height: auto !important; }
-    #panel-dashboard.home-stage.core-open .dash-core {
-      display: flex; flex: 1 1 0; min-height: 0; flex-direction: column; gap: 8px;
-    }
-    #panel-dashboard.home-stage.core-open .vial-ribbon.stage { flex: 0 0 auto; }
-    #panel-dashboard.home-stage.core-open .vial-home-frame { min-height: 260px; }
     .vial-home-stage { border-top: var(--hairline) solid var(--border); }
     .vial-home-stage-bar {
       display: flex; align-items: center; gap: 9px; min-height: 26px; padding: 3px 9px;
@@ -1798,7 +1781,7 @@
       border: 1px solid currentColor;
     }
     .risk-low { color: var(--green); }
-    .risk-medium { color: var(--yellow); }
+    .risk-medium { color: #a56a0a; }
     .risk-high { color: var(--red); }
     .risk-critical { color: #9f1239; }
     .domain-workspace { display: flex; flex-direction: column; gap: 12px; min-height: 0; flex: none; overflow: visible; }
@@ -3653,11 +3636,6 @@
         </div>
         <div class="dashboard">
           <div class="traces-area">
-            <div class="vial-ribbon" id="vialHomeSection">
-              <span class="vial-ribbon-label">Active Vial</span>
-              <div id="vialHomeBody"></div>
-            </div>
-          <div class="dash-core" id="dashCore">
             <div class="traces-header">
               <h2>Live Sensor Traces</h2>
               <div class="trace-legend" id="traceLegend"></div>
@@ -3712,6 +3690,10 @@
                 </div>
               </div>
             </div>
+            <div class="vial-ribbon" id="vialHomeSection">
+              <span class="vial-ribbon-label">Active Vial</span>
+              <div id="vialHomeBody"></div>
+            </div>
             <div class="dock" id="underDock">
               <div class="dock-head">
                 <span>SYS.PHENO</span>
@@ -3753,7 +3735,6 @@
                 </div>
               </div>
             </div>
-          </div>
           </div>
           <aside class="sidebar">
             <div class="rail-head">
