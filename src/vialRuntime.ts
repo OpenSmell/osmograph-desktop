@@ -41,6 +41,60 @@ export interface VialSeriesWindow {
     values: Array<Array<number | null>>;
     maxAbs: number;
   } | null;
+  /** Baseline-relative response computed with the Vial's declared transforms.
+   *  Null until the Vial declares transforms and the host accepts them. */
+  response: {
+    baseline: VialBaseline;
+    response: VialResponse;
+    conditioning: string[];
+    values: Array<Array<number | null>>;
+  } | null;
+}
+
+export type VialBaseline = 'first-n' | 'session-mean';
+export type VialResponse = 'delta-over-r0' | 'relative' | 'delta';
+
+export const VIAL_BASELINES: VialBaseline[] = ['first-n', 'session-mean'];
+export const VIAL_RESPONSES: VialResponse[] = ['delta-over-r0', 'relative', 'delta'];
+export const VIAL_CONDITIONING = ['median3'] as const;
+
+export interface VialTransforms {
+  baseline: VialBaseline;
+  conditioning: string[];
+  response: VialResponse;
+}
+
+function median3(values: Array<number | null>): Array<number | null> {
+  const out = values.slice();
+  for (let i = 1; i < values.length - 1; i += 1) {
+    const triple = [values[i - 1], values[i], values[i + 1]].filter(
+      (v): v is number => v !== null && Number.isFinite(v),
+    );
+    if (triple.length < 2) continue;
+    triple.sort((a, b) => a - b);
+    out[i] = triple[Math.floor(triple.length / 2)];
+  }
+  return out;
+}
+
+/** Apply the Vial's declared baseline/conditioning/response to a window.
+ *  The host computes this; a Vial never transforms its own raw data. */
+export function applyVialTransforms(window: VialSeriesWindow, t: VialTransforms): VialSeriesWindow {
+  const conditioning = t.conditioning.filter(c => c === 'median3');
+  const values = window.values.map(channel => {
+    const conditioned = conditioning.includes('median3') ? median3(channel) : channel;
+    const finite = conditioned.filter((v): v is number => v !== null && Number.isFinite(v));
+    const head = t.baseline === 'session-mean' ? finite : finite.slice(0, 15);
+    const r0 = head.length ? head.reduce((a, b) => a + b, 0) / head.length : null;
+    return conditioned.map(v => {
+      if (v === null || !Number.isFinite(v)) return null;
+      if (t.response === 'relative') return r0 ? v / r0 : null;
+      if (t.response === 'delta') return r0 === null ? null : v - r0;
+      if (r0 === null || r0 === 0) return null;
+      return (v - r0) / r0;
+    });
+  });
+  return { ...window, response: { baseline: t.baseline, conditioning, response: t.response, values } };
 }
 
 export interface VialEvent {
@@ -88,7 +142,15 @@ export type VialAction =
   | { type: 'open-check' }
   | { type: 'open-vials' }
   | { type: 'open-workspace' }
-  | { type: 'set-source'; source: string };
+  | { type: 'set-source'; source: string }
+  | {
+      type: 'set-detection';
+      enabled: boolean;
+      alertThreshold: number;
+      perChannelLimits: Record<string, number>;
+    }
+  | { type: 'set-transforms'; baseline: string; conditioning: string[]; response: string }
+  | { type: 'set-trajectory'; fields: string[]; intervalMs: number };
 
 export interface VialActionEnvelope {
   vialAction: VialAction;
@@ -98,6 +160,7 @@ export interface VialActionEnvelope {
 const ACTION_TYPES = new Set<VialAction['type']>([
   'ready', 'toast', 'resize', 'save-field', 'add-log', 'remove-log', 'export-log',
   'open-dashboard', 'open-datasets', 'open-check', 'open-vials', 'open-workspace', 'set-source',
+  'set-detection', 'set-transforms', 'set-trajectory',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -153,6 +216,54 @@ export function parseVialActionEnvelope(value: unknown): VialActionEnvelope | nu
   if (type === 'set-source') {
     const source = typeof raw.source === 'string' ? raw.source.slice(0, 120) : '';
     return { nonce, vialAction: { type, source } };
+  }
+  if (type === 'set-detection') {
+    if (!isRecord(raw.perChannelLimits)) return null;
+    const perChannelLimits: Record<string, number> = {};
+    for (const [key, val] of Object.entries(raw.perChannelLimits)) {
+      if (!safeActionKey(key)) continue;
+      const n = typeof val === 'number' ? val : Number(val);
+      if (!Number.isFinite(n) || n < 0) continue;
+      perChannelLimits[key] = Math.min(1e9, n);
+      if (Object.keys(perChannelLimits).length >= 16) break;
+    }
+    const threshold = typeof raw.alertThreshold === 'number' ? raw.alertThreshold : Number(raw.alertThreshold);
+    return {
+      nonce,
+      vialAction: {
+        type,
+        enabled: raw.enabled !== false,
+        alertThreshold: Number.isFinite(threshold) ? Math.min(1, Math.max(0, threshold)) : 0.5,
+        perChannelLimits,
+      },
+    };
+  }
+  if (type === 'set-transforms') {
+    const baseline = typeof raw.baseline === 'string' ? raw.baseline.slice(0, 40) : '';
+    const response = typeof raw.response === 'string' ? raw.response.slice(0, 40) : '';
+    const conditioning: string[] = [];
+    if (Array.isArray(raw.conditioning)) {
+      for (const item of raw.conditioning) {
+        if (typeof item !== 'string') continue;
+        conditioning.push(item.slice(0, 40));
+        if (conditioning.length >= 8) break;
+      }
+    }
+    if (!baseline || !response) return null;
+    return { nonce, vialAction: { type, baseline, conditioning, response } };
+  }
+  if (type === 'set-trajectory') {
+    const fields: string[] = [];
+    if (Array.isArray(raw.fields)) {
+      for (const item of raw.fields) {
+        if (typeof item !== 'string') continue;
+        if (!safeActionKey(item)) continue;
+        fields.push(item.slice(0, 40));
+        if (fields.length >= 8) break;
+      }
+    }
+    const intervalMs = clampInt(raw.intervalMs, 1000, 600000, 10000);
+    return { nonce, vialAction: { type, fields, intervalMs } };
   }
   return { nonce, vialAction: { type } as VialAction };
 }
@@ -339,7 +450,33 @@ function bridgeScript(nonce: string): string {
     },
     action: send,
     ready: function(){ send({ type: "ready" }); },
-    toast: function(message){ send({ type: "toast", message: String(message || "") }); }
+    toast: function(message){ send({ type: "toast", message: String(message || "") }); },
+    setDetection: function(config){
+      config = config || {};
+      send({
+        type: "set-detection",
+        enabled: config.enabled !== false,
+        alertThreshold: typeof config.alertThreshold === "number" ? config.alertThreshold : 0.5,
+        perChannelLimits: config.perChannelLimits || {}
+      });
+    },
+    setTransforms: function(t){
+      t = t || {};
+      send({
+        type: "set-transforms",
+        baseline: String(t.baseline || "first-n"),
+        conditioning: Array.isArray(t.conditioning) ? t.conditioning : [],
+        response: String(t.response || "delta-over-r0")
+      });
+    },
+    setTrajectory: function(spec){
+      spec = spec || {};
+      send({
+        type: "set-trajectory",
+        fields: Array.isArray(spec.fields) ? spec.fields : [],
+        intervalMs: typeof spec.intervalMs === "number" ? spec.intervalMs : 10000
+      });
+    }
   };
   window.addEventListener("message", function(event) {
     if (event.source !== parent) return;

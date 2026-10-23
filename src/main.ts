@@ -4344,7 +4344,36 @@ async function reloadClassifiers() {
 }
 
 // === Host snapshot → Vial Home ===
-function currentHostSnapshot(): VialHost.VialHostSnapshot {
+/** Per-channel single-unit limits from the live window. A channel is 'dead'
+ *  when the rig reports it stuck, or when every finite sample in the window is
+ *  identical (cv = 0). Dead channels never originate a claim. */
+function channelLimitsFor(): Record<string, VialHost.ChannelLimit> {
+  const limits: Record<string, VialHost.ChannelLimit> = {};
+  const fresh = sensorHealthCache && Date.now() - sensorHealthAt <= 20000 ? sensorHealthCache : null;
+  chNames.forEach((_, i) => {
+    const health = fresh?.find(h => h.channel === i) || null;
+    const values = historyData[i] ? historyData[i].slice() : [];
+    const finite = values.filter(v => Number.isFinite(v));
+    const min = finite.length ? Math.min(...finite) : 0;
+    const max = finite.length ? Math.max(...finite) : 0;
+    const mean = finite.length ? finite.reduce((a, b) => a + b, 0) / finite.length : 0;
+    const std = finite.length
+      ? Math.sqrt(finite.reduce((a, b) => a + (b - mean) ** 2, 0) / finite.length)
+      : 0;
+    const cv = health?.cv ?? (mean !== 0 ? std / Math.abs(mean) : 0);
+    const dead = !!health?.stuck || (finite.length >= 20 && std === 0);
+    limits[`ch${i}`] = {
+      dead,
+      cv,
+      min,
+      max,
+      r0: liveBaseline && Number.isFinite(liveBaseline[i]) && liveBaseline[i] > 0 ? liveBaseline[i] : null,
+    };
+  });
+  return limits;
+}
+
+function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost.VialHostSnapshot {
   const warming = lastAnomalyReading.warming;
   const anomalyState = lastAnomalyReading.state;
   return {
@@ -4387,6 +4416,13 @@ function currentHostSnapshot(): VialHost.VialHostSnapshot {
           confidence: liveSnapshot.current_prediction?.confidence ?? null,
         }
       : { state: 'none', name: null, label: null, confidence: null },
+    channelLimits: channelLimitsFor(),
+    detectionConfig: runtime?.detectionConfig || null,
+    detection: null,
+    transformsApplied: runtime?.transforms
+      ? [runtime.transforms.baseline, ...runtime.transforms.conditioning, runtime.transforms.response]
+      : [],
+    trajectory: runtime ? runtime.trajectory.slice(-600) : [],
   };
 }
 
@@ -7452,6 +7488,12 @@ interface ActiveVialRuntime {
   mount: 'workspace' | 'home';
   destroyed: boolean;
   uiHtml: string;
+  transforms: VialRuntime.VialTransforms | null;
+  detectionConfig: VialHost.VialDetectionConfig | null;
+  trajectoryFields: string[];
+  trajectoryIntervalMs: number;
+  trajectory: VialHost.TrajectoryPoint[];
+  lastTrajectoryAt: number;
 }
 
 const VIAL_SOURCE_KEY = 'osmograph.vial.source.';
@@ -7569,6 +7611,7 @@ function liveVialSeries(): VialRuntime.VialSeriesWindow | null {
     values: sampled.values,
     fingerprint: VialRuntime.fingerprintFromSeries(sampled.values),
     evolution: VialRuntime.evolutionFromSeries(sampled.values),
+    response: null,
   };
 }
 
@@ -7589,6 +7632,7 @@ async function recordingVialSeries(sourceId: string): Promise<VialRuntime.VialSe
       values: sampled.values,
       fingerprint: VialRuntime.fingerprintFromSeries(sampled.values),
       evolution: VialRuntime.evolutionFromSeries(sampled.values),
+      response: null,
     };
   } catch {
     return null;
@@ -7621,6 +7665,93 @@ function vialEvents(): VialRuntime.VialEvent[] {
   return events;
 }
 
+const VIAL_TRAJECTORY_FIELDS = new Set(['anomaly.score', 'anomaly.confidence', 'baseline.progress', 'env.temperature', 'env.humidity']);
+
+function resolveTrajectoryFields(fields: string[]): string[] {
+  const liveIds = new Set(chNames.map((_, i) => `ch${i}`));
+  return fields.filter(f => liveIds.has(f) || VIAL_TRAJECTORY_FIELDS.has(f)).slice(0, 8);
+}
+
+function sampleTrajectory(fields: string[]): Record<string, number> {
+  const values: Record<string, number> = {};
+  const env = lastEnv as { temperature?: number | null; humidity?: number | null } | null;
+  for (const field of fields) {
+    if (field === 'anomaly.score') {
+      if (lastAnomalyReading.score !== null) values[field] = lastAnomalyReading.score;
+      continue;
+    }
+    if (field === 'anomaly.confidence') {
+      if (lastAnomalyReading.confidence !== null) values[field] = lastAnomalyReading.confidence;
+      continue;
+    }
+    if (field === 'baseline.progress') {
+      values[field] = lastAnomalyReading.baselineProgress;
+      continue;
+    }
+    if (field === 'env.temperature') {
+      if (env && typeof env.temperature === 'number') values[field] = env.temperature;
+      continue;
+    }
+    if (field === 'env.humidity') {
+      if (env && typeof env.humidity === 'number') values[field] = env.humidity;
+      continue;
+    }
+    if (field.startsWith('ch')) {
+      const index = Number(field.slice(2));
+      const buffer = historyData[index];
+      if (!buffer) continue;
+      const tail = buffer.slice();
+      const latest = [...tail].reverse().find(v => Number.isFinite(v));
+      if (latest !== undefined) values[field] = latest;
+    }
+  }
+  return values;
+}
+
+function recordVialTrajectory(runtime: ActiveVialRuntime): void {
+  if (runtime.source !== 'live' || !runtime.trajectoryFields.length) return;
+  if (lastAnomalyReading.state === 'unknown') return;
+  const now = Date.now();
+  if (now - runtime.lastTrajectoryAt < runtime.trajectoryIntervalMs) return;
+  const values = sampleTrajectory(runtime.trajectoryFields);
+  if (!Object.keys(values).length) return;
+  runtime.lastTrajectoryAt = now;
+  runtime.trajectory.push({ at: now, values });
+  if (runtime.trajectory.length > VIAL_TRAJECTORY_MAX) {
+    runtime.trajectory.splice(0, runtime.trajectory.length - VIAL_TRAJECTORY_MAX);
+  }
+  try {
+    localStorage.setItem(VIAL_TRAJECTORY_KEY + runtime.pack.id, JSON.stringify(runtime.trajectory));
+  } catch { /* storage full: keep the in-memory series */ }
+}
+
+/** A Vial-declared limit only ever tightens the host's own evidence. The host
+ *  checks each declared channel against its transformed response; it never
+ *  invents a value for a silent channel. */
+function evaluateVialDetection(
+  config: VialHost.VialDetectionConfig,
+  snapshot: VialHost.VialHostSnapshot,
+  series: VialRuntime.VialSeriesWindow | null,
+): VialHost.VialDetectionResult {
+  const triggeredChannels: string[] = [];
+  const responseValues = series?.response?.values || [];
+  for (const [channelId, limit] of Object.entries(config.perChannelLimits)) {
+    const index = snapshot.channels.findIndex(c => c.id === channelId);
+    if (index < 0) continue;
+    const latest = [...(responseValues[index] || [])]
+      .reverse()
+      .find(v => v !== null && Number.isFinite(v));
+    if (latest === undefined || latest === null) continue;
+    if (Math.abs(latest) >= limit) triggeredChannels.push(channelId);
+  }
+  const confidence = snapshot.anomaly.confidence;
+  const confidenceClears = confidence === null || confidence >= config.alertThreshold;
+  return {
+    active: config.enabled && triggeredChannels.length > 0 && confidenceClears,
+    triggeredChannels,
+  };
+}
+
 async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntime, force = false): Promise<void> {
   if (!runtime || runtime.destroyed || !runtime.iframe.isConnected) return;
   if (!force && runtime.source !== 'live') return;
@@ -7634,12 +7765,20 @@ async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntim
     series = runtime.recordingCache.get(runtime.source) || null;
   }
   if (runtime.destroyed || !runtime.iframe.isConnected) return;
+  if (series && runtime.transforms) {
+    series = VialRuntime.applyVialTransforms(series, runtime.transforms);
+  }
+  recordVialTrajectory(runtime);
+  const snapshot = currentHostSnapshot(runtime);
+  if (runtime.detectionConfig && series?.response) {
+    snapshot.detection = evaluateVialDetection(runtime.detectionConfig, snapshot, series);
+  }
   const state = activeDomainState && activeDomainState.packId === runtime.pack.id
     ? activeDomainState
     : Domain.loadDomainState(runtime.pack.id);
   const payload: VialRuntime.VialDataPayload = {
     schema: VialRuntime.VIAL_RUNTIME_SCHEMA,
-    snapshot: currentHostSnapshot(),
+    snapshot,
     series,
     sources: runtime.sources,
     selectedSource: runtime.source,
@@ -7690,6 +7829,88 @@ function destroyHomeVialRuntime(clearFrame = true): void {
   destroyRuntime(homeVialRuntime, clearFrame);
 }
 
+const VIAL_TRAJECTORY_KEY = 'osmograph.vial.trajectory.';
+const VIAL_TRAJECTORY_SPEC_KEY = 'osmograph.vial.trajectorySpec.';
+const VIAL_TRANSFORMS_KEY = 'osmograph.vial.transforms.';
+const VIAL_DETECTION_KEY = 'osmograph.vial.detection.';
+const VIAL_TRAJECTORY_MAX = 2000;
+
+function loadVialTransforms(packId: string): VialRuntime.VialTransforms | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIAL_TRANSFORMS_KEY + packId) || 'null');
+    if (!raw || typeof raw !== 'object') return null;
+    if (!VialRuntime.VIAL_BASELINES.includes(raw.baseline)) return null;
+    if (!VialRuntime.VIAL_RESPONSES.includes(raw.response)) return null;
+    const conditioning = Array.isArray(raw.conditioning)
+      ? raw.conditioning.filter((c: unknown): c is string => typeof c === 'string')
+      : [];
+    return { baseline: raw.baseline, response: raw.response, conditioning };
+  } catch {
+    return null;
+  }
+}
+
+function loadVialDetection(packId: string): VialHost.VialDetectionConfig | null {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIAL_DETECTION_KEY + packId) || 'null');
+    if (!raw || typeof raw !== 'object' || !raw.perChannelLimits) return null;
+    const perChannelLimits: Record<string, number> = {};
+    for (const [key, value] of Object.entries(raw.perChannelLimits)) {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+        perChannelLimits[key] = value;
+      }
+    }
+    return {
+      enabled: raw.enabled !== false,
+      alertThreshold: typeof raw.alertThreshold === 'number' ? raw.alertThreshold : 0.5,
+      perChannelLimits,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function loadVialTrajectory(packId: string): VialHost.TrajectoryPoint[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIAL_TRAJECTORY_KEY + packId) || '[]');
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((p): p is VialHost.TrajectoryPoint => !!p && typeof p.at === 'number' && !!p.values)
+      .slice(-VIAL_TRAJECTORY_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function loadVialTrajectorySpec(packId: string): { fields: string[]; intervalMs: number } {
+  try {
+    const raw = JSON.parse(localStorage.getItem(VIAL_TRAJECTORY_SPEC_KEY + packId) || 'null');
+    if (!raw || !Array.isArray(raw.fields)) return { fields: [], intervalMs: 10000 };
+    return {
+      fields: raw.fields.filter((f: unknown): f is string => typeof f === 'string').slice(0, 8),
+      intervalMs: typeof raw.intervalMs === 'number' ? Math.max(1000, raw.intervalMs) : 10000,
+    };
+  } catch {
+    return { fields: [], intervalMs: 10000 };
+  }
+}
+
+function vialProgrammableState(packId: string): Pick<
+  ActiveVialRuntime,
+  'transforms' | 'detectionConfig' | 'trajectoryFields' | 'trajectoryIntervalMs' | 'trajectory' | 'lastTrajectoryAt'
+> {
+  const trajectory = loadVialTrajectory(packId);
+  const spec = loadVialTrajectorySpec(packId);
+  return {
+    transforms: loadVialTransforms(packId),
+    detectionConfig: loadVialDetection(packId),
+    trajectoryFields: spec.fields,
+    trajectoryIntervalMs: spec.intervalMs,
+    trajectory,
+    lastTrajectoryAt: trajectory.length ? trajectory[trajectory.length - 1].at : 0,
+  };
+}
+
 function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
   const iframe = document.getElementById('vialRuntimeFrame') as HTMLIFrameElement | null;
   if (!iframe) return;
@@ -7712,6 +7933,7 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
     mount: 'workspace',
     destroyed: false,
     uiHtml,
+    ...vialProgrammableState(pack.id),
   };
   activeVialRuntime = runtime;
   iframe.style.height = `${pack.ui?.height || 900}px`;
@@ -7847,6 +8069,7 @@ function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: 
     mount: 'home',
     destroyed: false,
     uiHtml,
+    ...vialProgrammableState(pack.id),
   };
   homeVialRuntime = runtime;
   iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
@@ -7962,6 +8185,69 @@ function handleVialAction(runtime: ActiveVialRuntime, action: VialRuntime.VialAc
           void sendVialData(other, true);
         }
       }
+      break;
+    }
+    case 'set-detection': {
+      const snapshot = currentHostSnapshot(runtime);
+      if (snapshot.source !== 'live') {
+        showToast('Detection is only configurable on a live rig.');
+        return;
+      }
+      const channelIds = new Set(snapshot.channels.map(c => c.id));
+      const declared = Object.keys(action.perChannelLimits);
+      if (!declared.length) {
+        showToast('Declare at least one per-channel limit.');
+        return;
+      }
+      const unknown = declared.filter(id => !channelIds.has(id));
+      if (unknown.length) {
+        showToast(`Unknown channel: ${unknown.join(', ')}.`);
+        return;
+      }
+      const dead = declared.filter(id => snapshot.channelLimits[id]?.dead);
+      if (dead.length) {
+        showToast(`${dead.join(', ')} ${dead.length === 1 ? 'is' : 'are'} silent on this rig — no limit can be supported there.`);
+        return;
+      }
+      if (!snapshot.channels.some(c => !snapshot.channelLimits[c.id]?.dead)) {
+        showToast('All channels are silent or dead; detection stays off.');
+        return;
+      }
+      runtime.detectionConfig = action;
+      localStorage.setItem(VIAL_DETECTION_KEY + runtime.pack.id, JSON.stringify(action));
+      showToast(snapshot.baseline.state === 'ready'
+        ? 'Detection accepted for this rig.'
+        : 'Detection saved. It applies when the baseline is ready.');
+      refreshVialRuntimes(runtime.pack.id);
+      break;
+    }
+    case 'set-transforms': {
+      const baseline = action.baseline as VialRuntime.VialBaseline;
+      const response = action.response as VialRuntime.VialResponse;
+      if (!VialRuntime.VIAL_BASELINES.includes(baseline)
+        || !VialRuntime.VIAL_RESPONSES.includes(response)) {
+        showToast('Unsupported transform. Host supports first-n/session-mean baseline and delta-over-r0/relative/delta response.');
+        return;
+      }
+      const conditioning = action.conditioning.filter(c => c === 'median3');
+      runtime.transforms = { baseline, response, conditioning };
+      localStorage.setItem(VIAL_TRANSFORMS_KEY + runtime.pack.id, JSON.stringify(runtime.transforms));
+      showToast(`Transforms accepted: ${baseline} → ${response}${conditioning.length ? ` · ${conditioning.join(', ')}` : ''}.`);
+      refreshVialRuntimes(runtime.pack.id);
+      break;
+    }
+    case 'set-trajectory': {
+      const fields = resolveTrajectoryFields(action.fields);
+      if (!fields.length) {
+        showToast('No trackable fields. Use ch0…chN, anomaly.score, anomaly.confidence, baseline.progress, env.temperature, env.humidity.');
+        return;
+      }
+      const intervalMs = Math.max(1000, Math.min(600000, action.intervalMs));
+      runtime.trajectoryFields = fields;
+      runtime.trajectoryIntervalMs = intervalMs;
+      localStorage.setItem(VIAL_TRAJECTORY_SPEC_KEY + runtime.pack.id, JSON.stringify({ fields, intervalMs }));
+      showToast(`Tracking ${fields.length} field(s) every ${Math.round(intervalMs / 1000)}s.`);
+      refreshVialRuntimes(runtime.pack.id);
       break;
     }
   }
@@ -11318,46 +11604,6 @@ document.getElementById('burninReset')!.addEventListener('click', async () => {
 });
 
 
-interface PluginInfo {
-  name: string;
-  path: string;
-  description: string;
-  version: string;
-  kind: string;
-  size_bytes: number;
-  loaded: boolean;
-  error: string;
-}
-
-document.getElementById('pluginRefresh')!.addEventListener('click', refreshPlugins);
-
-async function refreshPlugins() {
-  try {
-    const [plugins, dir] = await Promise.all([
-      invoke<PluginInfo[]>('discover_plugins'),
-      invoke<string>('get_plugins_dir'),
-    ]);
-    const list = document.getElementById('pluginList')!;
-    if (!plugins.length) {
-      list.textContent = 'No plugins loaded';
-      list.style.color = 'var(--text-3)';
-      return;
-    }
-    list.style.color = 'var(--text-2)';
-    list.innerHTML = plugins
-      .map((p) => {
-        const size = p.size_bytes >= 1024 * 1024 ? `${(p.size_bytes / 1048576).toFixed(1)} MB` : `${Math.round(p.size_bytes / 1024)} KB`;
-        const state = p.loaded ? '<span style="color:#1a1a17">&#9679;</span> loaded' : `<span style="color:#e11d48">&#9679;</span> ${p.error || 'stub'}`;
-        return `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><strong>${p.name}</strong> <span style="color:var(--text-3)">v${p.version || '?'} · ${p.kind} · ${size}</span><br/><span style="color:var(--text-3)">${p.description || ''}</span> &nbsp; ${state}</div>`;
-      })
-      .join('');
-    const hint = document.querySelector('#sys-plugins p')!;
-    hint.textContent = `Plugin folder: ${dir}`;
-  } catch {
-    document.getElementById('pluginList')!.textContent = 'Plugin discovery failed';
-  }
-}
-
 // === Datasets catalog ===
 // A dataset has to answer four questions before a person commits: what is inside,
 // how big is the fetch, what may I do with it, and where does it land? The card
@@ -14561,7 +14807,6 @@ renderChangeLog();
 initDatasetCatalog();
 initRecipes();
 refreshBurnIn();
-refreshPlugins();
 refreshDataPanel();
 // A fresh install has no recordings. That is the correct empty state: the
 // library fills from the user's rig, their imports, or a corpus they fetch.

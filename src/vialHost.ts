@@ -50,6 +50,40 @@ export interface HostClassifier {
   confidence: number | null;
 }
 
+/** Per-channel single-unit limits, computed from live data by the host.
+ *  A channel with cv below the dead threshold is flagged dead and excluded
+ *  from derived features. These are the rigor floor: a Vial may tighten
+ *  them but never loosen them below what the data supports. */
+export interface ChannelLimit {
+  dead: boolean;
+  cv: number;
+  min: number;
+  max: number;
+  r0: number | null;
+}
+
+/** Detection config a Vial may declare. The host validates against hardware
+ *  sufficiency before applying; a Vial may tighten limits but never bypass
+ *  a host refusal. */
+export interface VialDetectionConfig {
+  enabled: boolean;
+  alertThreshold: number;   // 0..1, calibrated-confidence-equivalent floor
+  perChannelLimits: Record<string, number>; // channel id -> max allowed delta magnitude
+}
+
+/** A single trajectory point: timestamp + per-field values the Vial asked to track. */
+export interface TrajectoryPoint {
+  at: number;
+  values: Record<string, number>;
+}
+
+/** The host's verdict after applying a Vial-declared detection config to the
+ *  current window. Null when no config is in force. */
+export interface VialDetectionResult {
+  active: boolean;
+  triggeredChannels: string[];
+}
+
 /** The only live state a Vial is allowed to depend on. */
 export interface VialHostSnapshot {
   schema: typeof VIAL_HOST_SCHEMA;
@@ -61,6 +95,17 @@ export interface VialHostSnapshot {
   baseline: HostBaseline;
   anomaly: HostAnomaly;
   classifier: HostClassifier;
+  /** Per-channel limits computed from the live stream. Read-only for the Vial. */
+  channelLimits: Record<string, ChannelLimit>;
+  /** Detection config currently in force. Null until a Vial declares one and
+   *  the host accepts it after the hardware-sufficiency gate. */
+  detectionConfig: VialDetectionConfig | null;
+  /** Host verdict for the declared config; null when no config is in force. */
+  detection: VialDetectionResult | null;
+  /** Transform IDs the host has applied to the live stream. */
+  transformsApplied: string[];
+  /** Recent trajectory points tracked at the Vial's requested interval. */
+  trajectory: TrajectoryPoint[];
 }
 
 export interface VialHomeMetric {
@@ -122,6 +167,11 @@ export function emptyHostSnapshot(now = Date.now()): VialHostSnapshot {
       consecutive: 0,
     },
     classifier: { state: 'none', name: null, label: null, confidence: null },
+    channelLimits: {},
+    detectionConfig: null,
+    detection: null,
+    transformsApplied: [],
+    trajectory: [],
   };
 }
 
