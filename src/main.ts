@@ -1178,6 +1178,68 @@ function drawEvolutionHeatmap(
   ctx.restore();
 }
 
+// Playable evolution: scrub/step through the recording and watch the fingerprint
+// form. Frame is a 0..1 fraction of the timeline; the caption reports the
+// leading movers at the current moment so motion carries information, not
+// decoration.
+let inspPlaying = false;
+let inspFrame = 0;
+let inspPlayRaf = 0;
+let inspPlayLastTs: number | null = null;
+const INSP_BINS = 64;
+const INSP_BINS_PER_SEC = 12;
+
+function inspMomentReadout(matrix: EvolutionMatrix, frame: number): string {
+  const bin = Math.max(0, Math.min(matrix.bins - 1, Math.floor(frame * matrix.bins)));
+  const movers = matrix.channels
+    .map((name, r) => ({ name, v: matrix.values[r]?.[bin] }))
+    .filter(m => m.v != null && Number.isFinite(m.v))
+    .sort((a, b) => Math.abs(b.v!) - Math.abs(a.v!))
+    .slice(0, 3);
+  if (!movers.length) return 'unmeasured';
+  return `at ${Math.round(frame * 100)}% · ${movers.map(m => `${m.name} ${m.v! >= 0 ? '+' : ''}${m.v!.toFixed(2)}`).join(' · ')}`;
+}
+
+function inspectorLabelWidth(w: number): number {
+  return Math.min(58, Math.max(34, w * 0.2));
+}
+
+function stopInspectorPlay(): void {
+  inspPlaying = false;
+  if (inspPlayRaf) { cancelAnimationFrame(inspPlayRaf); inspPlayRaf = 0; }
+  inspPlayLastTs = null;
+  const btn = document.getElementById('inspFpPlay');
+  if (btn) btn.textContent = '▶ Play';
+}
+
+function inspPlayTick(ts: number): void {
+  if (!inspPlaying) { inspPlayRaf = 0; return; }
+  if (inspPlayLastTs !== null && inspectorSeries) {
+    const dt = Math.min(0.2, (ts - inspPlayLastTs) / 1000);
+    inspFrame = Math.min(1, inspFrame + (dt * INSP_BINS_PER_SEC) / INSP_BINS);
+  }
+  inspPlayLastTs = ts;
+  drawInspectorFingerprint();
+  if (inspFrame >= 1) { stopInspectorPlay(); return; }
+  inspPlayRaf = requestAnimationFrame(inspPlayTick);
+}
+
+function startInspectorPlay(): void {
+  if (!inspectorSeries) { showToast('Select a recording first.'); return; }
+  setInspectorFpMode('evolution');
+  if (inspFrame >= 1) inspFrame = 0; // replay from the start, not from the end
+  inspPlaying = true;
+  inspPlayLastTs = null;
+  const btn = document.getElementById('inspFpPlay');
+  if (btn) btn.textContent = '❚❚ Stop';
+  if (!inspPlayRaf) inspPlayRaf = requestAnimationFrame(inspPlayTick);
+}
+
+function toggleInspectorPlay(): void {
+  if (inspPlaying) stopInspectorPlay();
+  else startInspectorPlay();
+}
+
 function drawInspectorFingerprint(): void {
   const canvas = document.getElementById('session-fp') as HTMLCanvasElement | null;
   if (!canvas) return;
@@ -1203,9 +1265,15 @@ function drawInspectorFingerprint(): void {
   }
 
   if (inspectorFpMode === 'evolution') {
-    const matrix = buildEvolutionMatrix(inspectorSeries, 64);
-    drawEvolutionHeatmap(ctx, 0, 0, w, h - 12, matrix, { labels: true });
-    if (caption) caption.textContent = 'Signed response over time · cyan = increase, amber = decrease';
+    const matrix = buildEvolutionMatrix(inspectorSeries!, INSP_BINS);
+    drawEvolutionHeatmap(ctx, 0, 0, w, h - 12, matrix, {
+      labels: true,
+      playhead: inspFrame > 0 || inspPlaying ? inspFrame : null,
+    });
+    if (caption) caption.textContent = inspFrame > 0 || inspPlaying
+      ? inspMomentReadout(matrix, inspFrame)
+      : 'Signed response over time · cyan = increase, amber = decrease · play or click to scrub';
+    canvas.title = 'Click to scrub — the playhead shows when the fingerprint formed';
   } else {
     drawFingerprintInto(ctx, 0, 0, w, h, inspectorFingerprint.values, inspectorFingerprint.channels, { labels: true });
     if (caption) {
@@ -1228,6 +1296,9 @@ async function renderInspectorFingerprint(s: SessionRecord): Promise<void> {
   const token = ++inspectorFpToken;
   inspectorSeries = null;
   inspectorFingerprint = null;
+  // A new recording restarts the story: stop playback, rewind the playhead.
+  stopInspectorPlay();
+  inspFrame = 0;
   drawInspectorFingerprint();
   if (!s.file_id) return;
   try {
@@ -1255,8 +1326,33 @@ async function renderInspectorFingerprint(s: SessionRecord): Promise<void> {
   }
 }
 
-document.getElementById('inspFpMean')?.addEventListener('click', () => setInspectorFpMode('mean'));
-document.getElementById('inspFpEvo')?.addEventListener('click', () => setInspectorFpMode('evolution'));
+document.getElementById('inspFpMean')?.addEventListener('click', () => { stopInspectorPlay(); setInspectorFpMode('mean'); });
+document.getElementById('inspFpEvo')?.addEventListener('click', () => { stopInspectorPlay(); inspFrame = 0; setInspectorFpMode('evolution'); });
+document.getElementById('inspFpPlay')?.addEventListener('click', toggleInspectorPlay);
+
+// Scrub: click / drag on the heatmap seeks the playhead (evolution mode only).
+// Label gutter is subtracted so the seek ratio matches the drawn time axis.
+let inspScrubbing = false;
+(function inspScrubWiring() {
+  const canvas = document.getElementById('session-fp') as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const seek = (ev: PointerEvent | MouseEvent) => {
+    if (inspectorFpMode !== 'evolution' || !inspectorSeries) return;
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(160, canvas.clientWidth || 240);
+    const frac = (ev.clientX - rect.left - inspectorLabelWidth(w)) / Math.max(1, w - inspectorLabelWidth(w));
+    inspFrame = Math.max(0, Math.min(1, frac));
+    drawInspectorFingerprint();
+  };
+  canvas.addEventListener('pointerdown', (ev) => {
+    if (inspPlaying) stopInspectorPlay();
+    inspScrubbing = true;
+    canvas.setPointerCapture(ev.pointerId);
+    seek(ev);
+  });
+  canvas.addEventListener('pointermove', (ev) => { if (inspScrubbing) seek(ev); });
+  canvas.addEventListener('pointerup', () => { inspScrubbing = false; });
+})();
 
 // === Trace Legend ===
 // Toggleable, hover-to-highlight channels (trading-view style). Hovering a chip

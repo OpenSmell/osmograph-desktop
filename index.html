@@ -2591,6 +2591,7 @@
     }
     .fp-mode:hover { color: var(--text-0); background: var(--bg-3); }
     .fp-mode.active { color: var(--text-0); background: var(--bg-4); }
+    .fp-mode.gap-left { margin-left: 6px; }
     canvas#session-fp {
       width: 100%;
       height: 158px;
@@ -4040,6 +4041,7 @@
                 <span class="fp-mode-switch" role="group" aria-label="Fingerprint view">
                   <button id="inspFpMean" class="fp-mode active" type="button" title="Mean settled response">Mean</button>
                   <button id="inspFpEvo" class="fp-mode" type="button" title="Signed response over time">Over time</button>
+                  <button id="inspFpPlay" class="fp-mode gap-left" type="button" title="Play the fingerprint forming — scrub through the recording">▶ Play</button>
                 </span>
               </div>
               <canvas id="session-fp"></canvas>
