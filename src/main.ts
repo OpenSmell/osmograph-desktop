@@ -343,6 +343,7 @@ let traceDirty = true; // set when new samples / crosshair motion arrive; gates 
 let lastTraceDraw = 0;
 let hoverSeries = -1; // legend chip hovered: highlight that channel's trace
 let lastPlotGeo: { wlen: number; gMin: number; gMax: number; slices: number[][] } | null = null;
+let lastSilentKey = '';
 
 // Live transport controls (pause / clear / time-window zoom). Pausing freezes
 // the visible plot on a snapshot; ingestion keeps a live copy, and every
@@ -845,6 +846,17 @@ function drawTraces() {
     }
     tracesCtx.stroke();
     tracesCtx.globalAlpha = 1;
+  }
+
+  // Silent = every visible sample is exactly zero. Name it in the legend; the
+  // flat line stays (honest) but no longer reads as a live measurement.
+  const silentKey = slices.map(s => s.length >= 5 && s.every(v => v === 0) ? '1' : '0').join('');
+  if (silentKey !== lastSilentKey) {
+    lastSilentKey = silentKey;
+    document.querySelectorAll<HTMLElement>('#traceLegend .tl-chip').forEach((chip) => {
+      const ch = parseInt(chip.dataset.ch || '-1', 10);
+      chip.classList.toggle('tl-silent', silentKey[ch] === '1');
+    });
   }
 
   // Remember the visible geometry for crosshair mapping.
@@ -1445,6 +1457,7 @@ function updatePlotScaleNote() {
 }
 function buildLegend() {
   const el = document.getElementById('traceLegend')!;
+  lastSilentKey = '';
   el.innerHTML = chNames.map((name, i) => {
     const k = kindOf(i);
     const meta = KIND_META[k];

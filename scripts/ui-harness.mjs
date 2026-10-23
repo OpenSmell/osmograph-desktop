@@ -131,6 +131,36 @@ await shot('02-live-after-stream');
 await page.click('.tab-btn[data-tab="dashboard"]').catch(() => {});
 await page.waitForTimeout(500);
 await shot('03-home-live');
+
+// Mirror the real CP2102 rig: two active channels and four idle zeros. This
+// catches axis/fingerprint/legend behavior that only a lopsided stream exposes.
+await page.click('#connectBtn').catch(() => {});
+await page.waitForTimeout(400);
+await page.click('#connectBtn').catch(() => {});
+await page.waitForTimeout(500);
+await page.click('#liveClear').catch(() => {});
+await page.waitForTimeout(300);
+await page.evaluate(async () => {
+  const emit = window.__MOCK_EMIT;
+  for (let i = 0; i < 60; i++) {
+    const chans = [
+      Math.round(1710 + Math.sin(i / 3) * 9),
+      Math.round(205 + Math.cos(i / 4) * 4),
+      0, 0, 0, 0,
+    ];
+    emit('serial-data', { channels: chans, timestamp: Date.now(), raw_line: 'RIG,' + chans.join(',') });
+    await new Promise(r => setTimeout(r, 50));
+  }
+});
+await page.waitForTimeout(1200);
+await shot('03a-home-two-channel-rig');
+console.log('two-channel state:', JSON.stringify(await page.evaluate(() => ({
+  anomaly: document.getElementById('anomalyLabel')?.textContent,
+  sub: document.getElementById('anomalySub')?.textContent,
+  mahal: document.getElementById('mMahal')?.textContent,
+  rail: document.querySelector('.rail-head .section-label')?.textContent,
+  legend: [...document.querySelectorAll('#traceLegend .tl-chip')].map(c => ({ t: c.textContent, silent: c.classList.contains('tl-silent') })),
+}))));
 // Home Vial: inert by default (one compact line), takeover only by explicit
 // activation, and a clean exit back to the instrument. The takeover must
 // replace the dashboard rather than squeeze the traces.

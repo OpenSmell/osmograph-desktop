@@ -581,6 +581,15 @@
       border-color: var(--border);
     }
     .trace-legend .tl-chip.tl-off { opacity: 0.35; text-decoration: line-through; }
+    /* A channel that has only ever sent zero in this window is not measuring
+       anything; name that instead of drawing it as a live flat line. */
+    .trace-legend .tl-chip.tl-silent { opacity: 0.55; }
+    .trace-legend .tl-chip.tl-silent::after {
+      content: 'silent'; margin-left: 5px; padding: 0 3px;
+      font-family: var(--font-mono); font-size: 7px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--text-3);
+      border: var(--hairline) solid var(--border);
+    }
     .trace-legend .tl-eye {
       font-size: 10px;
       color: var(--cyan);
