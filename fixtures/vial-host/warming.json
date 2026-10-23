@@ -1,0 +1,22 @@
+{
+  "schema": "osmograph.vial-host/1",
+  "takenAt": 2,
+  "source": "live",
+  "samplingMode": "timeseries",
+  "channels": [
+    { "id": "ch0", "label": "MQ-3", "kind": "MOX", "unit": "kOhm", "health": "ok" },
+    { "id": "ch1", "label": "MQ-9", "kind": "MOX", "unit": "kOhm", "health": "ok" },
+    { "id": "ch2", "label": "BME680", "kind": "MEMS", "unit": "kOhm", "health": "ok" }
+  ],
+  "environment": { "temperature": 22.4, "humidity": 41.2 },
+  "baseline": { "state": "warming", "progress": 0.42, "ageSec": 12 },
+  "anomaly": {
+    "state": "unknown",
+    "score": null,
+    "confidence": null,
+    "alertLevel": 0,
+    "triggeredChannels": 0,
+    "consecutive": 0
+  },
+  "classifier": { "state": "none", "name": null, "label": null, "confidence": null }
+}

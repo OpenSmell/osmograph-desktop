@@ -2232,34 +2232,6 @@ fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<Sessio
     Ok(imported)
 }
 
-/// Bundled demo session in the native `timestamp_ms,CH1..CH6` format. Synthetic
-/// but deterministic, so a user with no hardware can see traces, quality scoring
-/// and analysis immediately after first run.
-const SAMPLE_SESSION_CSV: &str = include_str!("../sample_data/sample_session.csv");
-
-/// One-click first-run win: drop the bundled sample session into the library and
-/// index it. Mirrors the importer so the sample behaves like any other session.
-#[tauri::command]
-fn load_sample_session(state: State<AppState>) -> Result<SessionRecord, String> {
-    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let now = chrono::Local::now();
-    let dest = dir.join(format!("{}_sample_session.csv", now.format("%Y%m%d_%H%M%S")));
-    std::fs::write(&dest, SAMPLE_SESSION_CSV).map_err(|e| e.to_string())?;
-    let rf = {
-        let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
-        recording_from_path(&dest, &mut cache)
-            .ok_or_else(|| "Sample session could not be read".to_string())?
-    };
-    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
-    let mut record = build_record_from_file(&rf);
-    record.substance = "sample".to_string();
-    record.label = "Sample".to_string();
-    index.upsert(record.clone());
-    let _ = index.save(&dir);
-    Ok(record)
-}
-
 fn matches_file_ext(path: &std::path::Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -2800,82 +2772,6 @@ fn assess_recording_health(
         .collect())
 }
 
-/// Bump when the bundled starter CSV content changes. The marker lets an app
-/// update replace an older pack (e.g. one with a corrupt column) without
-/// touching user recordings elsewhere in the recordings directory.
-const STARTER_PACK_VERSION: &str = "2026-10-19-6ch";
-
-/// Copy the bundled starter CSVs over `dest`, preserving any extra user files.
-/// Writes the version marker only after at least one file was copied, so a
-/// missing resource directory cannot claim the pack is current.
-fn sync_starter_pack(
-    src: &std::path::Path,
-    dest: &std::path::Path,
-    version: &str,
-) -> Result<usize, String> {
-    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
-    let mut copied = 0usize;
-    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())?.flatten() {
-        let p = entry.path();
-        if p.extension().map(|x| x == "csv").unwrap_or(false) {
-            if let Some(name) = p.file_name() {
-                std::fs::copy(&p, dest.join(name)).map_err(|e| e.to_string())?;
-                copied += 1;
-            }
-        }
-    }
-    if copied > 0 {
-        std::fs::write(dest.join(".starter_version"), version).map_err(|e| e.to_string())?;
-    }
-    Ok(copied)
-}
-
-/// Copy the bundled starter library into the recordings directory once, so a
-/// fresh install has real smells to explore with no hardware and no import step.
-/// Returns the directory to import from, or `None` when no bundle is present.
-#[tauri::command]
-fn ensure_starter_library(
-    app: tauri::AppHandle,
-    state: State<AppState>,
-) -> Result<Option<String>, String> {
-    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    let dest = dir.join("SmellNet");
-    let populated = std::fs::read_dir(&dest)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    let resolved = app
-        .path()
-        .resolve("starter_data/smellnet", tauri::path::BaseDirectory::Resource)
-        .unwrap_or_default();
-    // Dev runs the binary straight out of the target dir, where the bundler has
-    // not copied resources; fall back to the source tree so the dev loop works.
-    let src = if resolved.is_dir() {
-        resolved
-    } else if cfg!(debug_assertions) {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("starter_data/smellnet")
-    } else {
-        resolved
-    };
-    if !src.is_dir() {
-        return Ok(if populated { Some(dest.to_string_lossy().to_string()) } else { None });
-    }
-    let current = std::fs::read_to_string(dest.join(".starter_version"))
-        .map(|v| v.trim() == STARTER_PACK_VERSION)
-        .unwrap_or(false);
-    // The marker alone is not enough: if the CSVs were deleted, the front door
-    // would be empty even though the pack claims to be current.
-    let has_csv = std::fs::read_dir(&dest)
-        .map(|d| d.flatten().any(|e| {
-            e.path().extension().map(|x| x == "csv").unwrap_or(false)
-        }))
-        .unwrap_or(false);
-    if populated && current && has_csv {
-        return Ok(Some(dest.to_string_lossy().to_string()));
-    }
-    sync_starter_pack(&src, &dest, STARTER_PACK_VERSION)?;
-    Ok(Some(dest.to_string_lossy().to_string()))
-}
-
 // === Data Export ===
 
 #[tauri::command]
@@ -2944,6 +2840,22 @@ struct DatasetProgress {
     paused: bool,
 }
 
+#[derive(Serialize, Clone)]
+struct DatasetBatchProgress {
+    filename: String,
+    files_done: usize,
+    files_total: usize,
+    received: u64,
+    total: Option<u64>,
+    paused: bool,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct BatchSpec {
+    url: String,
+    filename: String,
+}
+
 /// Async + off-thread: a download must never block the UI event loop.
 #[tauri::command]
 async fn dataset_download(
@@ -2976,6 +2888,137 @@ async fn dataset_download(
 
     if let Ok(mut map) = state.dataset_downloads.lock() {
         map.remove(&filename);
+    }
+    result
+}
+
+/// Fetch an explicit list of files into one corpus folder. Used by sources such
+/// as Zenodo that expose a handful of CSVs instead of a single archive.
+#[tauri::command]
+async fn dataset_download_batch(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    dest_name: String,
+    files: Vec<BatchSpec>,
+) -> Result<data::dataset_io::BatchOutcome, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest = data::dataset_io::datasets_dir(&dir).join(&dest_name);
+    let control = Arc::new(data::dataset_io::DownloadControl::default());
+    {
+        let mut map = state.dataset_downloads.lock().map_err(|e| e.to_string())?;
+        map.insert(dest_name.clone(), control.clone());
+    }
+    let key = dest_name.clone();
+    let app2 = app.clone();
+    let ctl = control.clone();
+    let files: Vec<data::dataset_io::BatchFile> = files
+        .into_iter()
+        .map(|f| data::dataset_io::BatchFile { url: f.url, path: f.filename })
+        .collect();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        data::dataset_io::download_batch(&dest, &files, &ctl, |done, total, received, total_bytes, paused| {
+            let _ = app2.emit(
+                "dataset-batch-progress",
+                DatasetBatchProgress {
+                    filename: key.clone(),
+                    files_done: done,
+                    files_total: total,
+                    received,
+                    total: total_bytes,
+                    paused,
+                },
+            );
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Ok(mut map) = state.dataset_downloads.lock() {
+        map.remove(&dest_name);
+    }
+    result
+}
+
+/// Download a filtered subtree from a public Hugging Face dataset repo. The
+/// source is still Hugging Face; we only fetch the requested paths and write
+/// them under the local corpus folder. No data is mirrored or rehosted.
+#[tauri::command]
+async fn dataset_download_tree(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    repo: String,
+    include: String,
+    exclude: Vec<String>,
+    dest_name: String,
+) -> Result<data::dataset_io::BatchOutcome, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let dest = data::dataset_io::datasets_dir(&dir).join(&dest_name);
+    let control = Arc::new(data::dataset_io::DownloadControl::default());
+    {
+        let mut map = state.dataset_downloads.lock().map_err(|e| e.to_string())?;
+        map.insert(dest_name.clone(), control.clone());
+    }
+    let key = dest_name.clone();
+    let app2 = app.clone();
+    let ctl = control.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(std::time::Duration::from_secs(90)))
+            .build()
+            .into();
+        let api = format!(
+            "https://huggingface.co/api/datasets/{}/tree/main?recursive=true&expand=false",
+            repo
+        );
+        let resp = agent
+            .get(&api)
+            .header("User-Agent", "Osmograph/0.1 dataset-import")
+            .call()
+            .map_err(|e| format!("Could not list the Hugging Face dataset: {e}"))?;
+        let items: Vec<serde_json::Value> = serde_json::from_reader(resp.into_body().into_reader())
+            .map_err(|e| format!("Could not read the Hugging Face file listing: {e}"))?;
+        let mut files: Vec<data::dataset_io::BatchFile> = Vec::new();
+        for item in items {
+            if item.get("type").and_then(|v| v.as_str()) != Some("file") {
+                continue;
+            }
+            let Some(path) = item.get("path").and_then(|v| v.as_str()) else { continue };
+            if !path.starts_with(&include)
+                || !path.to_ascii_lowercase().ends_with(".csv")
+                || exclude.iter().any(|fragment| path.contains(fragment))
+            {
+                continue;
+            }
+            let encoded = path
+                .split('/')
+                .map(|part| urlencoding::encode(part).into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            files.push(data::dataset_io::BatchFile {
+                url: format!("https://huggingface.co/datasets/{}/resolve/main/{}", repo, encoded),
+                path: path.to_string(),
+            });
+        }
+        if files.is_empty() {
+            return Err(format!("No CSV files found under {include}."));
+        }
+        data::dataset_io::download_batch(&dest, &files, &ctl, |done, total, received, total_bytes, paused| {
+            let _ = app2.emit(
+                "dataset-batch-progress",
+                DatasetBatchProgress {
+                    filename: key.clone(),
+                    files_done: done,
+                    files_total: total,
+                    received,
+                    total: total_bytes,
+                    paused,
+                },
+            );
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    if let Ok(mut map) = state.dataset_downloads.lock() {
+        map.remove(&dest_name);
     }
     result
 }
@@ -3702,10 +3745,10 @@ pub fn run() {    env_logger::init();
             list_recordings,
             import_recordings,
             import_paths,
-            ensure_starter_library,
-            load_sample_session,
             save_png_data_url,
             dataset_download,
+            dataset_download_batch,
+            dataset_download_tree,
             dataset_control,
             dataset_extract,
             get_session_index,
@@ -3983,35 +4026,4 @@ mod tests {
         assert!(board_pio_env("esp32").contains("espressif32"));
     }
 
-    #[test]
-    fn starter_pack_refreshes_old_files_without_deleting_user_files() {
-        let root = std::env::temp_dir().join(format!(
-            "osm-starter-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let src = root.join("src");
-        let dest = root.join("dest");
-        std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(src.join("a.csv"), "x,y\n1,2\n").unwrap();
-        std::fs::write(src.join("notes.txt"), "not a recording").unwrap();
-
-        assert_eq!(super::sync_starter_pack(&src, &dest, "v1").unwrap(), 1);
-        assert_eq!(std::fs::read_to_string(dest.join("a.csv")).unwrap(), "x,y\n1,2\n");
-        assert_eq!(std::fs::read_to_string(dest.join(".starter_version")).unwrap(), "v1");
-        assert!(!dest.join("notes.txt").exists());
-
-        // A user-added file in the starter directory survives a pack refresh.
-        std::fs::write(src.join("a.csv"), "x,y\n3,4\n").unwrap();
-        std::fs::write(dest.join("keep.csv"), "mine\n").unwrap();
-        assert_eq!(super::sync_starter_pack(&src, &dest, "v2").unwrap(), 1);
-        assert_eq!(std::fs::read_to_string(dest.join("a.csv")).unwrap(), "x,y\n3,4\n");
-        assert_eq!(std::fs::read_to_string(dest.join("keep.csv")).unwrap(), "mine\n");
-        assert_eq!(std::fs::read_to_string(dest.join(".starter_version")).unwrap(), "v2");
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
 }

@@ -234,8 +234,8 @@ export function validateVial(vial: VialManifest): VialValidation {
   const allPassed = passedCritical === critical.length;
   const score = checks.length ? checks.filter(x => x.passed).length / checks.length : 0;
   const summary = allPassed
-    ? 'Sealed: the local evidence supports this closed-set claim. It still does not generalize to another rig.'
-    : 'Open: the evidence does not yet support a sealed decision. Do not use this for a real decision.';
+    ? 'Gated: the local evidence supports this closed-set claim. It still does not generalize to another rig.'
+    : 'Ungated: the evidence does not yet support this decision. Do not use it for a real decision.';
   return { passed: allPassed, score, checkedAt: Date.now(), summary, checks };
 }
 

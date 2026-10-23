@@ -1,8 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { DATASET_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
+import { DATASET_CATALOG, REFERENCE_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
 import * as Vial from './vials';
 import * as Domain from './domainPacks';
+import * as VialHost from './vialHost';
+import * as VialRuntime from './vialRuntime';
+import { fetchVialRegistry, type RegistryVialEntry } from './vialRegistry';
 import { GUIDE_SECTIONS, guideSection } from './guide';
 
 // === Constants ===
@@ -15,6 +18,19 @@ const LIVE_WINDOW_DEFAULT = 800; // default trailing-sample window; reset-zoom t
 // every channel (up to 64) gets its own distinct color.
 const PALETTE_ANCHORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 let lastAnomalyKey = '';  // anomaly-card state key: only re-stamp DOM when this CHANGES
+let lastAnomalyReading: {
+  state: VialHost.AnomalyState;
+  score: number | null;
+  confidence: number | null;
+  alertLevel: number;
+  triggeredChannels: number;
+  consecutive: number;
+  warming: boolean;
+  baselineProgress: number;
+} = {
+  state: 'unknown', score: null, confidence: null, alertLevel: 0,
+  triggeredChannels: 0, consecutive: 0, warming: false, baselineProgress: 0,
+};
 
 // === Change Log (single-unit, label-free) ===
 // The live detector flags deviations from a learned baseline with no labels —
@@ -53,7 +69,7 @@ function renderChangeLog() {
       `<span class="cl-badge${ev.alert === 'critical' ? ' crit' : ''}">${ev.alert}</span>` +
       `<span class="cl-meta">${clFmtDur(ev.end - ev.start)} · ${ev.channels.length} ch · peak ${ev.peak.toFixed(1)}</span></div>`);
   }
-  el.innerHTML = rows.length ? rows.join('') : '<div class="cl-empty">No changes recorded yet.</div>';
+  el.innerHTML = rows.length ? rows.join('') : '<div class="cl-empty">No events recorded yet.</div>';
 }
 
 // Golden-angle hue stepper keeps generated colors maximally separated so
@@ -429,8 +445,9 @@ interface LiveSnapshot {
 // === Workspace router ===
 // The app is organised by jobs, not implementation buckets:
 // observe (Home), browse (Explore), analyse, run a domain workspace (Vials),
-// inspect raw data (Data), manage hardware (Rigs), configure (Settings).
-type WorkspaceKey = 'dashboard' | 'explore' | 'analyse' | 'vials' | 'data' | 'rig' | 'settings';
+// manage hardware (Rigs), configure (Settings). Public corpora, raw recordings,
+// and smell cards live together in Explore: a dataset is not a separate job.
+type WorkspaceKey = 'dashboard' | 'explore' | 'analyse' | 'vials' | 'rig' | 'settings';
 interface SourceViewSpec { workspace: WorkspaceKey; id: string; }
 const SOURCE_VIEWS: Record<string, SourceViewSpec> = {
   smells: { workspace: 'explore', id: 'src-smells' },
@@ -440,14 +457,14 @@ const SOURCE_VIEWS: Record<string, SourceViewSpec> = {
   train: { workspace: 'analyse', id: 'panel-train' },
   changelog: { workspace: 'analyse', id: 'src-changelog' },
   vials: { workspace: 'vials', id: 'src-vials' },
-  sessions: { workspace: 'data', id: 'src-sessions' },
-  datasets: { workspace: 'data', id: 'src-datasets' },
+  sessions: { workspace: 'explore', id: 'src-sessions' },
+  datasets: { workspace: 'explore', id: 'src-datasets' },
   fleet: { workspace: 'rig', id: 'panel-fleet' },
   system: { workspace: 'settings', id: 'panel-system' },
 };
 const WORKSPACE_DEFAULT: Record<WorkspaceKey, string> = {
   dashboard: 'dashboard', explore: 'smells', analyse: 'compare', vials: 'vials',
-  data: 'sessions', rig: 'fleet', settings: 'system',
+  rig: 'fleet', settings: 'system',
 };
 const workspaceLastView: Partial<Record<WorkspaceKey, string>> = {};
 
@@ -457,15 +474,15 @@ function installWorkspaceShell(): void {
     const parent = document.getElementById(parentId);
     if (node && parent) parent.appendChild(node);
   };
-  move('src-smells', 'panel-explore');
+  move('src-smells', 'exploreBody');
+  move('src-sessions', 'exploreBody');
+  move('src-datasets', 'exploreBody');
   move('panel-compare', 'analyseBody');
   move('src-check', 'analyseBody');
   move('panel-recipe', 'analyseBody');
   move('panel-train', 'analyseBody');
   move('src-changelog', 'analyseBody');
   move('src-vials', 'panel-vials');
-  move('src-sessions', 'dataBody');
-  move('src-datasets', 'dataBody');
   move('panel-fleet', 'rigBody');
   move('panel-system', 'panel-settings');
   // Panels that used to be top-level tabs are now views inside a workspace.
@@ -531,8 +548,9 @@ document.querySelectorAll<HTMLElement>('.tab-btn[data-tab]').forEach(btn => {
     if (tab === 'train') { showWorkspaceView('train'); return; }
     if (tab === 'fleet') { showWorkspaceView('fleet'); return; }
     if (tab === 'system') { showWorkspaceView('system'); return; }
+    if (tab === 'data') { showWorkspaceView('sessions'); return; }
     if (tab === 'decide') { showWorkspaceDefault('analyse'); return; }
-    if (tab === 'explore' || tab === 'analyse' || tab === 'vials' || tab === 'data' || tab === 'rig' || tab === 'settings') {
+    if (tab === 'explore' || tab === 'analyse' || tab === 'vials' || tab === 'rig' || tab === 'settings') {
       showWorkspaceDefault(tab as WorkspaceKey);
       return;
     }
@@ -557,25 +575,6 @@ document.querySelectorAll('.sys-nav-item').forEach(item => {
     const sys = (item as HTMLElement).dataset.sys!;
     document.getElementById(`sys-${sys}`)?.classList.add('active');
   });
-});
-
-// === One-click sample session — lives in Sources → Sessions, no hardware needed ===
-document.getElementById('libSample')?.addEventListener('click', async (ev) => {
-  const btn = ev.currentTarget as HTMLButtonElement;
-  const prev = btn.textContent || 'Load sample';
-  btn.disabled = true;
-  btn.textContent = 'Loading…';
-  try {
-    const rec = await invoke<{ file_id: string }>('load_sample_session');
-    await invoke('analyze_recording', { fileId: rec.file_id });
-    await reloadLibrary();
-  } catch (e) {
-    btn.textContent = 'Failed';
-    setTimeout(() => { btn.textContent = prev; }, 2500);
-  } finally {
-    btn.disabled = false;
-    if (btn.textContent === 'Loading…') btn.textContent = prev;
-  }
 });
 
 // === PNG export: share artifacts without a screenshot ===
@@ -899,8 +898,11 @@ function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
     const unit = KIND_META[kindOf(c >= 0 ? c : 0)].unit;
     const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(2)}k` : v.toFixed(2);
     const ppm = c >= 0 ? calibratedPPM(c, v) : null;
+    // The datasheet curve is an order-of-magnitude heuristic at best, so the
+    // readout never implies precision: magnitude-rounded, flagged "est.",
+    // never more than two significant figures.
     const ppmTag = ppm !== null
-      ? `<span class="xr-ppm" title="Estimated from your calibration constants (datasheet curve — an estimate, not a lab figure)">${ppm >= 1000 ? `${(ppm / 1000).toFixed(1)}k ppm` : `${Math.round(ppm)} ppm`}</span>`
+      ? `<span class="xr-ppm" title="Datasheet-curve estimate — not a lab figure, not a calibrated measurement">≈ ${ppm >= 1000 ? `${Math.round(ppm / 100) / 10}k` : ppm >= 100 ? Math.round(ppm / 10) * 10 : ppm >= 10 ? Math.round(ppm / 2) * 2 : ppm >= 1 ? Math.round(ppm * 2) / 2 : ppm.toFixed(1)} ppm est.</span>`
       : '';
     return `<span class="xr-item"><i class="xr-dot" style="background:${color}"></i>${name} <b>${label} ${unit}</b>${ppmTag}</span>`;
   }).join('');
@@ -1005,52 +1007,187 @@ function drawFingerprint(values: number[]) {
 }
 
 // === Canvas: Session Fingerprint ===
-const sfpCanvas = document.getElementById('session-fp') as HTMLCanvasElement;
-const sfpCtx = sfpCanvas?.getContext('2d');
+// The inspector is a recording-level view, so it must show the recording's
+// settled fingerprint immediately — and, as an option, how that fingerprint
+// formed over time. Previously this canvas existed but nothing ever drew into
+// it, which is why clicking a recording looked empty.
+type InspectorFpMode = 'mean' | 'evolution';
+let inspectorFpMode: InspectorFpMode = 'mean';
+let inspectorSeries: SessionSeries | null = null;
+let inspectorFingerprint: { channels: string[]; values: number[] } | null = null;
+let inspectorFpToken = 0;
 
-function drawSessionFingerprint(values: number[]) {
-  if (!sfpCtx || !sfpCanvas) return;
-  const rect = sfpCanvas.parentElement!.getBoundingClientRect();
-  sfpCanvas.width = rect.width - 20;
-  sfpCanvas.height = 140;
-  const w = sfpCanvas.width, h = sfpCanvas.height;
-  const cx = w / 2, cy = h / 2, rr = Math.min(cx, cy) - 14;
-  sfpCtx.clearRect(0, 0, w, h);
-  const n = values.length || chNames.length;
-  if (n === 0) return;
-  for (let ring = 1; ring <= 4; ring++) {
-    sfpCtx.strokeStyle = '#d7cdba'; sfpCtx.lineWidth = 1; sfpCtx.beginPath();
-    for (let i = 0; i <= n; i++) {
-      const a = (i / n) * Math.PI * 2 - Math.PI / 2;
-      const x = cx + Math.cos(a) * rr * (ring / 4);
-      const y = cy + Math.sin(a) * rr * (ring / 4);
-      i === 0 ? sfpCtx.moveTo(x, y) : sfpCtx.lineTo(x, y);
+interface EvolutionMatrix {
+  channels: string[];
+  values: number[][];
+  maxAbs: number;
+  bins: number;
+}
+
+/** Signed, baseline-relative response in equal time bins: rows are channels,
+ *  columns are time. This is the fingerprint's transformation, not a mean. */
+function buildEvolutionMatrix(s: SessionSeries, bins = 64): EvolutionMatrix {
+  const n = s.time.length;
+  const width = Math.max(12, Math.min(96, bins));
+  const rows: number[][] = [];
+  let maxAbs = 1e-9;
+  for (let ci = 0; ci < s.channels.length; ci++) {
+    const seriesValues = s.values[ci] || [];
+    const r0 = compareR0(seriesValues);
+    const row: number[] = [];
+    for (let b = 0; b < width; b++) {
+      if (!r0 || !(r0 > 0)) { row.push(NaN); continue; }
+      const start = Math.floor((b / width) * n);
+      const end = Math.max(start + 1, Math.floor(((b + 1) / width) * n));
+      const seg = seriesValues.slice(start, end)
+        .filter(Number.isFinite)
+        .map(v => (v - r0) / r0);
+      const v = meanOf(seg);
+      row.push(v);
+      if (Number.isFinite(v)) maxAbs = Math.max(maxAbs, Math.abs(v));
     }
-    sfpCtx.stroke();
+    rows.push(row);
   }
-  const maxVal = Math.max(...values, 1);
-  sfpCtx.fillStyle = 'rgba(17, 17, 17, 0.06)';
-  sfpCtx.strokeStyle = '#1a1a17'; sfpCtx.lineWidth = 2;
-  sfpCtx.beginPath();
-  for (let i = 0; i <= n; i++) {
-    const idx = i % n;
-    const a = (idx / n) * Math.PI * 2 - Math.PI / 2;
-    const norm = values[idx] !== undefined ? values[idx] / maxVal : 0;
-    const x = cx + Math.cos(a) * rr * norm;
-    const y = cy + Math.sin(a) * rr * norm;
-    i === 0 ? sfpCtx.moveTo(x, y) : sfpCtx.lineTo(x, y);
+  return { channels: s.channels.slice(), values: rows, maxAbs, bins: width };
+}
+
+function evolutionColor(v: number, maxAbs: number): string {
+  if (!Number.isFinite(v)) return 'rgba(29,26,22,0.035)';
+  const a = Math.min(0.92, 0.07 + 0.85 * Math.min(1, Math.abs(v) / maxAbs));
+  return v >= 0 ? `rgba(14,116,144,${a.toFixed(3)})` : `rgba(180,83,9,${a.toFixed(3)})`;
+}
+
+/** Heatmap of the signed response. Labels stay at the left; a playhead can be
+ *  laid over the time axis for replay. */
+function drawEvolutionHeatmap(
+  ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number,
+  matrix: EvolutionMatrix, opts: { labels?: boolean; playhead?: number | null } = {},
+): void {
+  if (w <= 0 || h <= 0 || !matrix.channels.length) return;
+  const labelW = opts.labels ? Math.min(58, Math.max(34, w * 0.2)) : 0;
+  const gridX = x + labelW;
+  const gridW = Math.max(1, w - labelW);
+  const rowH = h / matrix.channels.length;
+  const colW = gridW / matrix.bins;
+  ctx.save();
+  for (let r = 0; r < matrix.channels.length; r++) {
+    const row = matrix.values[r];
+    for (let b = 0; b < matrix.bins; b++) {
+      ctx.fillStyle = evolutionColor(row[b], matrix.maxAbs);
+      ctx.fillRect(gridX + b * colW, y + r * rowH, Math.max(1, colW + 0.4), Math.max(1, rowH + 0.4));
+    }
+    if (opts.labels) {
+      ctx.fillStyle = '#6b6152';
+      ctx.font = '7.5px ui-monospace, "SF Mono", Menlo, monospace';
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      const name = matrix.channels[r] || `CH${r + 1}`;
+      ctx.fillText(name.length > 10 ? `${name.slice(0, 9)}…` : name, gridX - 4, y + r * rowH + rowH / 2);
+    }
   }
-  sfpCtx.closePath(); sfpCtx.fill(); sfpCtx.stroke();
-  sfpCtx.font = '9px -apple-system, sans-serif'; sfpCtx.textAlign = 'center';
-  for (let i = 0; i < n; i++) {
-    const a = (i / n) * Math.PI * 2 - Math.PI / 2;
-    const norm = values[i] !== undefined ? values[i] / maxVal : 0;
-    sfpCtx.fillStyle = channelColor(i);
-    sfpCtx.beginPath(); sfpCtx.arc(cx + Math.cos(a) * rr * norm, cy + Math.sin(a) * rr * norm, 3, 0, Math.PI * 2); sfpCtx.fill();
-    sfpCtx.fillStyle = '#666';
-    sfpCtx.fillText(chNames[i] || `CH${i}`, cx + Math.cos(a) * (rr + 10), cy + Math.sin(a) * (rr + 10) + 3);
+  // Zero is the neutral line; a thin rule makes polarity readable.
+  ctx.strokeStyle = 'rgba(29,26,22,0.18)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(gridX, y);
+  ctx.lineTo(gridX, y + h);
+  ctx.stroke();
+  // Time ticks.
+  ctx.fillStyle = '#8a7f6c';
+  ctx.font = '7px ui-monospace, "SF Mono", Menlo, monospace';
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'top';
+  ctx.fillText('start', gridX, y + h + 2);
+  ctx.textAlign = 'right';
+  ctx.fillText('end', gridX + gridW, y + h + 2);
+  if (opts.playhead != null && Number.isFinite(opts.playhead)) {
+    const px = gridX + Math.max(0, Math.min(1, opts.playhead)) * gridW;
+    ctx.strokeStyle = 'rgba(8,8,12,0.6)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.moveTo(px, y); ctx.lineTo(px, y + h); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawInspectorFingerprint(): void {
+  const canvas = document.getElementById('session-fp') as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(160, canvas.clientWidth || 240);
+  const h = Math.max(120, canvas.clientHeight || 158);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const caption = document.getElementById('inspFpCaption');
+
+  if (!inspectorSeries || !inspectorFingerprint) {
+    ctx.fillStyle = '#8a7f6c';
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Select a recording', w / 2, h / 2);
+    if (caption) caption.textContent = 'Settled response per channel · ΔR/R0';
+    return;
+  }
+
+  if (inspectorFpMode === 'evolution') {
+    const matrix = buildEvolutionMatrix(inspectorSeries, 64);
+    drawEvolutionHeatmap(ctx, 0, 0, w, h - 12, matrix, { labels: true });
+    if (caption) caption.textContent = 'Signed response over time · cyan = increase, amber = decrease';
+  } else {
+    drawFingerprintInto(ctx, 0, 0, w, h, inspectorFingerprint.values, inspectorFingerprint.channels, { labels: true });
+    if (caption) {
+      const n = inspectorFingerprint.channels.length;
+      const finite = inspectorFingerprint.values.filter(Number.isFinite).length;
+      caption.textContent = `Settled response · ${finite}/${n} channels · ΔR/R0`;
+    }
+  }
+  document.querySelectorAll<HTMLElement>('.fp-mode').forEach(btn => {
+    btn.classList.toggle('active', btn.id === (inspectorFpMode === 'mean' ? 'inspFpMean' : 'inspFpEvo'));
+  });
+}
+
+function setInspectorFpMode(mode: InspectorFpMode): void {
+  inspectorFpMode = mode;
+  drawInspectorFingerprint();
+}
+
+async function renderInspectorFingerprint(s: SessionRecord): Promise<void> {
+  const token = ++inspectorFpToken;
+  inspectorSeries = null;
+  inspectorFingerprint = null;
+  drawInspectorFingerprint();
+  if (!s.file_id) return;
+  try {
+    const series = await invoke<SessionSeries>('load_session_series', { fileId: s.file_id });
+    if (token !== inspectorFpToken) return;
+    inspectorSeries = series;
+    inspectorFingerprint = settledFingerprint(series);
+    drawInspectorFingerprint();
+  } catch {
+    if (token !== inspectorFpToken) return;
+    const canvas = document.getElementById('session-fp') as HTMLCanvasElement | null;
+    if (canvas) {
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        const dpr = window.devicePixelRatio || 1;
+        const w = Math.max(160, canvas.clientWidth || 240), h = Math.max(120, canvas.clientHeight || 158);
+        canvas.width = Math.floor(w * dpr); canvas.height = Math.floor(h * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, w, h);
+        ctx.fillStyle = '#8a7f6c'; ctx.font = '10px -apple-system, sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('No readable channel series', w / 2, h / 2);
+      }
+    }
   }
 }
+
+document.getElementById('inspFpMean')?.addEventListener('click', () => setInspectorFpMode('mean'));
+document.getElementById('inspFpEvo')?.addEventListener('click', () => setInspectorFpMode('evolution'));
 
 // === Trace Legend ===
 // Toggleable, hover-to-highlight channels (trading-view style). Hovering a chip
@@ -1211,8 +1348,23 @@ async function ingestReading(values: number[]) {
     // composite state actually CHANGES, not every ~10Hz tick. This kills the
     // flicker/glitch from re-assigning className + textContent each frame where
     // nothing moved (which re-triggers CSS transitions on a static card).
+    lastAnomalyReading = {
+      state: result.warming_up
+        ? 'unknown'
+        : result.is_anomaly
+          ? (result.alert_level >= 2 ? 'critical' : 'warning')
+          : 'normal',
+      score: result.raw_score,
+      confidence: result.calibrated_confidence,
+      alertLevel: result.alert_level,
+      triggeredChannels: result.triggered_channels.length,
+      consecutive: result.consecutive_anomalies,
+      warming: result.warming_up,
+      baselineProgress: result.baseline_progress ?? 0,
+    };
     const stateKey = `${result.warming_up ? 1 : 0}:${result.is_anomaly ? 1 : 0}:${result.alert_level}`;
-    if (stateKey !== lastAnomalyKey) {
+    const anomalyStateChanged = stateKey !== lastAnomalyKey;
+    if (anomalyStateChanged) {
       lastAnomalyKey = stateKey;
       const card = document.getElementById('anomalyCard')!;
       const fAlert = document.getElementById('fAlert')!;
@@ -1253,6 +1405,7 @@ async function ingestReading(values: number[]) {
       }
     }
     }
+    if (anomalyStateChanged) renderVialHome();
 
     // Log change events: open one when a deviation starts, close it when the
     // array returns to baseline. This is the single-unit value of the detector.
@@ -1402,7 +1555,31 @@ function setPlotLink(on: boolean) {
   el.textContent = on ? '● LIVE LINK' : '● NO LINK';
   el.classList.remove('stall');
   el.classList.toggle('on', on);
+  document.body.classList.toggle('no-rig', !on);
   document.getElementById('dashboardEmpty')?.classList.toggle('show', !on);
+  if (!on) clearAnomalyForNoRig();
+  renderVialHome();
+}
+
+function clearAnomalyForNoRig(): void {
+  const card = document.getElementById('anomalyCard');
+  if (card) card.className = 'anomaly-card';
+  const label = document.getElementById('anomalyLabel');
+  if (label) label.textContent = 'NO RIG';
+  const sub = document.getElementById('anomalySub');
+  if (sub) sub.textContent = 'Connect a rig or replay a recording.';
+  const mahal = document.getElementById('mMahal');
+  if (mahal) mahal.textContent = '--';
+  const conf = document.getElementById('mConf');
+  if (conf) conf.textContent = '--';
+  const ch = document.getElementById('mCh');
+  if (ch) ch.textContent = `0/${chNames.length}`;
+  const alert = document.getElementById('mAlert');
+  if (alert) alert.textContent = '0';
+  lastAnomalyReading = {
+    state: 'unknown', score: null, confidence: null, alertLevel: 0,
+    triggeredChannels: 0, consecutive: 0, warming: false, baselineProgress: 0,
+  };
 }
 
 // Stall watchdog: if we claim to be connected but no reading has arrived for a
@@ -1411,17 +1588,23 @@ function setPlotLink(on: boolean) {
 function updatePlotLinkState() {
   const el = document.getElementById('plotLinkState');
   if (!el) return;
+  const wasNoRig = document.body.classList.contains('no-rig');
   if (!connected) {
     el.textContent = '● NO LINK';
     el.classList.remove('stall', 'on');
+    document.body.classList.add('no-rig');
     document.getElementById('dashboardEmpty')?.classList.add('show');
+    clearAnomalyForNoRig();
+    if (!wasNoRig) renderVialHome();
     return;
   }
   const stalled = Date.now() - lastDataAt > 3000;
   el.textContent = stalled ? '● NO DATA' : '● LIVE LINK';
   el.classList.toggle('stall', stalled);
   el.classList.toggle('on', !stalled);
+  document.body.classList.remove('no-rig');
   document.getElementById('dashboardEmpty')?.classList.toggle('show', false);
+  if (wasNoRig) renderVialHome();
   // Bootloader diagnosis must never fire on a healthy board: EVERY ESP32
   // reset prints the ROM banner ("boot mode:..." — a keyword hit) and the
   // flashed firmware then stays silent for ~30 s collecting its baseline.
@@ -1642,16 +1825,16 @@ function qualityBadge(q: number): { label: string; cls: string } {
 function renderLibrary() {
   const body = document.getElementById('libBody')!;
   if (sessions.length === 0) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="8">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong>. No hardware? The <strong>Explore</strong> tab loads real datasets on its own.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="9">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong>. No hardware? Open <strong>Datasets</strong> in Explore and download a corpus.</td></tr>`;
     document.getElementById('libStatus')!.textContent = '0 sessions';
     return;
   }
   const q = ((document.getElementById('libSearch') as HTMLInputElement | null)?.value || '').trim().toLowerCase();
   const rows = sessions
     .map((s, i) => ({ s, i }))
-    .filter(({ s }) => !q || `${s.substance} ${s.label} ${s.format} ${s.duration} ${s.sensors}`.toLowerCase().includes(q));
+    .filter(({ s }) => !q || `${s.substance} ${s.label} ${s.format} ${s.duration} ${s.sensors} ${recordingSource(s).name}`.toLowerCase().includes(q));
   if (rows.length === 0) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="8">Nothing matches "${q}" — try a different search.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="9">Nothing matches "${q}" — try a different search.</td></tr>`;
     return;
   }
   body.innerHTML = rows.map(({ s, i }) => {
@@ -1668,9 +1851,12 @@ function renderLibrary() {
       statusCell = `<button class="lib-analyze" data-idx="${i}" title="Run the full 7-factor quality analysis">⚡ Not analyzed — analyze</button>`;
     }
     const ticked = s.file_id ? compareFiles.includes(s.file_id) : false;
+    const src = recordingSource(s);
+    const srcTitle = [src.credit, src.license && `Licence: ${src.license}`, src.citation].filter(Boolean).join(' · ');
     return `<tr class="${i === selectedSession ? 'selected' : ''}" data-idx="${i}">
       <td><input type="checkbox" class="compare-tick" data-idx="${i}" ${ticked ? 'checked' : ''} title="Overlay in Compare"></td>
       <td>${s.time}</td><td class="lib-sub" data-idx="${i}" title="Double-click to rename the recording + its file">${s.substance}</td><td>${s.label}</td>
+      <td><span class="lib-source" title="${esc(srcTitle)}">${esc(src.name)}</span></td>
       <td>${s.format}</td><td>${s.duration}</td><td>${s.sensors}</td>
       <td>${statusCell}</td>
     </tr>`;
@@ -1678,7 +1864,6 @@ function renderLibrary() {
   document.getElementById('libStatus')!.textContent = `${sessions.length} sessions`;
   const stamp = document.getElementById('libFilterStamp');
   if (stamp) stamp.textContent = `${sessions.length} records · ${sessions.filter(s => s.quality_report).length} analyzed`;
-  renderHomeGlance();
   body.querySelectorAll('tr').forEach(tr => {
     tr.addEventListener('click', (ev) => {
       if ((ev.target as HTMLElement).closest('.compare-tick')) return;
@@ -1773,6 +1958,7 @@ function inspectSession(s: SessionRecord) {
     renderQualityReport(s.quality_report);
   }
   void renderRigHealth(s);
+  void renderInspectorFingerprint(s);
 }
 
 // === Quality Report Panel (Python `quality_panel.py` parity) ===
@@ -2760,10 +2946,10 @@ function renderCompareEmpty(): void {
   const b = pair ? smellCards.find(c => c.key === pair.sample) : null;
   const btn = document.getElementById('compareEmptyTry') as HTMLButtonElement | null;
   if (btn) {
-    btn.disabled = !a || !b;
+    btn.disabled = false;
     btn.textContent = a && b
       ? `Try ${titleCase(a.substance)} vs ${titleCase(b.substance)} →`
-      : 'Try a starter pair →';
+      : 'Get data →';
   }
 }
 
@@ -2773,7 +2959,7 @@ function renderCompareEmpty(): void {
 async function tryStarterCompare(): Promise<void> {
   buildSmellCards();
   const pair = defaultCheckPair();
-  if (!pair) return;
+  if (!pair) { showWorkspaceView('datasets'); return; }
   const a = smellCards.find(c => c.key === pair.ref);
   const b = smellCards.find(c => c.key === pair.sample);
   if (!a || !b) return;
@@ -2832,10 +3018,11 @@ function renderFleet() {
   summary.textContent = `${fleetDevices.length} device(s) · ${recognized} recognized · ${online} online`;
   if (fleetDevices.length === 0) {
     grid.innerHTML = `<div class="fleet-empty">
-      <b>No device found.</b>
-      <p>Plug in a USB e-nose, or scan the network for mDNS devices. Nothing is required to explore the bundled smells.</p>
+      <b>No device on this link.</b>
+      <p>USB, local network, or a remote host:port. Fleet is where a device stays attached to its source and to the Vial applied to its live stream.</p>
       <div class="fleet-empty-actions">
         <button class="mini-btn primary" id="fleetEmptyScan" type="button">Scan network</button>
+        <button class="mini-btn" id="fleetEmptyRemote" type="button">Connect remote</button>
         <button class="mini-btn" id="fleetEmptySmells" type="button">Explore smells →</button>
       </div>
     </div>`;
@@ -2848,6 +3035,10 @@ function renderFleet() {
     (b.status === 'online' ? 1 : 0) - (a.status === 'online' ? 1 : 0));
   document.getElementById('fleetBadge')!.style.display = '';
   document.getElementById('fleetBadge')!.textContent = fleetDevices.length.toString();
+  const installedHomeVials = Domain.loadInstalledIds()
+    .map(id => Domain.domainPackById(id))
+    .filter((pack): pack is Domain.DomainPack => !!pack && !!pack.home);
+  const appliedVial = selectedHomeVialId() || '';
   grid.innerHTML = sorted.map(d => {
     const statusClass = d.status;
     const sensorsHtml = d.sensors.map(s =>
@@ -2860,6 +3051,20 @@ function renderFleet() {
       ? d.kind.replace(/_/g, ' ').toUpperCase() : 'UNKNOWN';
     const recognizedTxt = d.is_recognized;
     const badgeHtml = `<span class="fleet-kind ${recognizedTxt ? 'recognized' : 'unknown'}">${recognizedTxt ? '●' : '○'} ${kindLabel}</span>`;
+    const vialRow = installedHomeVials.length
+      ? `<div class="dev-vial-row">
+          <span class="dev-vial-label">Apply Vial</span>
+          <select class="fleet-vial-select" data-device-id="${esc(d.id)}" title="Choose which installed Vial contributes to the live Home view">
+            <option value="">None</option>
+            ${installedHomeVials.map(p => `<option value="${esc(p.id)}"${p.id === appliedVial ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
+          <button class="mini-btn" type="button" data-fleet-live="${esc(d.id)}" title="Open the live Home view">Live →</button>
+        </div>`
+      : `<div class="dev-vial-row">
+          <span class="dev-vial-label">Apply Vial</span>
+          <span class="dev-vial-empty">No Vial with a Home view installed.</span>
+          <button class="mini-btn" type="button" data-fleet-vials="1">Vials →</button>
+        </div>`;
     return `<div class="device-card">
       <div class="dev-header">
         <div class="dev-name">${d.name}</div>
@@ -2868,27 +3073,60 @@ function renderFleet() {
       <div class="dev-meta">${badgeHtml}</div>
       <div style="font-size:10px;color:var(--text-3)">${d.port || '—'} · CH${d.n_channels} · FW ${d.firmware_version || '—'}</div>
       <div class="sensor-grid">${sensorsHtml}</div>
+      ${vialRow}
     </div>`;
   }).join('');
 }
 
 // === OLED Preview ===
+// Preview of the on-device screen layout for the chosen layout option.
+// Honest by construction: when a rig is streaming it renders the real
+// detector/trace values; when nothing is connected every value is "—"
+// under a SIMULATED marker, because invented Mahal/confidence numbers on a
+// device screen would be exactly the telemetry we refuse everywhere else.
 function updateOledPreview() {
   const layout = (document.getElementById('oledLayout') as HTMLSelectElement).value;
   const preview = document.getElementById('oledPreview')!;
+  const rule = '─'.repeat(18);
+  const sim = 'PREVIEW · SIMULATED';
+  const hasLive = connected && traceData.some(ch => ch.length > 0);
+
+  if (!hasLive) {
+    const blankChannels = chNames.slice(0, 6).map((name, i) =>
+      `CH${i + 1}: ${name.padEnd(8)} ${'—'.padStart(5)}`
+    ).join('\n');
+    if (layout === 'alert') {
+      preview.textContent = `⚠ ANOMALY DETECTED ⚠\n${rule}\n${sim}\nMahal: —\nConfidence: —\n\nChannels: —/${chNames.length}`;
+    } else if (layout === 'minimal') {
+      preview.textContent = `●  PREVIEW\n  ${sim}`;
+    } else if (layout === 'overview') {
+      preview.textContent = `OSMOGRAPH\n${rule}\n${blankChannels}\n\nStatus: — · ${sim}`;
+    } else {
+      preview.textContent = `OSMOGRAPH\n${rule}\n${blankChannels}\n\n${sim}`;
+    }
+    return;
+  }
+
   const last = traceData.map(ch => ch.last() || 0);
   const previewLines = chNames.slice(0, 6).map((name, i) =>
     `CH${i + 1}: ${name.padEnd(8)} ${(last[i] || 0).toFixed(0).padStart(5)} Ω`
   ).join('\n');
+  const anomaly = lastAnomalyReading;
+  const warned = anomaly.state === 'warning' || anomaly.state === 'critical';
+  const status = anomaly.warming ? 'WARMING UP' : anomaly.state === 'unknown' ? '—' : warned ? 'ANOMALY' : 'NORMAL';
 
   if (layout === 'overview') {
-    preview.textContent = `OSMOGRAPH v0.1.0\n${'─'.repeat(18)}\n${previewLines}\n\nStatus: NORMAL`;
+    preview.textContent = `OSMOGRAPH\n${rule}\n${previewLines}\n\nStatus: ${status}`;
   } else if (layout === 'alert') {
-    preview.textContent = `⚠ ANOMALY DETECTED ⚠\n${'─'.repeat(18)}\nMahal: 4.23\nConfidence: 97%\n\nChannels: 3/6`;
+    if (warned) {
+      preview.textContent = `⚠ ANOMALY DETECTED ⚠\n${rule}\nMahal: ${anomaly.score != null ? anomaly.score.toFixed(2) : '—'}\nConfidence: ${anomaly.confidence != null ? `${(anomaly.confidence * 100).toFixed(0)}%` : '—'}\n\nChannels: ${anomaly.triggeredChannels}/${chNames.length}`;
+    } else {
+      preview.textContent = `Status: ${status}\n${rule}\n(Alert layout — renders when\nthe detector raises)` ;
+    }
   } else if (layout === 'minimal') {
-    preview.textContent = `●  NORMAL\n  1523 Ω`;
+    preview.textContent = `●  ${status}\n  ${(last[0] || 0).toFixed(0)} Ω`;
   } else {
-    preview.textContent = `OSMOGRAPH v0.1.0\n${'─'.repeat(18)}\n${previewLines}`;
+    preview.textContent = `OSMOGRAPH\n${rule}\n${previewLines}`;
   }
 }
 
@@ -3736,6 +3974,148 @@ async function reloadClassifiers() {
   } catch (e) { console.error('List classifiers failed:', e); }
 }
 
+// === Host snapshot → Vial Home ===
+function currentHostSnapshot(): VialHost.VialHostSnapshot {
+  const warming = lastAnomalyReading.warming;
+  const anomalyState = lastAnomalyReading.state;
+  return {
+    schema: VialHost.VIAL_HOST_SCHEMA,
+    takenAt: Date.now(),
+    source: connected ? 'live' : 'none',
+    samplingMode: 'timeseries',
+    channels: chNames.map((name, i) => ({
+      id: `ch${i}`,
+      label: name,
+      kind: kindOf(i),
+    })),
+    environment: lastEnv ? { temperature: lastEnv.temperature, humidity: lastEnv.humidity } : null,
+    baseline: {
+      state: warming ? 'warming' : anomalyState === 'unknown' ? 'none' : 'ready',
+      progress: lastAnomalyReading.baselineProgress,
+      ageSec: null,
+    },
+    anomaly: {
+      state: anomalyState,
+      score: lastAnomalyReading.score,
+      confidence: lastAnomalyReading.confidence,
+      alertLevel: lastAnomalyReading.alertLevel,
+      triggeredChannels: lastAnomalyReading.triggeredChannels,
+      consecutive: lastAnomalyReading.consecutive,
+    },
+    classifier: liveSnapshot?.loaded
+      ? {
+          state: 'loaded',
+          name: liveSnapshot.classifier_name,
+          label: liveSnapshot.current_prediction?.label || null,
+          confidence: liveSnapshot.current_prediction?.confidence ?? null,
+        }
+      : { state: 'none', name: null, label: null, confidence: null },
+  };
+}
+
+function renderVialHome(): void {
+  const body = document.getElementById('vialHomeBody');
+  const section = document.getElementById('vialHomeSection');
+  if (!body) return;
+
+  const installed = Domain.loadInstalledIds()
+    .map(id => Domain.domainPackById(id))
+    .filter((pack): pack is Domain.DomainPack => !!pack);
+  const preferred = selectedHomeVialId();
+  const active = (preferred ? installed.find(p => p.id === preferred) : undefined)
+    || (activeDomainPackId ? installed.find(p => p.id === activeDomainPackId) : undefined)
+    || installed.find(p => p.home)
+    || installed[0];
+
+  if (!active) {
+    destroyHomeVialRuntime();
+    section?.classList.remove('stage');
+    body.innerHTML = `<div class="vial-home-empty">No Vial installed. <button class="mini-btn" type="button" data-vial-action="browse">Browse Vials →</button></div>`;
+    body.querySelector<HTMLButtonElement>('[data-vial-action="browse"]')?.addEventListener('click', () => showWorkspaceView('vials'));
+    return;
+  }
+
+  const homeHtml = active.homeUi ? resolveDomainUiHtml(active, 'home') : null;
+  if (homeHtml) {
+    section?.classList.add('stage');
+    if (
+      homeVialRuntime
+      && !homeVialRuntime.destroyed
+      && homeVialRuntime.pack.id === active.id
+      && homeVialRuntime.pack.version === active.version
+      && homeVialRuntime.uiHtml === homeHtml
+      && homeVialRuntime.iframe.isConnected
+    ) {
+      void sendVialData(homeVialRuntime, true);
+      return;
+    }
+    destroyHomeVialRuntime();
+    body.innerHTML = vialHomeStageHtml(active);
+    mountHomeVialRuntime(active, homeHtml);
+    return;
+  }
+
+  section?.classList.remove('stage');
+  destroyHomeVialRuntime();
+  if (active.homeUi) {
+    body.innerHTML = `<div class="vial-home-empty"><b>${escapeHtmlText(active.name)}</b><br>The compact Home view is not cached. Reinstall this Vial to fetch <code>home.html</code>.<br><button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(active.id)}">Open workspace →</button></div>`;
+    body.querySelector<HTMLButtonElement>('[data-vial-action="open-workspace"]')?.addEventListener('click', (event) => {
+      const id = (event.currentTarget as HTMLButtonElement).dataset.vialId!;
+      showWorkspaceView('vials');
+      openDomainWorkspace(id);
+    });
+    return;
+  }
+
+  const contribution = VialHost.homeContributionFor(active, currentHostSnapshot());
+  if (!contribution) {
+    body.innerHTML = `<div class="vial-home-empty"><b>${escapeHtmlText(active.name)}</b><br>${escapeHtmlText(active.tagline)}<br><button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(active.id)}">Open workspace →</button></div>`;
+    body.querySelector<HTMLButtonElement>('[data-vial-action="open-workspace"]')?.addEventListener('click', (event) => {
+      const id = (event.currentTarget as HTMLButtonElement).dataset.vialId!;
+      showWorkspaceView('vials');
+      openDomainWorkspace(id);
+    });
+    return;
+  }
+
+  const gate = VialHost.validateHomeContribution(contribution);
+  if (!gate.ok) {
+    body.innerHTML = `<div class="vial-home-empty"><b>${escapeHtmlText(active.name)}</b><br>This Vial's Home contribution did not pass the host contract: ${escapeHtmlText(gate.errors[0])}</div>`;
+    return;
+  }
+
+  const metrics = [...contribution.runtime, ...contribution.metrics].slice(0, 4);
+  body.innerHTML = `<div class="vial-home-card ${contribution.state}" title="${escapeHtmlText(`${contribution.detail} ${contribution.limits.join(' ')}`)}">
+    <div class="vial-home-top">
+      <span class="vial-home-state ${contribution.state}">${escapeHtmlText(contribution.stateLabel)}</span>
+      <span class="vial-home-state">${escapeHtmlText(contribution.vialName)}</span>
+    </div>
+    <div class="vial-home-headline">${escapeHtmlText(contribution.headline)}</div>
+    <div class="vial-home-detail">${escapeHtmlText(contribution.detail)}</div>
+    <div class="vial-home-metrics">${metrics.map(m => `<div class="vial-home-metric" title="${escapeHtmlText(m.hint || '')}"><div class="k">${escapeHtmlText(m.label)}</div><div class="v">${escapeHtmlText(m.value)}</div></div>`).join('')}</div>
+    <div class="vial-home-actions">${contribution.actions.map(a => `<button class="mini-btn" type="button" data-vial-action="${escapeHtmlText(a.kind)}" data-vial-id="${escapeHtmlText(contribution.vialId)}"${a.href ? ` data-vial-href="${escapeHtmlText(a.href)}"` : ''}>${escapeHtmlText(a.label)}</button>`).join('')}</div>
+    <div class="vial-home-limit" title="${escapeHtmlText(contribution.limits.join(' '))}">${escapeHtmlText(contribution.limits[0])}</div>
+  </div>`;
+
+  body.querySelectorAll<HTMLButtonElement>('[data-vial-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const kind = btn.dataset.vialAction;
+      if (kind === 'open-workspace') {
+        showWorkspaceView('vials');
+        openDomainWorkspace(btn.dataset.vialId!);
+      } else if (kind === 'open-check') {
+        showWorkspaceView('check');
+      } else if (kind === 'open-datasets') {
+        showWorkspaceView('datasets');
+      } else if (kind === 'open-gallery') {
+        showWorkspaceView('smells');
+      } else if (kind === 'external' && btn.dataset.vialHref) {
+        window.open(btn.dataset.vialHref, '_blank', 'noopener,noreferrer');
+      }
+    });
+  });
+}
+
 async function refreshTrainLibrary() {
   try {
     await invoke('import_recordings');
@@ -3858,6 +4238,9 @@ document.getElementById('compareRef')!.addEventListener('change', (e) => {
 });
 
 document.getElementById('libRefresh')!.addEventListener('click', () => reloadLibrary());
+document.getElementById('libTransform')?.addEventListener('click', () => showWorkspaceView('recipes'));
+document.getElementById('anomalyEvents')?.addEventListener('click', () => showWorkspaceView('changelog'));
+document.getElementById('eventsBack')?.addEventListener('click', () => activateWorkspace('dashboard'));
 document.getElementById('libSearch')?.addEventListener('input', () => {
   if (libSearchDebounce !== null) clearTimeout(libSearchDebounce);
   libSearchDebounce = window.setTimeout(renderLibrary, 150);
@@ -3898,23 +4281,6 @@ function fmtLibTime(ts: number): string {
   const d = new Date(ts * 1000);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-// === Starter library — the app never opens empty ===
-// A curated, real, labelled pack ships alongside the app so a user with no
-// hardware can do real work on the first launch: compare substances, train a
-// model, watch a fingerprint change. Idempotent — imports only when the pack
-// is not already in the library, so a user's own recordings are never touched.
-async function ensureStarterLibrary(): Promise<void> {
-  try {
-    const records = await invoke<Array<{ csv_path: string }>>('get_session_index');
-    if (records.some(r => (r.csv_path || '').includes('/SmellNet/'))) return;
-    // Rust materialises the bundled pack into the recordings directory the first
-    // time it is needed; the frontend only has to import it.
-    const dir = await invoke<string | null>('ensure_starter_library');
-    if (!dir) return;
-    await invoke('import_paths', { paths: [dir] });
-  } catch { /* pack absent, or FS sandboxed — non-fatal */ }
 }
 
 // === Smells gallery — substances as first-class objects ===
@@ -4204,7 +4570,7 @@ function columnSilent(v: number[]): boolean {
   return v.length === 0 || v.every(x => Math.abs(x) < 1e-4);
 }
 
-function separationBetween(a: SmellReplicates, b: SmellReplicates): {
+function separationBetween(a: SmellReplicates, b: SmellReplicates, runPermutation = true): {
   channels: ChannelSeparation[]; acc: number; accLevel: number; accShape: number; nEval: number;
   pValue: number; permutations: number;
 } {
@@ -4237,7 +4603,9 @@ function separationBetween(a: SmellReplicates, b: SmellReplicates): {
     });
   }
   const observed = bestViewAccuracy(a.rows, b.rows);
-  const perm = separationPermutationP(a.rows, b.rows, observed.best);
+  const perm = runPermutation
+    ? separationPermutationP(a.rows, b.rows, observed.best)
+    : { p: NaN, total: 0 };
   return {
     channels,
     acc: observed.acc, accLevel: observed.level, accShape: observed.shape,
@@ -4532,8 +4900,9 @@ function sepPairHtml(p: SmellPairSeparation): string {
  *  advisor and Check so both use the same uncertainty rules. */
 function makeSeparationPair(
   a: SmellCardData, b: SmellCardData, ra: SmellReplicates, rb: SmellReplicates,
+  runPermutation = true,
 ): SmellPairSeparation | null {
-  const { channels, acc, accLevel, accShape, nEval, pValue, permutations } = separationBetween(ra, rb);
+  const { channels, acc, accLevel, accShape, nEval, pValue, permutations } = separationBetween(ra, rb, runPermutation);
   if (!channels.length) return null;
   const best = [...channels].sort((x, y) => (Number.isFinite(y.d) ? y.d : -1) - (Number.isFinite(x.d) ? x.d : -1))[0] || null;
   const pair: SmellPairSeparation = {
@@ -4623,7 +4992,7 @@ async function renderSmellSeparation(): Promise<void> {
       <div class="sep-diff-copy">
         <div class="sep-diff-names">${escapeHtmlText(names)}</div>
         <div>Signed difference on the same array. Outward means the sample is higher; inward means lower. This is not a chemical ID and it does not transfer to another rig.</div>
-        <button class="mini-btn" id="sepOpenCheck" type="button">Open in Check →</button>
+        <button class="mini-btn" id="sepOpenCheck" type="button">Open in Separability →</button>
       </div>
     </div>`;
   }
@@ -4788,61 +5157,11 @@ function drawDetailFingerprint(canvas: HTMLCanvasElement, values: number[], chan
 
 function updateSmellSelection(): void {
   const stamp = document.getElementById('smellSelStamp');
+  const bar = document.getElementById('smellSelectionBar');
   const btn = document.getElementById('smellCompare') as HTMLButtonElement | null;
   if (stamp) stamp.textContent = `${smellSel.size} selected`;
+  if (bar) bar.hidden = smellSel.size === 0;
   if (btn) btn.disabled = smellSel.size < 2;
-}
-
-function renderHomeGlance(): void {
-  const host = document.getElementById('homeGlance');
-  if (!host) return;
-  const named = new Set(
-    sessions
-      .map(s => (s.substance || '').trim().toLowerCase())
-      .filter(v => v && v !== 'unknown'),
-  );
-  const installed = Domain.loadInstalledIds().length;
-  const recent: { index: number; name: string }[] = [];
-  const seen = new Set<string>();
-  sessions.forEach((s, index) => {
-    const name = (s.substance || '').trim();
-    if (!name || name.toLowerCase() === 'unknown') return;
-    const key = name.toLowerCase();
-    if (seen.has(key)) return;
-    seen.add(key);
-    recent.push({ index, name });
-  });
-  host.innerHTML = [
-    '<span>Library</span>',
-    `<button type="button" data-home-go="smells">${named.size} smell${named.size === 1 ? '' : 's'}</button>`,
-    '<i>·</i>',
-    `<button type="button" data-home-go="sessions">${sessions.length} recording${sessions.length === 1 ? '' : 's'}</button>`,
-    '<i>·</i>',
-    `<button type="button" data-home-go="vials">${installed} domain Vial${installed === 1 ? '' : 's'}</button>`,
-    ...(recent.length ? [
-      '<span class="home-glance-break"></span>',
-      '<span>Recent</span>',
-      ...recent.slice(0, 3).flatMap((r, i) => [
-        ...(i ? ['<i>·</i>'] : []),
-        `<button type="button" data-home-recent="${r.index}">${escapeHtmlText(r.name)}</button>`,
-      ]),
-    ] : []),
-  ].join('');
-  host.querySelectorAll<HTMLButtonElement>('[data-home-go]').forEach(btn => {
-    btn.addEventListener('click', () => showWorkspaceView(btn.dataset.homeGo || 'smells'));
-  });
-  host.querySelectorAll<HTMLButtonElement>('[data-home-recent]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const index = parseInt(btn.dataset.homeRecent || '-1', 10);
-      if (!(index >= 0) || !sessions[index]) return;
-      selectedSession = index;
-      showWorkspaceView('sessions');
-      window.setTimeout(() => {
-        const rec = sessions[index];
-        if (rec) inspectSession(rec);
-      }, 30);
-    });
-  });
 }
 
 function buildSmellCards(): void {
@@ -4867,7 +5186,7 @@ function buildSmellCards(): void {
     .sort((a, b) => b.records.length - a.records.length || a.substance.localeCompare(b.substance));
   const sub = document.getElementById('smellsSub');
   if (sub) {
-    sub.textContent = `${smellCards.length} smells from ${sessions.length} recordings · grouped by substance · fingerprint = mean settled ΔR/R₀ per channel on the dominant array`;
+    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings · grouped by substance`;
   }
 }
 
@@ -4965,14 +5284,13 @@ async function renderSmellGallery(): Promise<void> {
   if (!grid) return;
   buildSmellCards();
   const visible = visibleSmellCards();
-  const stamp = document.getElementById('smellResultStamp');
+  const stamp = document.getElementById('smellResultStampTop') || document.getElementById('smellResultStamp');
   if (stamp) stamp.textContent = `${visible.length} smell${visible.length === 1 ? '' : 's'}`;
-  renderDiscoveryStrip();
 
   if (!visible.length) {
     grid.innerHTML = `<div class="smells-empty">
       <b>No smells match that.</b>
-      Try a shorter search, or clear the filters to see the whole starter library.
+      Try a shorter search, or clear the filters to see the whole library.
       <div style="margin-top:10px"><button class="mini-btn" id="smellClearFilters" type="button">Clear search and filters</button></div>
     </div>`;
     document.getElementById('smellClearFilters')?.addEventListener('click', resetSmellFilters);
@@ -5385,7 +5703,7 @@ async function runCheck(): Promise<void> {
   const a = smellCards.find(c => c.key === refSel.value);
   const b = smellCards.find(c => c.key === sampleSel.value);
   if (!a || !b) {
-    result.innerHTML = '<div class="check-empty"><b>No smells to check.</b> Import a recording or load the starter pack under Explore.</div>';
+    result.innerHTML = '<div class="check-empty"><b>No smells to compare.</b> Download a corpus from Explore → Datasets or import a recording.</div>';
     stamp.textContent = 'no smells';
     return;
   }
@@ -5522,7 +5840,7 @@ function renderCheckSaved(): void {
 function openSaveCheckDialog(): void {
   const c = checkCurrent;
   if (!c || !c.pair) {
-    showToast('Run a check before saving it.');
+    showToast('Run a pair before saving it.');
     return;
   }
   const modal = document.getElementById('checkSaveModal');
@@ -5575,7 +5893,7 @@ function commitCurrentCheck(name: string): void {
   persistSavedChecks(checks);
   closeSaveCheckDialog();
   renderCheckSaved();
-  showToast('Check saved.');
+  showToast('Separability result saved.');
 }
 
 function openSavedCheck(id: string): void {
@@ -5626,7 +5944,7 @@ function armOrDeleteSavedCheck(id: string, button: HTMLButtonElement): void {
 async function copyCurrentCheck(): Promise<void> {
   const c = checkCurrent;
   if (!c || !c.pair) {
-    showToast('Run a check first.');
+    showToast('Run a pair first.');
     return;
   }
   const p = c.pair;
@@ -5653,7 +5971,7 @@ async function copyCurrentCheck(): Promise<void> {
     'Preview from saved replicates, before training. Not a chemical identification. Different arrays are never blended.',
   ].filter(Boolean);
   const ok = await copyText(lines.join('\n'));
-  showToast(ok ? 'Check summary copied.' : 'Copy failed.');
+  showToast(ok ? 'Separability summary copied.' : 'Copy failed.');
 }
 
 function wrapCanvasText(
@@ -5855,7 +6173,7 @@ function drawCheckCardCanvas(c: CheckCurrent): HTMLCanvasElement | null {
 
 async function exportCurrentCheckCard(): Promise<void> {
   if (!checkCurrent?.pair) {
-    showToast('Run a check first.');
+    showToast('Run a pair first.');
     return;
   }
   const canvas = drawCheckCardCanvas(checkCurrent);
@@ -5865,11 +6183,104 @@ async function exportCurrentCheckCard(): Promise<void> {
   await exportCanvasPng(canvas, `osmograph-check-${safe || 'pair'}.png`);
 }
 
+let checkMatrixToken = 0;
+let checkMatrixClasses: SmellCardData[] = [];
+
+/** A class-level view of the same replicate evidence. Pairwise checks answer
+ *  “can the array tell these two apart?”; this answers “which classes are
+ *  confusable before I train?”. It deliberately skips the permutation test
+ *  (the pair bench below runs it) so a matrix of classes stays responsive. */
+async function renderCheckMatrix(): Promise<void> {
+  const section = document.getElementById('checkMatrixSection');
+  const host = document.getElementById('checkMatrix');
+  const stamp = document.getElementById('checkMatrixStamp');
+  if (!section || !host || !stamp) return;
+  const candidates = smellCards
+    .filter(c => c.records.filter(r => !!r.file_id).length >= 2)
+    .slice(0, 8);
+  checkMatrixClasses = candidates;
+  if (candidates.length < 2) {
+    section.hidden = true;
+    host.innerHTML = '';
+    return;
+  }
+  section.hidden = false;
+  const token = ++checkMatrixToken;
+  stamp.textContent = 'reading replicates…';
+  host.innerHTML = '<div class="hint" style="padding:4px 2px">Reading class pairs…</div>';
+  const reps = await Promise.all(candidates.map(c => smellReplicates(c)));
+  if (token !== checkMatrixToken) return;
+
+  const pairs = new Map<string, SmellPairSeparation | null>();
+  let separable = 0;
+  let known = 0;
+  for (let i = 0; i < candidates.length; i++) {
+    for (let j = i + 1; j < candidates.length; j++) {
+      const ra = reps[i], rb = reps[j];
+      const pair = ra && rb ? makeSeparationPair(candidates[i], candidates[j], ra, rb, false) : null;
+      pairs.set(`${i}:${j}`, pair);
+      if (pair) {
+        known++;
+        if (pair.verdict === 'separable') separable++;
+      }
+    }
+  }
+
+  const short = (s: string) => titleCase(s).length > 12 ? `${titleCase(s).slice(0, 11)}…` : titleCase(s);
+  const cell = (i: number, j: number) => {
+    if (i === j) return '<td><span class="sep-matrix-cell diag">·</span></td>';
+    const key = i < j ? `${i}:${j}` : `${j}:${i}`;
+    const pair = pairs.get(key) || null;
+    const verdict = pair?.verdict || 'insufficient';
+    const text = pair && Number.isFinite(pair.acc) && pair.nEval > 0
+      ? `${Math.round(pair.acc * pair.nEval)}/${pair.nEval}`
+      : '–';
+    const title = pair
+      ? `${titleCase(candidates[i].substance)} ↔ ${titleCase(candidates[j].substance)} · ${SEP_VERDICT_LABEL[pair.verdict]} · ${text} left-out recordings match their own smell`
+      : `${titleCase(candidates[i].substance)} ↔ ${titleCase(candidates[j].substance)} · not enough comparable replicates`;
+    return `<td><button class="sep-matrix-cell ${verdict}" type="button"
+      data-check-pair-a="${esc(candidates[i].key)}" data-check-pair-b="${esc(candidates[j].key)}"
+      title="${esc(title)}">${text}</button></td>`;
+  };
+  const head = `<tr><th></th>${candidates.map(c => `<th title="${esc(titleCase(c.substance))}">${esc(short(c.substance))}</th>`).join('')}</tr>`;
+  const body = candidates.map((c, i) =>
+    `<tr><th class="row" title="${esc(titleCase(c.substance))}">${esc(short(c.substance))}</th>${candidates.map((_, j) => cell(i, j)).join('')}</tr>`
+  ).join('');
+  host.innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+  stamp.textContent = `${candidates.length} classes · ${separable}/${known} pairs separable`;
+  host.querySelectorAll<HTMLButtonElement>('[data-check-pair-a]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const refSel = document.getElementById('checkRef') as HTMLSelectElement | null;
+      const sampleSel = document.getElementById('checkSample') as HTMLSelectElement | null;
+      if (!refSel || !sampleSel) return;
+      refSel.value = btn.dataset.checkPairA || '';
+      sampleSel.value = btn.dataset.checkPairB || '';
+      void runCheck();
+      document.querySelector<HTMLElement>('.check-bench')?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  });
+}
+
+document.getElementById('checkMatrixTrain')?.addEventListener('click', () => {
+  if (!checkMatrixClasses.length) return;
+  const minQ = trainMinQualityValue();
+  trainSelected.clear();
+  for (const c of checkMatrixClasses) {
+    c.records
+      .filter(r => !!r.file_id && (!minQ || r.quality >= minQ * 100))
+      .slice(0, 6)
+      .forEach(r => trainSelected.add(r.file_id!));
+  }
+  showWorkspaceView('train');
+  renderTrain();
+});
+
 async function renderCheckView(force = false): Promise<void> {
   if (force || !smellCards.length) buildSmellCards();
   populateCheckSelectors(checkPrefill || undefined);
   checkPrefill = null;
   renderCheckSaved();
+  void renderCheckMatrix();
 
   const result = document.getElementById('checkResult');
   const stamp = document.getElementById('checkStamp');
@@ -5878,7 +6289,7 @@ async function renderCheckView(force = false): Promise<void> {
   if (!smellCards.length) {
     if (stamp) stamp.textContent = 'no smells';
     if (result) {
-      result.innerHTML = '<div class="check-empty"><b>No smells in the library yet.</b> Import a recording or load the starter pack under Explore, then come back.</div>';
+      result.innerHTML = '<div class="check-empty"><b>No smells in the library yet.</b> Download a corpus from Explore → Datasets or import a recording, then come back.</div>';
     }
     drawCheckDifferenceMessage(document.getElementById('checkDiffPrint') as HTMLCanvasElement | null, 'No smells');
     return;
@@ -5886,7 +6297,7 @@ async function renderCheckView(force = false): Promise<void> {
   if (smellCards.length < 2) {
     if (stamp) stamp.textContent = 'needs a second smell';
     if (result) {
-      result.innerHTML = '<div class="check-empty"><b>Check needs two smells.</b> Record or import one more smell on the same array.</div>';
+      result.innerHTML = '<div class="check-empty"><b>Separability needs two smells.</b> Record or import one more smell on the same array.</div>';
     }
     return;
   }
@@ -5955,7 +6366,7 @@ function vialStatusOf(v: Vial.VialManifest): Vial.VialStatus {
 }
 
 function vialStatusLabel(status: Vial.VialStatus): string {
-  return status === 'sealed' ? 'Sealed' : status === 'open' ? 'Open' : 'Draft';
+  return status === 'sealed' ? 'Gated' : status === 'open' ? 'Ungated' : 'Draft';
 }
 
 function vialCorrect(c: Vial.VialClaim): string {
@@ -6154,7 +6565,7 @@ function setVialError(msg: string): void {
 function openVialCreate(preferred?: string): void {
   const options = vialSourceOptions();
   if (!options.length) {
-    showToast('Run a check first, then package it as a Vial.');
+    showToast('Run a pair first, then package it as a Vial.');
     return;
   }
   const select = document.getElementById('vialSourceCheck') as HTMLSelectElement | null;
@@ -6207,7 +6618,7 @@ function saveVialFromModal(publish: boolean): void {
     renderVials();
     openVialDetail(vial.id);
     if (!publish) showToast('Vial draft saved. Validate it before using it for a decision.');
-    else if (vial.status === 'sealed') showToast('Vial sealed. The local evidence passed every critical check.');
+    else if (vial.status === 'sealed') showToast('Saved. Every critical check passed — the evidence carries this claim. "Sealed" is reserved for published, reviewed, signed Vials.');
     else showToast('Vial saved as Open. Validation failed — inspect the gate before using it.');
   } catch (err) {
     setVialError(err instanceof Error ? err.message : 'Could not save this Vial.');
@@ -6215,6 +6626,21 @@ function saveVialFromModal(publish: boolean): void {
 }
 
 let activeDomainPackId: string | null = null;
+
+/** The Vial the user wants applied to the live Home view. Kept separate from
+ *  the “currently open workspace” id so Fleet can choose a live Vial without
+ *  pretending to open its editor. */
+const HOME_VIAL_KEY = 'osmograph.homeVial.v1';
+function selectedHomeVialId(): string | null {
+  try { return localStorage.getItem(HOME_VIAL_KEY) || null; } catch { return null; }
+}
+function setSelectedHomeVialId(id: string): void {
+  try {
+    if (id) localStorage.setItem(HOME_VIAL_KEY, id);
+    else localStorage.removeItem(HOME_VIAL_KEY);
+  } catch { /* ignore */ }
+  renderVialHome();
+}
 let activeDomainState: Domain.DomainState | null = null;
 let activeDomainHotspot: string | null = null;
 let domainRemoveArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
@@ -6374,8 +6800,7 @@ function domainWidgetHtml(w: Domain.DomainWidget, pack: Domain.DomainPack, state
   if (w.type === 'hero') {
     return `<div class="domain-hero">
       <div>
-        <span class="domain-risk ${pack.risk}">${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}</span>
-        <h2>${escapeHtmlText(w.title)}</h2>
+          <h2>${escapeHtmlText(w.title)}</h2>
         <p>${escapeHtmlText(w.subtitle)}</p>
         <p>${escapeHtmlText(pack.summary)}</p>
         <p><b>What it is:</b> ${escapeHtmlText(pack.whatItIs)}</p>
@@ -6387,7 +6812,7 @@ function domainWidgetHtml(w: Domain.DomainWidget, pack: Domain.DomainPack, state
   }
   if (w.type === 'risk') {
     return `<div class="domain-risk-banner ${w.level}">
-      <div class="domain-risk-head"><b>${escapeHtmlText(w.headline)}</b><span class="domain-risk ${w.level}">${escapeHtmlText(Domain.RISK_LABEL[w.level])}</span></div>
+      <div class="domain-risk-head"><b>${escapeHtmlText(w.headline)}</b></div>
       <div class="domain-risk-body">${escapeHtmlText(w.body)}</div>
       <div class="domain-risk-lists">
         <div class="always"><h4>Always</h4><ul>${w.always.map(x => `<li>${escapeHtmlText(x)}</li>`).join('')}</ul></div>
@@ -6478,30 +6903,101 @@ function domainSourceLabel(pack: Domain.DomainPack): string {
   }
 }
 
+function domainSourceHref(pack: Domain.DomainPack): string {
+  return pack.sourceUrl || '';
+}
+
+function domainSourceHost(href: string): string {
+  try { return new URL(href).hostname; } catch { return ''; }
+}
+
 function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
-  const official = Domain.OFFICIAL_DOMAIN_PACKS.some(p => p.id === pack.id);
-  const origin = official ? 'Official' : 'Community · policy-gated';
-  const source = domainSourceLabel(pack);
-  const gate = Domain.validateDomainPack(pack, !official);
-  const gatePassed = gate.checks.filter(c => c.passed).length;
+  const sourceHref = domainSourceHref(pack);
+  const sourceHost = domainSourceHost(sourceHref);
+  const gate = Domain.validateDomainPack(pack, true);
+  const state = installed ? 'installed' : 'source';
+  const cockpit = pack.ui ? ' · sandboxed UI' : '';
+  const actions = installed
+    ? `<button class="mini-btn primary" type="button" data-domain-open="${escapeHtmlText(pack.id)}">Open</button>
+       ${sourceHref ? `<a class="text-link domain-source" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer" title="Manifest source">Source ↗</a>` : ''}
+       <details class="ds-row-menu domain-menu">
+         <summary title="More actions">⋯</summary>
+         <div class="ds-row-menu-pop">
+           <button type="button" data-domain-docs="${escapeHtmlText(pack.id)}">Docs</button>
+           <button type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
+           <button type="button" class="ds-remove" data-domain-remove="${escapeHtmlText(pack.id)}">Remove</button>
+         </div>
+       </details>`
+    : `<button class="mini-btn primary" type="button" data-domain-install="${escapeHtmlText(pack.id)}">Install</button>
+       ${sourceHref ? `<a class="text-link domain-source" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer" title="Manifest source">Source ↗</a>` : ''}
+       <details class="ds-row-menu domain-menu">
+         <summary title="More actions">⋯</summary>
+         <div class="ds-row-menu-pop">
+           <button type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
+           <button type="button" class="ds-remove" data-domain-delete="${escapeHtmlText(pack.id)}">Delete</button>
+         </div>
+       </details>`;
   return `<div class="domain-card ${installed ? 'installed' : ''}" title="${escapeHtmlText(pack.summary)}">
     <div class="domain-card-head">
-      <div style="min-width:0"><div class="domain-card-name">${escapeHtmlText(pack.name)}</div><div class="domain-card-sub">v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.author)} · ${escapeHtmlText(pack.domain)}</div></div>
-      <span class="domain-risk ${pack.risk}">${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}</span>
+      <div style="min-width:0"><div class="domain-card-name">${escapeHtmlText(pack.name)}</div><div class="domain-card-sub">v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.author)}</div></div>
+      <span class="domain-card-state ${state}">${state}</span>
     </div>
     <div class="domain-card-tagline">${escapeHtmlText(pack.tagline)}</div>
-    <div class="domain-card-meta">${origin}${escapeHtmlText(source)} · ${installed ? 'installed · log local' : 'declarative'} · ${pack.docs.length} docs · ${pack.citations.length} citations · ${escapeHtmlText(pack.license)} · gate ${gatePassed}/${gate.checks.length}</div>
+    <div class="domain-card-meta">${escapeHtmlText(pack.domain)} · ${escapeHtmlText(pack.license)} · ${gate.checks.filter(c => c.passed).length}/${gate.checks.length} gate${cockpit}${sourceHost ? ` · ${escapeHtmlText(sourceHost)}` : ''}</div>
+    <div class="domain-card-actions">${actions}</div>
+  </div>`;
+}
+
+function registryRemotePacks(): RegistryVialEntry[] {
+  const installedIds = new Set(Domain.loadInstalledIds());
+  return registryEntries.filter(entry => {
+    if (!entry.manifestUrl) return false;
+    if (installedIds.has(entry.id)) return false;
+    return !Domain.domainPackById(entry.id);
+  });
+}
+
+function registryUnpublishedCount(): number {
+  return registryEntries.filter(entry => !entry.manifestUrl).length;
+}
+
+/** sha256 hex of a text payload, via the platform WebCrypto (secure context). */
+async function sha256Hex(text: string): Promise<string> {
+  const bytes = new TextEncoder().encode(text);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function registryCardHtml(entry: RegistryVialEntry): string {
+  let host = 'author-hosted';
+  try { host = new URL(entry.manifestUrl || '').hostname; } catch { /* keep fallback */ }
+  return `<div class="domain-card remote">
+    <div class="domain-card-head">
+      <div style="min-width:0"><div class="domain-card-name">${escapeHtmlText(entry.name)}</div><div class="domain-card-sub">v${escapeHtmlText(entry.version)} · ${escapeHtmlText(entry.author)}</div></div>
+      <span class="domain-card-state source">${entry.hasUi ? 'sandboxed UI' : 'manifest'}</span>
+    </div>
+    <div class="domain-card-tagline">${escapeHtmlText(entry.tagline)}</div>
+    <div class="domain-card-meta">${escapeHtmlText(entry.domain)} · ${escapeHtmlText(entry.license)}${entry.evidence ? ` · evidence ${escapeHtmlText(entry.evidence)}` : ''} · ${escapeHtmlText(host)}</div>
     <div class="domain-card-actions">
-      ${installed
-        ? `<button class="mini-btn primary" type="button" data-domain-open="${escapeHtmlText(pack.id)}">Open workspace</button>
-           <button class="mini-btn" type="button" data-domain-docs="${escapeHtmlText(pack.id)}">Docs</button>
-           <button class="mini-btn" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
-           <button class="mini-btn" type="button" data-domain-remove="${escapeHtmlText(pack.id)}">Remove</button>`
-        : `<button class="mini-btn primary" type="button" data-domain-install="${escapeHtmlText(pack.id)}">Install</button>
-           <button class="mini-btn" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export</button>
-           ${official ? '' : `<button class="mini-btn" type="button" data-domain-delete="${escapeHtmlText(pack.id)}">Delete</button>`}`}
+      <button class="mini-btn primary" type="button" data-registry-install="${escapeHtmlText(entry.manifestUrl || '')}" data-registry-id="${escapeHtmlText(entry.id)}"${entry.hash ? ` data-registry-hash="${escapeHtmlText(entry.hash)}"` : ''}>Install from source</button>
+      <a class="text-link domain-source" href="${escapeHtmlText(entry.manifestUrl || '')}" target="_blank" rel="noopener noreferrer">Source ↗</a>
     </div>
   </div>`;
+}
+
+async function loadVialRegistry(): Promise<void> {
+  if (registryLoading || registryLoaded) return;
+  registryLoading = true;
+  registryError = '';
+  try {
+    registryEntries = await fetchVialRegistry();
+  } catch (err) {
+    registryError = err instanceof Error ? err.message : 'The registry could not be reached.';
+  } finally {
+    registryLoading = false;
+    registryLoaded = true;
+    if (activeVialsTab === 'aromatory') renderDomainArea();
+  }
 }
 
 function renderDomainArea(): void {
@@ -6511,22 +7007,35 @@ function renderDomainArea(): void {
   const installedIds = new Set(Domain.loadInstalledIds());
   const installed = all.filter(p => installedIds.has(p.id));
   const available = all.filter(p => !installedIds.has(p.id));
+  const remote = registryRemotePacks();
   if (installedHost) {
     installedHost.innerHTML = installed.length
       ? `<div class="domain-grid">${installed.map(p => domainCardHtml(p, true)).join('')}</div>`
-      : `<div class="domain-empty"><b>No domain Vials installed.</b><br>Install a workspace to get a protocol, a log, safety limits, and the questions the array cannot answer. <button class="text-link" type="button" data-vials-tab-go="aromatory">Open the Aromatory →</button></div>`;
+      : `<div class="domain-empty"><b>No domain Vials installed.</b><br>Install a workspace to get a protocol, a log, scope limits, and the questions the array cannot answer. <button class="text-link" type="button" data-vials-tab-go="aromatory">Open the Aromatory →</button></div>`;
   }
   if (catalogHost) {
+    const registryNote = registryLoading
+      ? 'Loading the public registry…'
+      : registryError
+        ? `Registry unavailable (${escapeHtmlText(registryError)}). Install from a URL instead.`
+        : remote.length
+          ? `${remote.length} author-hosted project${remote.length === 1 ? '' : 's'} discovered. Each still passes the local gate.${registryUnpublishedCount() ? ` ${registryUnpublishedCount()} more named in the registry have no published manifest URL — nothing to install yet.` : ''}`
+          : registryUnpublishedCount()
+            ? `Registry checked. ${registryUnpublishedCount()} named project${registryUnpublishedCount() === 1 ? ' has' : 's have'} no published manifest URL. Install from a URL instead.`
+            : 'Registry checked. No new author-hosted projects.';
     catalogHost.innerHTML = `
-      <div class="vials-section-head" style="margin-top:0"><span>Domain packs</span><span class="domain-catalog-actions"><button class="mini-btn" type="button" data-domain-import>Import .vial.json</button><button class="mini-btn" type="button" data-domain-url>Install from URL</button><button class="mini-btn" type="button" data-domain-template>Starter template</button><button class="mini-btn" type="button" data-guide-open="authoring">Authoring</button><span class="coord-tag">${available.length} available</span></span></div>
+      <div class="vials-section-head" style="margin-top:0"><span>Domain packs</span><span class="domain-catalog-actions"><button class="mini-btn" type="button" data-domain-import>Import .vial.json</button><button class="mini-btn" type="button" data-domain-url>Install from URL</button><button class="mini-btn" type="button" data-domain-template>Starter template</button><button class="mini-btn" type="button" data-domain-submit>Submit</button><button class="mini-btn" type="button" data-guide-open="authoring">Authoring</button><span class="coord-tag">${available.length} available</span></span></div>
       <div class="domain-grid">
-        ${available.length ? available.map(p => domainCardHtml(p, false)).join('') : '<div class="domain-empty">Everything in the Aromatory is installed. Import a community Vial or start from the template to add another.</div>'}
-      </div>`;
+        ${available.length ? available.map(p => domainCardHtml(p, false)).join('') : '<div class="domain-empty">No local manifests. Fetch an author-hosted <b>vial.json</b> by URL, import a file, or start from the template.</div>'}
+      </div>
+      <div class="vials-section-head" style="margin-top:14px"><span>From the registry</span><span class="coord-tag">${registryNote}</span></div>
+      ${remote.length ? `<div class="domain-grid">${remote.map(registryCardHtml).join('')}</div>` : ''}`;
   }
+  void loadVialRegistry();
 }
 
 const DOMAIN_SECTION_LABEL: Record<string, string> = {
-  hero: 'Overview', risk: 'Risk', metrics: 'Claims', detector: 'Detector', diagram: 'Diagram', timeline: 'Rhythm',
+  hero: 'Overview', risk: 'Scope', metrics: 'Claims', detector: 'Detector', diagram: 'Diagram', timeline: 'Rhythm',
   tracking: 'Log', chart: 'Trend', rules: 'Stop rules', checklist: 'Checklist', docs: 'Field notes', rig: 'Rig',
 };
 const DOMAIN_JUMP_ORDER = ['hero', 'risk', 'metrics', 'detector', 'tracking', 'chart', 'diagram', 'timeline', 'rules', 'checklist', 'docs', 'rig'];
@@ -6553,14 +7062,484 @@ function updateDomainJumpActive(): void {
   });
 }
 
+interface ActiveVialRuntime {
+  pack: Domain.DomainPack;
+  nonce: string;
+  iframe: HTMLIFrameElement;
+  source: string;
+  sources: VialRuntime.VialSourceOption[];
+  recordingCache: Map<string, VialRuntime.VialSeriesWindow | null>;
+  timer: number | null;
+  ready: boolean;
+  mount: 'workspace' | 'home';
+  destroyed: boolean;
+  uiHtml: string;
+}
+
+const VIAL_SOURCE_KEY = 'osmograph.vial.source.';
+let activeVialRuntime: ActiveVialRuntime | null = null;
+let homeVialRuntime: ActiveVialRuntime | null = null;
+
+function uiCacheKey(id: string, kind: 'workspace' | 'home'): string {
+  return kind === 'home' ? `${id}::home` : id;
+}
+
+function resolveDomainUiHtml(pack: Domain.DomainPack, kind: 'workspace' | 'home' = 'workspace'): string | null {
+  const spec = kind === 'home' ? pack.homeUi : pack.ui;
+  if (!spec) return null;
+  return Domain.loadDomainUi(uiCacheKey(pack.id, kind), pack.version);
+}
+
+function domainUiAssetUrl(pack: Domain.DomainPack, manifestUrl: string | undefined, kind: 'workspace' | 'home' = 'workspace'): string | null {
+  const spec = kind === 'home' ? pack.homeUi : pack.ui;
+  if (!spec) return null;
+  const base = manifestUrl || pack.sourceUrl || '';
+  if (!base) return null;
+  try {
+    return new URL(spec.entry, base).toString();
+  } catch {
+    return null;
+  }
+}
+
+async function fetchDomainUiAsset(pack: Domain.DomainPack, manifestUrl: string, kind: 'workspace' | 'home' = 'workspace'): Promise<string> {
+  const raw = domainUiAssetUrl(pack, manifestUrl, kind);
+  if (!raw) throw new Error('This Vial has no UI asset URL.');
+  const url = new URL(raw);
+  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]'))) {
+    throw new Error('A sandboxed Vial UI must use HTTPS (localhost is allowed for development).');
+  }
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url.toString(), {
+      headers: { Accept: 'text/html' },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`The UI server returned HTTP ${response.status}.`);
+    const finalUrl = new URL(response.url);
+    if (finalUrl.origin !== url.origin || finalUrl.pathname !== url.pathname) {
+      throw new Error('The UI redirect left the manifest source path. Refusing to run it.');
+    }
+    const html = await response.text();
+    VialRuntime.assertSandboxableUi(html);
+    return html;
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('The UI download timed out.');
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function cacheDomainUi(pack: Domain.DomainPack, manifestUrl: string): Promise<void> {
+  for (const kind of ['workspace', 'home'] as const) {
+    const spec = kind === 'home' ? pack.homeUi : pack.ui;
+    if (!spec) continue;
+    try {
+      const html = await fetchDomainUiAsset(pack, manifestUrl, kind);
+      Domain.saveDomainUi(uiCacheKey(pack.id, kind), pack.version, html, domainUiAssetUrl(pack, manifestUrl, kind) || undefined);
+    } catch {
+      // The declarative fallback still works offline if one asset is unavailable.
+    }
+  }
+}
+
+function runtimeSourceOptions(): VialRuntime.VialSourceOption[] {
+  const options: VialRuntime.VialSourceOption[] = [{
+    id: 'live',
+    label: connected ? 'Live array' : 'Live buffer',
+    kind: 'live',
+    detail: connected ? 'This rig, current session' : 'No rig connected',
+  }];
+  for (const session of sessions) {
+    if (!session.file_id) continue;
+    options.push({
+      id: `rec:${session.file_id}`,
+      label: `${session.substance} · ${session.time}`,
+      kind: 'recording',
+      detail: session.label,
+    });
+    if (options.length >= 25) break;
+  }
+  return options;
+}
+
+function liveVialSeries(): VialRuntime.VialSeriesWindow | null {
+  const channels = chNames.slice();
+  if (!channels.length) return null;
+  const raw = channels.map((_, i) => historyData[i]?.slice() ?? []);
+  const n = raw.reduce((max, values) => Math.max(max, values.length), 0);
+  if (n < 4) return null;
+  const sampled = VialRuntime.downsampleChannels(raw, 600);
+  return {
+    source: 'live',
+    label: connected ? 'Live array' : 'Live buffer (no rig)',
+    channels,
+    time: sampled.indices,
+    timeUnit: 'sample',
+    values: sampled.values,
+    fingerprint: VialRuntime.fingerprintFromSeries(sampled.values),
+    evolution: VialRuntime.evolutionFromSeries(sampled.values),
+  };
+}
+
+async function recordingVialSeries(sourceId: string): Promise<VialRuntime.VialSeriesWindow | null> {
+  const fileId = sourceId.startsWith('rec:') ? sourceId.slice(4) : '';
+  if (!fileId) return null;
+  const session = sessions.find(s => s.file_id === fileId);
+  try {
+    const series = await invoke<SessionSeries>('load_session_series', { fileId });
+    if (!series || !Array.isArray(series.channels) || !Array.isArray(series.values)) return null;
+    const sampled = VialRuntime.downsampleChannels(series.values, 600);
+    return {
+      source: 'recording',
+      label: session ? `${session.substance} · ${session.time}` : series.label,
+      channels: series.channels,
+      time: sampled.indices.map(i => series.time[i] ?? i),
+      timeUnit: 's',
+      values: sampled.values,
+      fingerprint: VialRuntime.fingerprintFromSeries(sampled.values),
+      evolution: VialRuntime.evolutionFromSeries(sampled.values),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function vialEvents(): VialRuntime.VialEvent[] {
+  const label = (index: number): string => chNames[index] || `CH ${index + 1}`;
+  const events: VialRuntime.VialEvent[] = [];
+  if (openChange) {
+    events.push({
+      start: openChange.start,
+      end: Date.now(),
+      alert: openChange.alert,
+      peak: openChange.peak,
+      channels: [...openChange.channels].map(label),
+      ongoing: true,
+    });
+  }
+  for (const event of changeLog.slice(0, 40)) {
+    events.push({
+      start: event.start,
+      end: event.end,
+      alert: event.alert,
+      peak: event.peak,
+      channels: event.channels.map(label),
+      ongoing: false,
+    });
+  }
+  return events;
+}
+
+async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntime, force = false): Promise<void> {
+  if (!runtime || runtime.destroyed || !runtime.iframe.isConnected) return;
+  if (!force && runtime.source !== 'live') return;
+  let series: VialRuntime.VialSeriesWindow | null = null;
+  if (runtime.source === 'live') {
+    series = liveVialSeries();
+  } else if (runtime.source.startsWith('rec:')) {
+    if (!runtime.recordingCache.has(runtime.source)) {
+      runtime.recordingCache.set(runtime.source, await recordingVialSeries(runtime.source));
+    }
+    series = runtime.recordingCache.get(runtime.source) || null;
+  }
+  if (runtime.destroyed || !runtime.iframe.isConnected) return;
+  const state = activeDomainState && activeDomainState.packId === runtime.pack.id
+    ? activeDomainState
+    : Domain.loadDomainState(runtime.pack.id);
+  const payload: VialRuntime.VialDataPayload = {
+    schema: VialRuntime.VIAL_RUNTIME_SCHEMA,
+    snapshot: currentHostSnapshot(),
+    series,
+    sources: runtime.sources,
+    selectedSource: runtime.source,
+    events: vialEvents(),
+    domain: { fields: state.fields, checks: state.checks, logs: state.logs },
+    view: runtime.mount,
+    host: { name: 'Osmograph', version: 'desktop', runtime: 'sandbox/1' },
+  };
+  runtime.iframe.contentWindow?.postMessage({ vialData: true, payload }, '*');
+  const stampText = series
+    ? `${series.label} · ${series.channels.length} ch · ${series.values[0]?.length || 0} pts`
+    : runtime.source === 'live'
+      ? 'no live window yet'
+      : 'recording unavailable';
+  const stamp = document.getElementById(runtime.mount === 'home' ? 'vialHomeStamp' : 'vialRuntimeStamp');
+  if (stamp) stamp.textContent = stampText;
+}
+
+function vialRuntimeShellHtml(pack: Domain.DomainPack): string {
+  const sourceHref = domainSourceHref(pack);
+  const sourceHost = domainSourceHost(sourceHref);
+  return `<div class="vial-runtime-shell">
+    <div class="vial-runtime-bar">
+      <div class="vial-runtime-title"><span class="vial-runtime-dot"></span>${escapeHtmlText(pack.name)}<span class="coord-tag">sandbox/1</span></div>
+      <span class="vial-runtime-stamp" id="vialRuntimeStamp">starting…</span>
+      <span class="vial-runtime-lock" title="Unsigned sandboxed UI: no file, network, storage, or Tauri access">host-owned data · sandboxed UI · unsigned</span>
+      ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
+      <button class="mini-btn" type="button" id="vialRuntimeReload">Reload UI</button>
+    </div>
+    <iframe id="vialRuntimeFrame" class="vial-runtime-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="${escapeHtmlText(pack.name)} sandboxed Vial UI"></iframe>
+  </div>`;
+}
+
+function destroyRuntime(runtime: ActiveVialRuntime | null, clearFrame = true): void {
+  if (!runtime) return;
+  runtime.destroyed = true;
+  if (runtime.timer !== null) window.clearInterval(runtime.timer);
+  if (clearFrame) runtime.iframe.srcdoc = '';
+  if (activeVialRuntime === runtime) activeVialRuntime = null;
+  if (homeVialRuntime === runtime) homeVialRuntime = null;
+}
+
+function destroyVialRuntime(clearFrame = true): void {
+  destroyRuntime(activeVialRuntime, clearFrame);
+}
+
+function destroyHomeVialRuntime(clearFrame = true): void {
+  destroyRuntime(homeVialRuntime, clearFrame);
+}
+
+function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
+  const iframe = document.getElementById('vialRuntimeFrame') as HTMLIFrameElement | null;
+  if (!iframe) return;
+  destroyVialRuntime(false);
+  const sources = runtimeSourceOptions();
+  const saved = localStorage.getItem(VIAL_SOURCE_KEY + pack.id);
+  const preferred = saved && sources.some(s => s.id === saved) ? saved : '';
+  // A live Vial starts on the live source even when it has no data yet. The
+  // source picker lets a recording-oriented UI opt into a saved dataset.
+  const source = preferred || 'live';
+  const runtime: ActiveVialRuntime = {
+    pack,
+    nonce: VialRuntime.makeRuntimeNonce(),
+    iframe,
+    source,
+    sources,
+    recordingCache: new Map(),
+    timer: null,
+    ready: false,
+    mount: 'workspace',
+    destroyed: false,
+    uiHtml,
+  };
+  activeVialRuntime = runtime;
+  iframe.style.height = `${pack.ui?.height || 900}px`;
+  iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
+  iframe.addEventListener('load', () => {
+    if (runtime.destroyed) return;
+    runtime.ready = false;
+    void sendVialData(runtime, true);
+  }, { once: true });
+  runtime.timer = window.setInterval(() => {
+    if (runtime.destroyed || !runtime.ready || runtime.source !== 'live') return;
+    const workspace = document.getElementById('domainWorkspace');
+    if (!workspace || workspace.style.display === 'none') return;
+    void sendVialData(runtime);
+  }, 1200);
+  document.getElementById('vialRuntimeReload')?.addEventListener('click', () => {
+    if (runtime.destroyed) return;
+    runtime.ready = false;
+    runtime.recordingCache.clear();
+    runtime.iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
+    showToast('Vial UI reloaded from the same sandbox.');
+  });
+}
+
+function vialHomeStageHtml(pack: Domain.DomainPack): string {
+  const sourceHref = domainSourceHref(pack);
+  const sourceHost = domainSourceHost(sourceHref);
+  return `<div class="vial-home-stage">
+    <div class="vial-home-stage-bar">
+      <span class="vial-home-stage-title"><span class="vial-runtime-dot"></span>${escapeHtmlText(pack.name)}<span class="coord-tag">home/1</span></span>
+      <span class="vial-home-stage-stamp" id="vialHomeStamp">starting…</span>
+      <span class="vial-home-stage-lock">host-owned data · sandboxed UI · unsigned</span>
+      ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
+    </div>
+    <iframe id="vialHomeFrame" class="vial-home-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="${escapeHtmlText(pack.name)} sandboxed Home view"></iframe>
+  </div>`;
+}
+
+function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
+  const iframe = document.getElementById('vialHomeFrame') as HTMLIFrameElement | null;
+  if (!iframe) return;
+  destroyHomeVialRuntime(false);
+  const sources = runtimeSourceOptions();
+  const saved = localStorage.getItem(VIAL_SOURCE_KEY + pack.id);
+  const preferred = saved && sources.some(s => s.id === saved) ? saved : '';
+  const source = preferred || 'live';
+  const runtime: ActiveVialRuntime = {
+    pack,
+    nonce: VialRuntime.makeRuntimeNonce(),
+    iframe,
+    source,
+    sources,
+    recordingCache: new Map(),
+    timer: null,
+    ready: false,
+    mount: 'home',
+    destroyed: false,
+    uiHtml,
+  };
+  homeVialRuntime = runtime;
+  iframe.style.height = `${pack.homeUi?.height || 420}px`;
+  iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
+  iframe.addEventListener('load', () => {
+    if (runtime.destroyed) return;
+    runtime.ready = false;
+    void sendVialData(runtime, true);
+  }, { once: true });
+  runtime.timer = window.setInterval(() => {
+    if (runtime.destroyed || !runtime.ready || runtime.source !== 'live') return;
+    if (iframe.offsetParent === null) return;
+    void sendVialData(runtime);
+  }, 1200);
+}
+
+function exportVialLog(pack: Domain.DomainPack): void {
+  const state = activeDomainState && activeDomainState.packId === pack.id
+    ? activeDomainState
+    : Domain.loadDomainState(pack.id);
+  const body = JSON.stringify({
+    schema: 'osmograph.vial-log/1',
+    vialId: pack.id,
+    vialVersion: pack.version,
+    exportedAt: new Date().toISOString(),
+    fields: state.fields,
+    checks: state.checks,
+    logs: state.logs,
+  }, null, 2);
+  const blob = new Blob([body], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${pack.id}.log.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  showToast('Vial log exported. The portable record is the point.');
+}
+
+function refreshVialRuntimes(packId: string): void {
+  for (const runtime of [activeVialRuntime, homeVialRuntime]) {
+    if (runtime && runtime.pack.id === packId) void sendVialData(runtime, true);
+  }
+}
+
+function handleVialAction(runtime: ActiveVialRuntime, action: VialRuntime.VialAction): void {
+  const state = activeDomainState && activeDomainState.packId === runtime.pack.id
+    ? activeDomainState
+    : Domain.loadDomainState(runtime.pack.id);
+  switch (action.type) {
+    case 'ready':
+      runtime.ready = true;
+      void sendVialData(runtime, true);
+      break;
+    case 'toast':
+      showToast(action.message || 'Vial message.');
+      break;
+    case 'resize':
+      runtime.iframe.style.height = runtime.mount === 'home'
+        ? `${Math.max(320, Math.min(620, action.height))}px`
+        : `${Math.max(420, Math.min(2000, action.height))}px`;
+      break;
+    case 'save-field': {
+      const next = { ...state, fields: { ...state.fields, [action.key]: action.value } };
+      Domain.saveDomainState(next);
+      activeDomainState = next;
+      refreshVialRuntimes(runtime.pack.id);
+      break;
+    }
+    case 'add-log': {
+      const next = Domain.addDomainLog(state, action.values);
+      Domain.saveDomainState(next);
+      activeDomainState = next;
+      refreshVialRuntimes(runtime.pack.id);
+      showToast('Reading added to the local log.');
+      break;
+    }
+    case 'remove-log': {
+      const next = Domain.removeDomainLog(state, action.id);
+      Domain.saveDomainState(next);
+      activeDomainState = next;
+      refreshVialRuntimes(runtime.pack.id);
+      break;
+    }
+    case 'export-log':
+      exportVialLog(runtime.pack);
+      break;
+    case 'open-workspace':
+      showWorkspaceView('vials');
+      openDomainWorkspace(runtime.pack.id);
+      break;
+    case 'open-dashboard':
+      openDomainDashboard();
+      break;
+    case 'open-datasets':
+      closeDomainWorkspace();
+      showWorkspaceView('datasets');
+      break;
+    case 'open-check':
+      openDomainCheck();
+      break;
+    case 'open-vials':
+      closeDomainWorkspace();
+      break;
+    case 'set-source': {
+      if (!runtime.sources.some(s => s.id === action.source)) return;
+      runtime.source = action.source;
+      localStorage.setItem(VIAL_SOURCE_KEY + runtime.pack.id, action.source);
+      for (const other of [activeVialRuntime, homeVialRuntime]) {
+        if (other && other.pack.id === runtime.pack.id) {
+          other.source = action.source;
+          void sendVialData(other, true);
+        }
+      }
+      break;
+    }
+  }
+}
+
+window.addEventListener('message', (event) => {
+  const runtime = [activeVialRuntime, homeVialRuntime].find(
+    candidate => !!candidate && event.source === candidate.iframe.contentWindow,
+  );
+  if (!runtime) return;
+  const envelope = VialRuntime.parseVialActionEnvelope(event.data);
+  if (!envelope || envelope.nonce !== runtime.nonce) return;
+  handleVialAction(runtime, envelope.vialAction);
+});
+
 function renderDomainWorkspace(pack: Domain.DomainPack): void {
   const body = document.getElementById('domainWorkspaceBody');
   const meta = document.getElementById('domainWorkspaceMeta');
   const jumpBar = document.getElementById('domainJumpBar');
   const state = activeDomainState || Domain.loadDomainState(pack.id);
   activeDomainState = state;
-  const origin = pack.tier === 'official' ? 'Official' : 'Community';
-  if (meta) meta.innerHTML = `${escapeHtmlText(origin)} · v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.license)} · ${escapeHtmlText(Domain.RISK_LABEL[pack.risk])}${escapeHtmlText(domainSourceLabel(pack))} · log local-only <button class="text-link" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export manifest</button> <button class="text-link" type="button" data-guide-open="domain">Policy gate</button>`;
+  const origin = pack.sourceUrl ? 'Author-hosted' : 'Local';
+  if (meta) meta.innerHTML = `${escapeHtmlText(origin)} · v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.license)}${escapeHtmlText(domainSourceLabel(pack))} · log local-only <button class="text-link" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export manifest</button> <button class="text-link" type="button" data-guide-open="domain">Policy gate</button>`;
+  const uiHtml = resolveDomainUiHtml(pack);
+  if (pack.ui && !uiHtml && meta) {
+    meta.innerHTML += ' · <span class="domain-ui-missing">UI asset unavailable · declarative fallback</span>';
+  }
+  if (uiHtml) {
+    if (jumpBar) { jumpBar.hidden = true; jumpBar.innerHTML = ''; }
+    if (!body) return;
+    if (activeVialRuntime?.pack.id === pack.id && activeVialRuntime.pack.version === pack.version) {
+      void sendVialData(activeVialRuntime, true);
+      return;
+    }
+    body.innerHTML = vialRuntimeShellHtml(pack);
+    mountVialRuntime(pack, uiHtml);
+    return;
+  }
+  if (jumpBar) jumpBar.hidden = false;
   const present = new Set<string>(pack.widgets.map(w => w.type));
   if (jumpBar) {
     jumpBar.innerHTML = DOMAIN_JUMP_ORDER
@@ -6584,6 +7563,7 @@ function renderDomainWorkspace(pack: Domain.DomainPack): void {
 function openDomainWorkspace(id: string): void {
   const pack = Domain.domainPackById(id);
   if (!pack) return;
+  if (activeVialRuntime && activeVialRuntime.pack.id !== id) destroyVialRuntime();
   activeDomainPackId = id;
   activeDomainState = Domain.loadDomainState(id);
   activeDomainHotspot = null;
@@ -6596,6 +7576,7 @@ function openDomainWorkspace(id: string): void {
 }
 
 function closeDomainWorkspace(): void {
+  destroyVialRuntime();
   const main = document.getElementById('vialsMain');
   const ws = document.getElementById('domainWorkspace');
   if (ws) ws.style.display = 'none';
@@ -6606,13 +7587,16 @@ function closeDomainWorkspace(): void {
   renderVials();
 }
 
-function installDomainVial(id: string): void {
+async function installDomainVial(id: string): Promise<void> {
   const pack = Domain.domainPackById(id);
   if (!pack) return;
   Domain.installDomainPack(id);
   renderVials();
+  renderVialHome();
   openDomainWorkspace(id);
-  showToast(`Installed ${pack.name}. Your log stays on this machine.`);
+  showToast(pack.ui
+    ? `Installed ${pack.name}. Its unsigned UI runs in the sandbox; the log stays local.`
+    : `Installed ${pack.name}. Your log stays on this machine.`);
 }
 
 function openDomainDocs(id: string): void {
@@ -6627,6 +7611,7 @@ function armOrRemoveDomainVial(id: string, button: HTMLButtonElement): void {
     Domain.uninstallDomainPack(id);
     if (activeDomainPackId === id) closeDomainWorkspace();
     else renderVials();
+    renderVialHome();
     showToast('Domain Vial removed. Its local log is kept until you clear site data.');
     return;
   }
@@ -6651,9 +7636,11 @@ function armOrDeleteDomainPack(id: string, button: HTMLButtonElement): void {
     Domain.uninstallDomainPack(id);
     Domain.deleteCustomPack(id);
     Domain.deleteDomainState(id);
+    Domain.clearDomainUi(id);
     if (activeDomainPackId === id) closeDomainWorkspace();
     else renderVials();
-    showToast('Community domain Vial deleted, including its local log.');
+    renderVialHome();
+    showToast('Vial deleted, including its local log.');
     return;
   }
   if (domainPackDeleteArm) {
@@ -6702,8 +7689,7 @@ function addDomainLogFromForm(): void {
 
 function openDomainCheck(): void {
   closeDomainWorkspace();
-  (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
-  (document.querySelector('.src-subnav-btn[data-src="check"]') as HTMLElement | null)?.click();
+  showWorkspaceView('check');
 }
 
 function openDomainDashboard(): void {
@@ -6790,25 +7776,22 @@ interface CommandAction {
 const COMMANDS: CommandAction[] = [
   { id: 'dashboard', group: 'Go', title: 'Home', hint: 'live rig', run: () => activateTab('dashboard') },
   { id: 'gallery', group: 'Go', title: 'Explore → Gallery', hint: 'browse fingerprints', run: () => activateSmellsView('smells') },
-  { id: 'check', group: 'Go', title: 'Analyse → Check', hint: 'can this array tell two smells apart?', run: () => activateSmellsView('check') },
+  { id: 'check', group: 'Go', title: 'Analyse → Separability', hint: 'which classes can this array tell apart?', run: () => activateSmellsView('check') },
   { id: 'compare', group: 'Go', title: 'Analyse → Compare', hint: 'overlay saved recordings', run: () => activateSmellsView('compare') },
-  { id: 'recipes', group: 'Go', title: 'Analyse → Recipes', hint: 'trim, filter, normalize, export', run: () => activateSmellsView('recipes') },
+  { id: 'recipes', group: 'Go', title: 'Analyse → Transforms', hint: 'trim, normalize, export a derived recording', run: () => activateSmellsView('recipes') },
   { id: 'vials', group: 'Go', title: 'Vials', hint: 'domain workspaces + decisions', run: () => activateSmellsView('vials') },
   { id: 'aromatory', group: 'Go', title: 'Vials → Aromatory', hint: 'install a domain Vial', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); window.setTimeout(() => document.getElementById('domainCatalog')?.scrollIntoView({ block: 'start' }), 80); } },
-  { id: 'sessions', group: 'Go', title: 'Data → Recordings', hint: 'import + inspect sessions', run: () => activateSmellsView('sessions') },
-  { id: 'datasets', group: 'Go', title: 'Data → Datasets', hint: 'public data', run: () => activateSmellsView('datasets') },
+  { id: 'sessions', group: 'Go', title: 'Explore → Recordings', hint: 'import, inspect, replay, trim', run: () => activateSmellsView('sessions') },
+  { id: 'datasets', group: 'Go', title: 'Explore → Datasets', hint: 'download a public corpus', run: () => activateSmellsView('datasets') },
   { id: 'train', group: 'Go', title: 'Analyse → Train', hint: 'teach this array', run: () => activateSmellsView('train') },
-  { id: 'changelog', group: 'Go', title: 'Analyse → Change Log', hint: 'what changed, when', run: () => activateSmellsView('changelog') },
+  { id: 'changelog', group: 'Go', title: 'Analyse → Events', hint: 'anomaly history from this device', run: () => activateSmellsView('changelog') },
   { id: 'fleet', group: 'Go', title: 'Rigs → Fleet', hint: 'multiple rigs', run: () => activateSmellsView('fleet') },
   { id: 'system', group: 'Go', title: 'Settings', hint: 'hardware, calibration, release', run: () => activateSmellsView('system') },
-  { id: 'install-fermentation', group: 'Vials', title: 'Install Fermentation Lab', hint: 'official · high risk', run: () => installDomainVial('official.fermentation') },
-  { id: 'install-plant', group: 'Vials', title: 'Install Plant Respiration', hint: 'official · medium risk', run: () => installDomainVial('official.plant') },
-  { id: 'install-anomaly', group: 'Vials', title: 'Install Anomaly Watch', hint: 'official · same-device change watch', run: () => installDomainVial('official.anomaly-watch') },
   { id: 'import-domain', group: 'Vials', title: 'Import a domain Vial', hint: '.vial.json', run: () => (document.getElementById('domainImportFile') as HTMLInputElement | null)?.click() },
-  { id: 'install-domain-url', group: 'Vials', title: 'Install a domain Vial from URL', hint: 'raw GitHub manifest', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); showDomainUrlBar(); } },
+  { id: 'install-domain-url', group: 'Vials', title: 'Install a Vial from URL', hint: 'raw GitHub vial.json', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); showDomainUrlBar(); } },
   { id: 'template', group: 'Vials', title: 'Download starter domain Vial', hint: 'authoring template', run: () => downloadDomainTemplate() },
   { id: 'guide-start', group: 'Guide', title: 'Field guide: Start here', hint: 'scope', run: () => openGuide('start') },
-  { id: 'guide-check', group: 'Guide', title: 'Field guide: How Check works', hint: 'method', run: () => openGuide('check') },
+  { id: 'guide-check', group: 'Guide', title: 'Field guide: How Separability works', hint: 'method', run: () => openGuide('check') },
   { id: 'guide-vials', group: 'Guide', title: 'Field guide: Vial validation', hint: 'seals + limits', run: () => openGuide('vials') },
   { id: 'guide-domain', group: 'Guide', title: 'Field guide: Domain Vials', hint: 'policy + limits', run: () => openGuide('domain') },
   { id: 'guide-authoring', group: 'Guide', title: 'Field guide: Authoring a domain Vial', hint: 'schema + gate', run: () => openGuide('authoring') },
@@ -6916,8 +7899,18 @@ document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   if (tab?.dataset.vialsTab) { setVialsTab(tab.dataset.vialsTab); return; }
   const tabGo = target.closest<HTMLElement>('[data-vials-tab-go]');
   if (tabGo?.dataset.vialsTabGo) { setVialsTab(tabGo.dataset.vialsTabGo); return; }
+  const registryInstall = target.closest<HTMLButtonElement>('[data-registry-install]');
+  if (registryInstall?.dataset.registryInstall) {
+    void installRegistryManifest(
+      registryInstall.dataset.registryInstall,
+      registryInstall.dataset.registryId || '',
+      registryInstall.dataset.registryHash || '',
+      registryInstall,
+    );
+    return;
+  }
   const install = target.closest<HTMLElement>('[data-domain-install]');
-  if (install?.dataset.domainInstall) { installDomainVial(install.dataset.domainInstall); return; }
+  if (install?.dataset.domainInstall) { void installDomainVial(install.dataset.domainInstall); return; }
   const open = target.closest<HTMLElement>('[data-domain-open]');
   if (open?.dataset.domainOpen) { openDomainWorkspace(open.dataset.domainOpen); return; }
   const docs = target.closest<HTMLElement>('[data-domain-docs]');
@@ -6930,6 +7923,10 @@ document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   }
   if (target.closest('[data-domain-url]')) { showDomainUrlBar(); return; }
   if (target.closest('[data-domain-template]')) { downloadDomainTemplate(); return; }
+  if (target.closest('[data-domain-submit]')) {
+    void invoke('open_release_page', { url: 'https://github.com/OpenSmell/opensmell-web/issues/new?template=vial-submission.yml' });
+    return;
+  }
   const del = target.closest<HTMLButtonElement>('[data-domain-delete]');
   if (del?.dataset.domainDelete) { armOrDeleteDomainPack(del.dataset.domainDelete, del); return; }
   const remove = target.closest<HTMLButtonElement>('[data-domain-remove]');
@@ -7049,6 +8046,10 @@ function vialCardHtml(v: Vial.VialManifest): string {
 }
 
 let activeVialsTab: 'workspaces' | 'decisions' | 'aromatory' = 'workspaces';
+let registryEntries: RegistryVialEntry[] = [];
+let registryLoading = false;
+let registryLoaded = false;
+let registryError = '';
 
 function syncVialsTabs(): void {
   const panes: Record<string, string> = {
@@ -7072,7 +8073,6 @@ function setVialsTab(tab: string): void {
 }
 
 function renderVials(): void {
-  renderHomeGlance();
   const list = document.getElementById('vialsList');
   const summary = document.getElementById('vialsSummary');
   if (!list) return;
@@ -7081,7 +8081,7 @@ function renderVials(): void {
   const uses = vials.reduce((n, v) => n + (v.usage?.uses || 0), 0);
   const allDomain = Domain.allDomainPacks();
   const domainCount = Domain.loadInstalledIds().filter(id => allDomain.some(p => p.id === id)).length;
-  if (summary) summary.textContent = `${domainCount} domain · ${vials.length} decision${vials.length === 1 ? '' : 's'} · ${sealed} sealed · ${uses} use${uses === 1 ? '' : 's'}`;
+  if (summary) summary.textContent = `${domainCount} domain · ${vials.length} decision${vials.length === 1 ? '' : 's'} · ${sealed} gated · ${uses} use${uses === 1 ? '' : 's'}`;
   const workspaces = document.getElementById('vialsWorkspacesCount');
   const decisions = document.getElementById('vialsDecisionsCount');
   const aromatory = document.getElementById('vialsAromatoryCount');
@@ -7161,8 +8161,8 @@ function validateStoredVial(id: string): void {
   renderVials();
   openVialDetail(id);
   showToast(next.status === 'sealed'
-    ? 'Vial sealed. Every critical check passes on the stored evidence.'
-    : 'Vial is Open. The stored evidence does not support a sealed decision.');
+    ? 'Gated. Every critical check passes on the stored evidence (local status — no external review).'
+    : 'Ungated. The stored evidence does not support this decision yet.');
 }
 
 async function copyVialJson(id: string): Promise<void> {
@@ -7220,12 +8220,11 @@ function exportDomainPack(id: string): void {
 function starterDomainPack(): Domain.DomainPack {
   return {
     schema: 'osmograph.domain-pack/1',
-    id: 'community.my-workspace',
+    id: 'vial.my-workspace',
     name: 'My domain workspace',
     version: '0.1.0',
     author: '@your-handle',
     license: 'CC-BY-4.0',
-    tier: 'community',
     risk: 'medium',
     domain: 'custom',
     tagline: 'A short, honest line about the decision this workspace supports.',
@@ -7236,7 +8235,7 @@ function starterDomainPack(): Domain.DomainPack {
       'Replace with a real reference: author, year, title, venue. A citation is not decoration; it is the context for your claims.',
     ],
     widgets: [
-      { type: 'hero', art: 'generic', title: 'My domain workspace', subtitle: 'A protocol, a log, and the limits that keep it honest.', note: 'Community domain Vial · host-rendered · no executable code' },
+      { type: 'hero', art: 'generic', title: 'My domain workspace', subtitle: 'A protocol, a log, and the limits that keep it honest.', note: 'Personal Vial · host-rendered · add a sandboxed UI when you need a custom screen' },
       { type: 'risk', level: 'medium', headline: 'What this workspace is not allowed to claim.', body: 'Name the decision the user might wrongly make here, and the evidence that would be required to make it.', always: ['Record the context that changes the interpretation.'], never: ['Do not turn a sensor change into a diagnosis.'] },
       { type: 'metrics', title: 'What this workspace can claim', items: [
         { label: 'Signal', value: 'Change detection', hint: 'Same array, same sample preparation, against your own baseline.' },
@@ -7264,7 +8263,7 @@ function starterDomainPack(): Domain.DomainPack {
         { when: 'The process is outside its safe range', then: 'Stop and use the primary measurement, not the smell.', severity: 'stop' },
       ] },
       { type: 'docs', title: 'Field notes' },
-      { type: 'rig', title: 'Use this with your rig', body: 'Record a clean reference and a sample on the same array, then compare with Check. If the arrays differ, the app refuses the comparison.', cta: 'Open Check' },
+      { type: 'rig', title: 'Use this with your rig', body: 'Record a clean reference and a sample on the same array, then compare in Separability. If the arrays differ, the app refuses the comparison.', cta: 'Open Separability' },
     ],
     docs: [
       { id: 'how', title: 'How to use this workspace', body: ['Explain the first action, the reading cadence, and what the log is for.'] },
@@ -7285,7 +8284,7 @@ function importDomainPackText(text: string): void {
   renderVials();
   openDomainWorkspace(result.pack.id);
   const passed = result.validation.checks.filter(c => c.passed).length;
-  showToast(`Community domain Vial installed. ${passed}/${result.validation.checks.length} policy checks passed.`);
+  showToast(`Vial installed. ${passed}/${result.validation.checks.length} policy checks passed.`);
 }
 
 function importDomainPackFile(file: File): void {
@@ -7329,6 +8328,48 @@ function setDomainUrlStatus(text: string, state: 'idle' | 'busy' | 'pass' | 'fai
   status.className = `domain-url-status${state === 'idle' ? '' : ` ${state}`}`;
 }
 
+interface FetchedDomainManifest {
+  result: Domain.DomainImportResult;
+  finalUrl: URL;
+  /** The manifest bytes as fetched, for hash verification. */
+  text: string;
+}
+
+async function fetchDomainManifest(raw: string, timeoutMs = 20000): Promise<FetchedDomainManifest> {
+  const url = new URL(raw.trim());
+  if (!domainUrlAllowed(url)) {
+    throw new Error('Use https:// for a remote manifest. http://localhost is allowed for development only.');
+  }
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url.toString(), {
+      headers: { Accept: 'application/json' },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`The server returned HTTP ${response.status}.`);
+    const finalUrl = new URL(response.url);
+    if (!domainUrlAllowed(finalUrl)) {
+      throw new Error('The download redirected away from HTTPS. Refusing to install it.');
+    }
+    const text = await response.text();
+    if (text.length > 1_500_000) {
+      throw new Error('That manifest is larger than 1.5 MB. Refusing to install it.');
+    }
+    const result = Domain.importDomainPackJson(text, finalUrl.toString());
+    if (result.pack.ui || result.pack.homeUi) await cacheDomainUi(result.pack, finalUrl.toString());
+    return { result, finalUrl, text };
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(`The download timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 async function installDomainFromUrl(raw: string): Promise<void> {
   const input = document.getElementById('domainUrlInput') as HTMLInputElement | null;
   const install = document.getElementById('domainUrlInstall') as HTMLButtonElement | null;
@@ -7356,45 +8397,55 @@ async function installDomainFromUrl(raw: string): Promise<void> {
   const previous = install?.textContent || 'Validate & install';
   if (install) { install.disabled = true; install.textContent = 'Fetching…'; }
   setDomainUrlStatus(`Fetching ${url.hostname}…`, 'busy');
-  const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), 20000);
-
   try {
-    const response = await fetch(url.toString(), {
-      headers: { Accept: 'application/json' },
-      redirect: 'follow',
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`The server returned HTTP ${response.status}.`);
-    }
-    const finalUrl = new URL(response.url);
-    if (!domainUrlAllowed(finalUrl)) {
-      throw new Error('The download redirected away from HTTPS. Refusing to install it.');
-    }
-    const text = await response.text();
-    if (text.length > 1_500_000) {
-      throw new Error('That manifest is larger than 1.5 MB. Refusing to install it.');
-    }
+    const fetched = await fetchDomainManifest(url.toString());
     setDomainUrlStatus('Fetched. Running the local policy gate…', 'busy');
-    const result = Domain.importDomainPackJson(text, finalUrl.toString());
-    Domain.installDomainPack(result.pack.id);
+    Domain.installDomainPack(fetched.result.pack.id);
     hideDomainUrlBar();
     if (input) input.value = '';
     renderVials();
-    openDomainWorkspace(result.pack.id);
-    const passed = result.validation.checks.filter(c => c.passed).length;
+    renderVialHome();
+    openDomainWorkspace(fetched.result.pack.id);
+    const passed = fetched.result.validation.checks.filter(c => c.passed).length;
     setDomainUrlStatus('', 'idle');
-    showToast(`Installed from ${finalUrl.hostname}. ${passed}/${result.validation.checks.length} policy checks passed.`);
+    showToast(`Installed from ${fetched.finalUrl.hostname}. ${passed}/${fetched.result.validation.checks.length} policy checks passed.`);
   } catch (err) {
-    const message = err instanceof Error && err.name === 'AbortError'
-      ? 'The download timed out after 20 seconds.'
-      : err instanceof Error ? err.message : 'Could not install that manifest.';
+    const message = err instanceof Error ? err.message : 'Could not install that manifest.';
     setDomainUrlStatus(message, 'fail');
     showToast(message);
   } finally {
-    window.clearTimeout(timeout);
     if (install) { install.disabled = false; install.textContent = previous; }
+  }
+}
+
+async function installRegistryManifest(url: string, id: string, expectedHash: string, button: HTMLButtonElement): Promise<void> {
+  if (!url) return;
+  const previous = button.textContent || 'Install from source';
+  button.disabled = true;
+  button.textContent = 'Fetching…';
+  try {
+    const fetched = await fetchDomainManifest(url);
+    if (fetched.result.pack.id !== id) {
+      throw new Error('The manifest id does not match its registry entry. Refusing to install it.');
+    }
+    if (expectedHash) {
+      const actual = await sha256Hex(fetched.text);
+      if (actual !== expectedHash.toLowerCase()) {
+        throw new Error('The manifest on disk does not match the sha256 recorded in the registry — it changed upstream. Refusing to install; check the source repo.');
+      }
+    }
+    Domain.installDomainPack(fetched.result.pack.id);
+    renderVials();
+    renderVialHome();
+    openDomainWorkspace(fetched.result.pack.id);
+    const passed = fetched.result.validation.checks.filter(c => c.passed).length;
+    const hashNote = expectedHash ? ' sha256 verified.' : '';
+    showToast(`Installed ${fetched.result.pack.name} from ${fetched.finalUrl.hostname}. ${passed}/${fetched.result.validation.checks.length} policy checks passed.${hashNote}`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not install that manifest.';
+    showToast(message);
+    button.disabled = false;
+    button.textContent = previous;
   }
 }
 
@@ -7443,7 +8494,7 @@ function openVialUse(id: string): void {
   const result = document.getElementById('vialUseResult');
   if (!modal || !intro || !select || !result) return;
   vialUseId = id;
-  intro.textContent = `${vial.name} · reference ${vial.claim.reference} · ${vialStatusLabel(vialStatusOf(vial))}${vial.status === 'sealed' ? '' : ' — exploratory only, not a sealed decision'}`;
+  intro.textContent = `${vial.name} · reference ${vial.claim.reference} · ${vialStatusLabel(vialStatusOf(vial))}${vial.status === 'sealed' ? '' : ' — ungated: exploratory only'}`;
   select.innerHTML = candidates
     .map(c => `<option value="${escapeHtmlText(c.key)}">${escapeHtmlText(titleCase(c.substance))}</option>`)
     .join('');
@@ -7451,8 +8502,8 @@ function openVialUse(id: string): void {
   if (preferred) select.value = preferred.key;
   result.innerHTML = `<div class="vial-validation-summary ${vialStatusOf(vial) === 'sealed' ? 'pass' : 'fail'}">
     ${vialStatusOf(vial) === 'sealed'
-      ? 'Sealed Vial. The result below is a check on this sample, not a guarantee about a different rig.'
-      : 'Open Vial. This is an exploratory check; do not treat it as a validated decision.'}
+      ? 'Gated Vial (local gate passed). The result below is a check on this sample, not a guarantee about a different rig.'
+      : 'Ungated Vial. This is an exploratory check; do not treat it as a validated decision.'}
   </div>`;
   modal.style.display = 'flex';
 }
@@ -7537,8 +8588,8 @@ function importVialFile(file: File): void {
       renderVials();
       openVialDetail(checked.id);
       showToast(checked.status === 'sealed'
-        ? 'Vial imported and sealed by the local gate.'
-        : 'Vial imported as Open. Its evidence does not pass the local gate.');
+        ? 'Vial imported, local gate passed. This is a local status — not external review, and not a "Sealed" signature.'
+        : 'Vial imported ungated. Its evidence does not pass the local gate.');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not import this Vial.');
     }
@@ -8197,7 +9248,7 @@ function showRecipePanel(): void {
 }
 
 document.getElementById('recipeBack')?.addEventListener('click', () => {
-  document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
+  showWorkspaceView('sessions');
 });
 
 document.getElementById('sdRecipe')?.addEventListener('click', async () => {
@@ -8747,7 +9798,10 @@ document.getElementById('inspDelete')!.addEventListener('click', async () => {
     selectedSession = null;
     renderLibrary();
     document.getElementById('inspectorDetails')!.textContent = 'Select a session';
-    if (sfpCtx && sfpCanvas) sfpCtx.clearRect(0, 0, sfpCanvas.width, sfpCanvas.height);
+    inspectorFpToken++;
+    inspectorSeries = null;
+    inspectorFingerprint = null;
+    drawInspectorFingerprint();
   } catch (e) {
     await flashStatus('libStatus', `Delete failed: ${e}`, 'var(--red)');
   }
@@ -9073,7 +10127,7 @@ document.getElementById('trainStarter')?.addEventListener('click', async () => {
   const starter = document.getElementById('trainStarter') as HTMLButtonElement;
   if (selectStarterTrainingSet() < 2) return;
   const nameEl = document.getElementById('trainName') as HTMLInputElement;
-  if (!nameEl.value.trim()) nameEl.value = 'starter_smells';
+  if (!nameEl.value.trim()) nameEl.value = 'smellnet_model';
   renderTrain();
   starter.disabled = true;
   try {
@@ -9083,6 +10137,7 @@ document.getElementById('trainStarter')?.addEventListener('click', async () => {
   }
 });
 document.getElementById('trainRefresh')!.addEventListener('click', refreshTrainLibrary);
+document.getElementById('trainSep')?.addEventListener('click', () => showWorkspaceView('check'));
 document.getElementById('trainName')!.addEventListener('input', () => {
   const btn = document.getElementById('trainBtn') as HTMLButtonElement;
   btn.disabled = trainSelected.size < 2 || !(document.getElementById('trainName') as HTMLInputElement).value.trim();
@@ -9096,10 +10151,65 @@ document.getElementById('fleetScan')!.addEventListener('click', async () => {
     renderFleet();
   } catch { renderFleet(); }
 });
+
+function setFleetRemotePanel(open: boolean): void {
+  const panel = document.getElementById('fleetRemotePanel');
+  if (panel) panel.hidden = !open;
+  if (open) {
+    const input = document.getElementById('fleetRemoteAddr') as HTMLInputElement | null;
+    input?.focus();
+    input?.select();
+  }
+}
+
+document.getElementById('fleetRemote')?.addEventListener('click', () => setFleetRemotePanel(true));
+document.getElementById('fleetRemoteCancel')?.addEventListener('click', () => setFleetRemotePanel(false));
+document.getElementById('fleetRemoteAddr')?.addEventListener('keydown', (ev) => {
+  if ((ev as KeyboardEvent).key === 'Enter') (document.getElementById('fleetRemoteConnect') as HTMLButtonElement | null)?.click();
+});
+document.getElementById('fleetRemoteConnect')?.addEventListener('click', async () => {
+  const addrEl = document.getElementById('fleetRemoteAddr') as HTMLInputElement | null;
+  const msg = document.getElementById('fleetRemoteMsg');
+  const button = document.getElementById('fleetRemoteConnect') as HTMLButtonElement | null;
+  const addr = addrEl?.value.trim() || '';
+  if (!addr) { if (msg) msg.textContent = 'Enter host:port first.'; return; }
+  if (connected) { if (msg) msg.textContent = 'Disconnect the current link first.'; return; }
+  if (msg) msg.textContent = 'Connecting…';
+  if (button) button.disabled = true;
+  const modeSel = document.getElementById('modeSelect') as HTMLSelectElement;
+  modeSel.value = 'wifi';
+  modeSel.dispatchEvent(new Event('change'));
+  const wifiAddr = document.getElementById('wifiAddr') as HTMLInputElement;
+  wifiAddr.value = addr;
+  try {
+    await toggleConnection();
+    if (connected) {
+      if (msg) msg.textContent = 'Connected. Opening the live view…';
+      setFleetRemotePanel(false);
+      activateWorkspace('dashboard');
+    } else if (msg) {
+      msg.textContent = 'Could not connect. Check the endpoint, WiFi, and that the device is streaming.';
+    }
+  } catch (e) {
+    if (msg) msg.textContent = String(e).replace(/^Error invoking remote method '.*': /, '').replace(/^Error:\s*/, '');
+  } finally {
+    if (button) button.disabled = false;
+  }
+});
+
 document.getElementById('fleetGrid')?.addEventListener('click', (ev) => {
   const t = ev.target as HTMLElement;
   if (t.id === 'fleetEmptyScan') document.getElementById('fleetScan')?.click();
+  else if (t.id === 'fleetEmptyRemote') setFleetRemotePanel(true);
   else if (t.id === 'fleetEmptySmells') document.querySelector<HTMLElement>('.tab-btn[data-tab="library"]')?.click();
+  else if (t.closest('[data-fleet-live]')) activateWorkspace('dashboard');
+  else if (t.closest('[data-fleet-vials]')) showWorkspaceView('vials');
+});
+document.getElementById('fleetGrid')?.addEventListener('change', (ev) => {
+  const select = (ev.target as HTMLElement).closest<HTMLSelectElement>('.fleet-vial-select');
+  if (!select) return;
+  setSelectedHomeVialId(select.value);
+  showToast(select.value ? 'Vial applied to the live Home view.' : 'Live Home Vial cleared.');
 });
 
 // OLED + Buzzer: conditional (only if the user actually has the peripheral
@@ -9771,56 +10881,264 @@ async function refreshPlugins() {
   }
 }
 
-// === Datasets catalog (the first slice of "Sources") ===
-// Renders DATASET_CATALOG (src/datasets.ts) with a license badge and LEGAL-SAFE
-// actions only: open the original source in the browser, or copy the attribution.
-// We deliberately do NOT auto-download restrictive datasets — the user fetches under
-// the source's own terms. This is the honest, "no invented numbers" way to bring real
-// data into the workspace, and it covers multiple sensor types so profiles are shaped
-// by reality (see private/DATA_AND_LICENSING.md).
-function dsFormatLabel(f: DatasetFormat): string {
-  return f === 'ready' ? 'Osmograph-ready'
-    : f === 'converts' ? 'Opens in the app'
-    : 'Needs setup';
+// === Datasets catalog ===
+// A dataset has to answer four questions before a person commits: what is inside,
+// how big is the fetch, what may I do with it, and where does it land? The card
+// carries all four. Downloads still come from the original source, never a mirror.
+type RecordingSource = {
+  id: string;
+  name: string;
+  label: string;
+  license?: string;
+  credit?: string;
+  citation?: string;
+  url?: string;
+  datasetId?: string;
+};
+
+const DATASET_BY_ID = new Map(DATASET_CATALOG.map(d => [d.id, d]));
+const DATASET_SOURCE_NAME: Record<string, string> = {
+  'smellnet': 'SmellNet',
+  'smellnet-mixtures': 'SmellNet mixtures',
+  'food-freshness': 'Food Freshness',
+  'tadi-2019': 'TADI',
+};
+
+function pathHas(path: string | undefined, re: RegExp): boolean {
+  return !!path && re.test(path.replace(/\\/g, '/'));
+}
+
+/** Provenance for one recording. Short in the table, complete in the inspector. */
+function recordingSource(s: SessionRecord): RecordingSource {
+  const p = (s.path || '').replace(/\\/g, '/');
+  if (pathHas(p, /\/Derived\//i)) {
+    return { id: 'derived', name: 'Derived', label: 'Derived locally' };
+  }
+  if (pathHas(p, /SmellNet-mixtures/i)) {
+    return {
+      id: 'smellnet-mixtures',
+      name: 'SmellNet mixtures',
+      label: 'SmellNet mixture',
+      license: 'MIT',
+      credit: 'Feng et al. · MIT-MI (2026)',
+      citation: 'Feng, Dai, Li, Pernigo, Wen & Liang (2026). SmellNet. MIT-MI. https://huggingface.co/datasets/DeweiFeng/SmellNet',
+      url: 'https://huggingface.co/datasets/DeweiFeng/SmellNet',
+      datasetId: 'smellnet-mixtures',
+    };
+  }
+  if (pathHas(p, /SmellNet/i)) {
+    return {
+      id: 'smellnet',
+      name: 'SmellNet',
+      label: 'SmellNet',
+      license: 'MIT',
+      credit: 'Feng et al. · MIT-MI (2026)',
+      citation: 'Feng, Dai, Li, Pernigo, Wen & Liang (2026). SmellNet. MIT-MI. https://huggingface.co/datasets/DeweiFeng/SmellNet',
+      url: 'https://huggingface.co/datasets/DeweiFeng/SmellNet',
+      datasetId: 'smellnet',
+    };
+  }
+  if (pathHas(p, /TADI-2019/i)) {
+    return {
+      id: 'tadi-2019',
+      name: 'TADI',
+      label: 'TADI methane release',
+      license: 'CC BY 4.0',
+      credit: 'Gladston et al. · Zenodo (2023)',
+      citation: 'Gladston, A. et al. (2023). Dataset for using metal oxide gas sensors for the estimate of methane controlled releases. Zenodo. https://doi.org/10.5281/zenodo.8399829',
+      url: 'https://zenodo.org/records/8399829',
+      datasetId: 'tadi-2019',
+    };
+  }
+  if (pathHas(p, /AllSmaples-Report|Food[- ]Freshness|datasets\/extracted/i)) {
+    return {
+      id: 'food-freshness',
+      name: 'Food Freshness',
+      label: 'Food Freshness E-Nose',
+      license: 'CC BY 4.0',
+      credit: 'Mahdian · Zenodo (2025)',
+      citation: 'Mahdian, M. (2025). Food Freshness E-Nose Dataset. Zenodo. https://zenodo.org/records/17285312',
+      url: 'https://zenodo.org/records/17285312',
+      datasetId: 'food-freshness',
+    };
+  }
+  if (pathHas(p, /\/legacy\//i)) {
+    return { id: 'legacy', name: 'Legacy', label: 'Legacy import' };
+  }
+  if (pathHas(p, /Osmograph_Recordings/i) || s.label === 'Recorded') {
+    return { id: 'own', name: 'Own rig', label: 'Recorded on this rig' };
+  }
+  return { id: 'imported', name: 'Imported', label: s.label === 'Imported' ? 'Imported file' : (s.label || 'Imported file') };
+}
+
+type SourceBucket = { source: RecordingSource; records: SessionRecord[]; smells: Set<string> };
+
+function librarySources(): SourceBucket[] {
+  const map = new Map<string, SourceBucket>();
+  for (const s of sessions) {
+    const source = recordingSource(s);
+    let bucket = map.get(source.id);
+    if (!bucket) {
+      bucket = { source, records: [], smells: new Set() };
+      map.set(source.id, bucket);
+    }
+    bucket.records.push(s);
+    if (s.substance && s.substance.toLowerCase() !== 'unknown') bucket.smells.add(s.substance.toLowerCase());
+  }
+  return [...map.values()].sort((a, b) => b.records.length - a.records.length || a.source.name.localeCompare(b.source.name));
+}
+
+function datasetLocalCount(id: string): number {
+  return sessions.filter(s => recordingSource(s).datasetId === id).length;
+}
+
+function fmtBytes(n?: number): string {
+  if (!n || !Number.isFinite(n) || n <= 0) return '';
+  return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
+}
+
+function renderDatasetLocal(): void {
+  const host = document.getElementById('dsLocalList');
+  if (!host) return;
+  const buckets = librarySources();
+  const recordings = sessions.length;
+  const smells = new Set(sessions.map(s => (s.substance || '').trim().toLowerCase()).filter(x => x && x !== 'unknown')).size;
+  const stamp = document.getElementById('dsLibraryStamp');
+  if (stamp) stamp.textContent = `${recordings} recording${recordings === 1 ? '' : 's'} · ${smells} smell${smells === 1 ? '' : 's'}`;
+  const localStamp = document.getElementById('dsLocalStamp');
+  if (localStamp) localStamp.textContent = `${buckets.length} source${buckets.length === 1 ? '' : 's'}`;
+  if (!buckets.length) {
+    host.innerHTML = `<div class="ds-local-empty">No recordings. <button class="text-link" type="button" data-ds-import-inline>Import a CSV</button> or download a corpus below.</div>`;
+    host.querySelector<HTMLElement>('[data-ds-import-inline]')?.addEventListener('click', () => (document.getElementById('dsImport') as HTMLButtonElement | null)?.click());
+    return;
+  }
+  host.innerHTML = buckets.map(b => {
+    const source = b.source;
+    const dataset = source.datasetId ? DATASET_BY_ID.get(source.datasetId) : null;
+    const license = source.license ? `<span class="ds-source-license">${esc(source.license)}</span>` : '';
+    const title = [
+      `${b.records.length} recording${b.records.length === 1 ? '' : 's'} · ${b.smells.size} smell${b.smells.size === 1 ? '' : 's'}`,
+      source.credit,
+      source.citation,
+    ].filter(Boolean).join(' · ');
+    const menu = [
+      `<button type="button" data-ds-open-recordings="${esc(source.name)}">Recordings</button>`,
+      dataset ? `<button type="button" data-ds-cite="${esc(dataset.id)}">Cite</button>` : '',
+      dataset?.download ? `<button type="button" class="ds-remove" data-ds-remove="${esc(dataset.id)}">Remove from library</button>` : '',
+    ].filter(Boolean).join('');
+    return `<div class="ds-source${source.id === 'own' ? ' own' : ''}" title="${esc(title)}">
+      <button class="ds-source-main" type="button" data-ds-open-gallery="${esc(source.name)}" aria-label="Open ${esc(source.name)} in Gallery">
+        <span class="ds-source-dot"></span>
+        <span class="ds-source-name">${esc(source.name)}</span>
+        <span class="ds-source-count">${b.records.length}</span>
+        ${license}
+      </button>
+      <details class="ds-row-menu">
+        <summary title="More actions">⋯</summary>
+        <div class="ds-row-menu-pop">${menu}</div>
+      </details>
+    </div>`;
+  }).join('');
 }
 
 function renderDatasetCatalog() {
   const el = document.getElementById('datasetCatalog');
   if (!el) return;
+  renderDatasetLocal();
   const q = (document.getElementById('dsFilter') as HTMLInputElement | null)?.value.trim().toLowerCase() || '';
+  renderReferenceCatalog(q);
   const rows = DATASET_CATALOG.filter((d) =>
-    !q || `${d.name} ${d.what} ${d.sensors} ${d.license} ${d.note}`.toLowerCase().includes(q));
+    !q || `${d.name} ${d.what} ${d.sensors} ${d.license} ${d.credit} ${d.note} ${d.useFor || ''} ${d.citation || ''}`.toLowerCase().includes(q));
+  const filterStamp = document.getElementById('dsFilterStamp');
+  if (filterStamp) filterStamp.textContent = `${rows.length} source${rows.length === 1 ? '' : 's'}`;
   if (!rows.length) {
-    el.innerHTML = '<div class="hint" style="grid-column:1/-1">No datasets match.</div>';
+    el.innerHTML = '<div class="hint" style="grid-column:1/-1">No datasets match. Try a broader search.</div>';
     return;
   }
-  const starterLoaded = sessions.some(s => (s.path || '').includes('/SmellNet/'));
   el.innerHTML = rows.map((d) => {
+    const local = datasetLocalCount(d.id);
+    const installed = local > 0;
     const chips = [
       d.sensors,
       d.channels ? `${d.channels} channels` : '',
       d.smells ? `${d.smells} smells` : '',
       d.labeled ? 'labelled' : 'unlabelled',
+      d.size,
     ].filter(Boolean)
       .map((c) => `<span class="ds-chip">${esc(c)}</span>`).join('');
-    const starter = d.id === 'smellnet' && starterLoaded;
-    const formatClass = starter ? 'ready' : d.format;
-    const formatLabel = starter ? 'Starter loaded' : dsFormatLabel(d.format);
+    const formatClass = installed ? 'ready' : d.format;
+    const formatLabel = installed ? `${local} in library` : d.format === 'ready' ? 'Ready to open' : d.format === 'converts' ? 'Imports into Osmograph' : 'Source only';
+    const license = d.licenseUrl
+      ? `<a class="ds-license-link" href="${esc(d.licenseUrl)}">${esc(d.license)}</a>`
+      : `<span class="ds-license-link">${esc(d.license)}</span>`;
+    const sourceName = DATASET_SOURCE_NAME[d.id] || d.name;
+    const primary = d.download
+      ? installed
+        ? `<button class="mini-btn primary" data-ds-open-gallery="${esc(sourceName)}" type="button">Open</button>`
+        : `<button class="mini-btn primary ds-download" data-id="${esc(d.id)}" type="button" title="Download and import${d.download.sizeBytes ? ` (${fmtBytes(d.download.sizeBytes)})` : ''}">Download</button>`
+      : `<a class="mini-btn" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Source ↗</a>`;
     return `
-    <div class="ds-card">
+    <article class="ds-card${installed ? ' installed' : ''}">
       <div class="ds-card-head">
-        <span class="ds-card-name">${esc(d.name)}</span>
+        <div style="min-width:0">
+          <div class="ds-card-name">${esc(d.name)}</div>
+          <div class="ds-card-credit">${esc(d.credit)}</div>
+        </div>
         <span class="ds-format ${formatClass}">${formatLabel}</span>
       </div>
       <div class="ds-what">${esc(d.what)}</div>
-      <div class="ds-chips">${chips}</div>
-      <div class="ds-note">${esc(d.note)}</div>
       <div class="ds-actions">
-        ${d.download ? `<button class="mini-btn ds-download" data-id="${esc(d.id)}">Play ▶</button>` : ''}
-        <button class="mini-btn ds-source" data-url="${esc(d.url)}">Source ↗</button>
-        <span class="ds-license" title="${esc(d.credit)}">${esc(d.license)} · ${esc(d.credit)}</span>
+        ${primary}
+        ${d.download?.sizeBytes ? `<span class="ds-filecount">${fmtBytes(d.download.sizeBytes)}</span>` : ''}
       </div>
-    </div>`;
+      <details class="ds-details">
+        <summary>Details · sensors, risks, licence</summary>
+        <div class="ds-details-body">
+          <div class="ds-chips">${chips}</div>
+          ${d.useFor ? `<div class="ds-use"><span>Use it for</span>${esc(d.useFor)}</div>` : ''}
+          <div class="ds-note"><span>Watch out</span>${esc(d.note)}</div>
+          <div class="ds-rights">${license}<span>${esc(d.credit)}</span></div>
+          <div class="ds-details-links">
+            ${d.citation ? `<button class="text-link" type="button" data-ds-cite="${esc(d.id)}">Cite</button>` : ''}
+            <a class="text-link" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Source ↗</a>
+            ${installed ? `<button class="text-link ds-remove" type="button" data-ds-remove="${esc(d.id)}">Remove</button>` : ''}
+          </div>
+        </div>
+      </details>
+    </article>`;
+  }).join('');
+}
+
+function renderReferenceCatalog(query = ''): void {
+  const host = document.getElementById('referenceCatalog');
+  if (!host) return;
+  const rows = REFERENCE_CATALOG.filter((d) =>
+    !query || `${d.name} ${d.what} ${d.sensors} ${d.size} ${d.license} ${d.credit} ${d.note}`.toLowerCase().includes(query));
+  const stamp = document.getElementById('dsRefStamp');
+  if (stamp) stamp.textContent = `${rows.length} reference`;
+  if (!rows.length) {
+    host.innerHTML = '<div class="hint" style="padding:8px 2px">No reference datasets match.</div>';
+    return;
+  }
+  host.innerHTML = rows.map((d) => {
+    const badge = d.commercial === 'yes' ? 'source only'
+      : d.commercial === 'api' ? 'API terms'
+      : d.commercial === 'no' ? 'link only'
+      : 'research-only';
+    return `<details class="ds-ref-row">
+      <summary>
+        <span class="ds-ref-name">${esc(d.name)}</span>
+        <span class="ds-ref-meta">${esc(d.sensors)} · ${esc(d.size)}</span>
+        <span class="ds-ref-badge">${badge}</span>
+      </summary>
+      <div class="ds-ref-body">
+        <p>${esc(d.what)} ${esc(d.note)}</p>
+        <div class="ds-ref-actions">
+          <a class="text-link" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Open source ↗</a>
+          ${d.licenseUrl ? `<a class="text-link" href="${esc(d.licenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(d.license)}</a>` : `<span class="ds-ref-meta">${esc(d.license)}</span>`}
+        </div>
+      </div>
+    </details>`;
   }).join('');
 }
 
@@ -9850,6 +11168,10 @@ function dlDock(): HTMLElement {
   return dock;
 }
 
+function dlKey(d: DatasetEntry): string {
+  return d.download?.destName || d.download?.filename || d.id;
+}
+
 function dlNewJob(d: DatasetEntry): DlJob {
   const dock = dlDock();
   dock.style.display = 'flex';
@@ -9874,7 +11196,7 @@ function dlNewJob(d: DatasetEntry): DlJob {
     pause: el.querySelector('.dl-pause') as HTMLButtonElement,
     d,
   };
-  const filename = d.download!.filename;
+  const filename = dlKey(d);
   job.pause.addEventListener('click', () => {
     const nowPaused = !job.pause.classList.contains('paused');
     job.pause.classList.toggle('paused', nowPaused);
@@ -9942,14 +11264,101 @@ async function playSessionInDashboard(fileId: string, label: string) {
   });
 }
 
+interface DatasetBatchProgress {
+  filename: string;
+  files_done: number;
+  files_total: number;
+  received: number;
+  total: number | null;
+  paused: boolean;
+}
+
+interface DatasetBatchOutcome {
+  root: string;
+  files: string[];
+  bytes: number;
+  cancelled: boolean;
+}
+
+async function finishDatasetImport(d: DatasetEntry, importedCount: number, job: DlJob, folder: string): Promise<void> {
+  await reloadLibrary();
+  renderDatasetCatalog();
+  const sourceName = DATASET_SOURCE_NAME[d.id] || d.name;
+  const local = datasetLocalCount(d.id);
+  smellQuery = '';
+  const search = document.getElementById('smellSearch') as HTMLInputElement | null;
+  if (search) search.value = '';
+  showWorkspaceView('smells');
+  void renderSmellGallery();
+  const text = importedCount > 0
+    ? `Imported ${importedCount} recording${importedCount === 1 ? '' : 's'} · ${local} ${sourceName} in the library.`
+    : `Already in the library · ${local} ${sourceName} recording${local === 1 ? '' : 's'}.`;
+  dlDone(job, text, {
+    actions: [
+      ['Browse smells', () => showWorkspaceView('smells')],
+      ['Recordings', () => openSourceRecordings(sourceName)],
+      ['Open folder', () => void invoke('open_path', { path: folder })],
+    ],
+  });
+}
+
 async function downloadDatasetRow(d: DatasetEntry) {
   const dl = d.download;
   if (!dl) return;
   const cardBtn = document.querySelector(`.ds-download[data-id="${d.id}"]`) as HTMLButtonElement | null;
   const setCard = (text: string, disabled = true) => { if (cardBtn) { cardBtn.textContent = text; cardBtn.disabled = disabled; } };
-  setCard('Opening…');
+  setCard('Starting…');
 
   const job = dlNewJob(d);
+  const key = dlKey(d);
+
+  if (dl.kind === 'hf-tree' || dl.kind === 'batch') {
+    const unlisten = await listen<DatasetBatchProgress>('dataset-batch-progress', (e) => {
+      if (e.payload.filename !== key) return;
+      const done = e.payload.files_done;
+      const all = e.payload.files_total || dl.fileCount || 0;
+      const pctVal = all ? (done / all) * 100 : 0;
+      job.bar.style.width = `${pctVal.toFixed(1)}%`;
+      job.pct.textContent = all ? `${pctVal.toFixed(0)}%` : `${done}`;
+      job.meta.textContent = e.payload.paused
+        ? `Paused — ${done}/${all || '?'} files · ${dlFmt(e.payload.received)}`
+        : `${done}/${all || '?'} files · ${dlFmt(e.payload.received)}`;
+    });
+    try {
+      const out = dl.kind === 'hf-tree'
+        ? await invoke<DatasetBatchOutcome>('dataset_download_tree', {
+            repo: dl.repo,
+            include: dl.include,
+            exclude: dl.exclude || [],
+            destName: dl.destName,
+          })
+        : await invoke<DatasetBatchOutcome>('dataset_download_batch', {
+            destName: dl.destName,
+            files: dl.files,
+          });
+      await unlisten();
+      if (out.cancelled) {
+        dlDone(job, 'Cancelled. Files already fetched stay in the corpus folder.', { failed: true });
+        setCard('Retry', false);
+        return;
+      }
+      if (!out.files.length) {
+        dlDone(job, 'The source returned no CSV files.', { failed: true });
+        setCard('Retry', false);
+        return;
+      }
+      job.meta.textContent = `Importing ${out.files.length} file${out.files.length === 1 ? '' : 's'}…`;
+      const imported = await invoke<SessionRecord[]>('import_paths', { paths: [out.root] });
+      await finishDatasetImport(d, imported.length, job, out.root);
+      setCard('In library ✓', false);
+    } catch (e) {
+      await unlisten();
+      dlDone(job, `Failed: ${e}`, { failed: true });
+      setCard('Retry', false);
+    }
+    return;
+  }
+
   let total: number | null = null;
   let received = 0;
   let speed = 0;
@@ -9959,7 +11368,7 @@ async function downloadDatasetRow(d: DatasetEntry) {
   const unlisten = await listen<{ filename: string; received: number; total: number | null; paused: boolean }>(
     'dataset-download-progress',
     (e) => {
-      if (e.payload.filename !== dl.filename) return;
+      if (e.payload.filename !== key) return;
       received = e.payload.received;
       total = e.payload.total;
       const now = performance.now();
@@ -9989,7 +11398,7 @@ async function downloadDatasetRow(d: DatasetEntry) {
 
     if (out.cancelled) {
       dlDone(job, 'Cancelled — partial file removed.', { failed: true });
-      setCard('Play ▶', false);
+      setCard('Retry', false);
       return;
     }
 
@@ -10002,31 +11411,62 @@ async function downloadDatasetRow(d: DatasetEntry) {
       dlDone(job, `Downloaded ${dlFmt(out.bytes)} — no CSV inside.`, {
         actions: [['Open folder', () => void invoke('open_path', { path: out.path })]],
       });
-      setCard('Ready ✓', false);
+      setCard('Retry', false);
       return;
     }
 
     job.meta.textContent = `Importing ${paths.length} file${paths.length > 1 ? 's' : ''}…`;
     const imported = await invoke<SessionRecord[]>('import_paths', { paths });
-    await reloadLibrary();
-    const target = imported[0] ?? sessions.find((s) => s.path && paths.includes(s.path));
-    if (target?.file_id) {
-      job.meta.textContent = 'Opening on the dashboard…';
-      await playSessionInDashboard(target.file_id, target.substance || d.name);
-      dlDone(job, `Playing “${target.substance || d.name}”`, {
-        actions: [['Back to data', () => (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click()]],
-      });
-    } else {
-      dlDone(job, `Ready — ${paths.length} session${paths.length > 1 ? 's' : ''} in Sources`, {
-        actions: [['View sessions', () => (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click()]],
-      });
-    }
-    setCard('Ready ✓', false);
+    await finishDatasetImport(d, imported.length, job, await invoke<string>('dataset_dir'));
+    setCard('In library ✓', false);
   } catch (e) {
     await unlisten();
     dlDone(job, `Failed: ${e}`, { failed: true });
     setCard('Retry', false);
   }
+}
+
+function openDatasetSource(name: string): void {
+  showWorkspaceView('smells');
+  smellQuery = name;
+  const search = document.getElementById('smellSearch') as HTMLInputElement | null;
+  if (search) search.value = name;
+  void renderSmellGallery();
+}
+
+function openSourceRecordings(name: string): void {
+  const search = document.getElementById('libSearch') as HTMLInputElement | null;
+  if (search) search.value = name;
+  showWorkspaceView('sessions');
+  renderLibrary();
+}
+
+async function copyDatasetCitation(id: string): Promise<void> {
+  const d = DATASET_BY_ID.get(id);
+  if (!d?.citation) return;
+  const ok = await copyText(d.citation);
+  showToast(ok ? 'Citation copied.' : 'Could not copy the citation.');
+}
+
+async function removeDataset(id: string): Promise<void> {
+  const d = DATASET_BY_ID.get(id);
+  if (!d) return;
+  const matches = sessions.filter(s => recordingSource(s).datasetId === id);
+  if (!matches.length) return;
+  const name = DATASET_SOURCE_NAME[id] || d.name;
+  if (!confirm(`Remove ${matches.length} ${name} recording${matches.length === 1 ? '' : 's'} from the library?\n\nThe downloaded archive stays in the datasets folder until you open it and delete it.`)) return;
+  let removed = 0;
+  for (const s of matches) {
+    if (!s.file_id) continue;
+    try {
+      await invoke('remove_session', { fileId: s.file_id });
+      removed++;
+    } catch { /* keep going; report the count below */ }
+  }
+  selectedSession = null;
+  await reloadLibrary();
+  renderDatasetCatalog();
+  showToast(`Removed ${removed} recording${removed === 1 ? '' : 's'}. Download files are still in the datasets folder.`);
 }
 
 function initDatasetCatalog() {
@@ -10037,6 +11477,8 @@ function initDatasetCatalog() {
       const dir = await invoke<string>('dataset_dir');
       const el = document.getElementById('dsStoragePath');
       if (el) { el.textContent = dir; el.title = dir; }
+      const openBtn = document.getElementById('dsOpenFolder');
+      if (openBtn) openBtn.title = `Open ${dir}`;
     } catch { /* non-fatal */ }
   })();
   document.getElementById('dsOpenFolder')?.addEventListener('click', async () => {
@@ -10055,24 +11497,32 @@ function initDatasetCatalog() {
       if (!list.length) return;
       await invoke('import_paths', { paths: list });
       await reloadLibrary();
-      (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+      showWorkspaceView('sessions');
     } catch (e) {
       console.error('Dataset import failed:', e);
+      showToast(`Import failed: ${e}`);
     }
   });
   const el = document.getElementById('datasetCatalog');
-  if (!el) return;
-  // Delegated: buttons are re-rendered on every filter change.
-  el.addEventListener('click', async (ev) => {
-    const btn = (ev.target as HTMLElement).closest('button');
+  const local = document.getElementById('dsLocalList');
+  const handle = async (target: EventTarget | null) => {
+    const btn = (target as HTMLElement | null)?.closest('button');
     if (!btn) return;
     if (btn.classList.contains('ds-download')) {
       const d = DATASET_CATALOG.find((x) => x.id === btn.dataset.id);
       if (d) void downloadDatasetRow(d);
-    } else if (btn.classList.contains('ds-source')) {
-      await invoke('open_release_page', { url: btn.dataset.url });
+    } else if (btn.dataset.dsOpenGallery) {
+      openDatasetSource(btn.dataset.dsOpenGallery);
+    } else if (btn.dataset.dsOpenRecordings) {
+      openSourceRecordings(btn.dataset.dsOpenRecordings);
+    } else if (btn.dataset.dsCite) {
+      void copyDatasetCitation(btn.dataset.dsCite);
+    } else if (btn.dataset.dsRemove) {
+      void removeDataset(btn.dataset.dsRemove);
     }
-  });
+  };
+  el?.addEventListener('click', (ev) => { void handle(ev.target); });
+  local?.addEventListener('click', (ev) => { void handle(ev.target); });
 }
 
 // === Recipes (source → transforms → result) ===
@@ -11162,7 +12612,9 @@ listen<LiveSnapshot>('live-classification', (event) => {
 const replayCanvas = document.getElementById('replayCanvas') as HTMLCanvasElement | null;
 const replayCtx = replayCanvas?.getContext('2d') || null;
 let replaySeries: SessionSeries | null = null;
+let replayHeat: EvolutionMatrix | null = null;
 let replayFrame = 0;
+let lastReplayFpDraw = 0;
 let replayPlaying = false;
 let replayLastTs: number | null = null;
 
@@ -11184,11 +12636,79 @@ function replayCurrentSample(): number[] | null {
   return sample;
 }
 
+/** A trailing window of the replay at the current frame, expressed as a
+ *  baseline-relative fingerprint. This is what the “now” radar shows. */
+function replayWindowFingerprint(frame: number): { channels: string[]; values: number[] } | null {
+  if (!replaySeries) return null;
+  const n = replaySeries.time.length;
+  if (!n) return null;
+  const end = Math.max(1, Math.min(n, frame || n));
+  const window = Math.max(4, Math.floor(n * 0.08));
+  const start = Math.max(0, end - window);
+  const values = replaySeries.channels.map((_, ci) => {
+    const seriesValues = replaySeries!.values[ci] || [];
+    const r0 = compareR0(seriesValues);
+    if (!r0 || !(r0 > 0)) return NaN;
+    return meanOf(seriesValues.slice(start, end)
+      .filter(Number.isFinite)
+      .map(v => (v - r0) / r0));
+  });
+  return { channels: replaySeries.channels, values };
+}
+
+function drawReplayFingerprint(force = false): void {
+  const canvas = document.getElementById('replayFingerprint') as HTMLCanvasElement | null;
+  if (!canvas) return;
+  const panel = document.getElementById('replayPanel');
+  if (!force && (!panel || panel.style.display === 'none')) return;
+  const nowMs = performance.now();
+  if (!force && nowMs - lastReplayFpDraw < 100) return;
+  lastReplayFpDraw = nowMs;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(220, canvas.clientWidth || 600);
+  const h = Math.max(120, canvas.clientHeight || 156);
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const stamp = document.getElementById('replayFpStamp');
+
+  if (!replaySeries || !replayHeat) {
+    ctx.fillStyle = '#8a7f6c';
+    ctx.font = '10px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Load a session to see its fingerprint form', w / 2, h / 2);
+    if (stamp) stamp.textContent = 'load a session';
+    return;
+  }
+
+  const n = replaySeries.time.length;
+  const playhead = n ? replayFrame / n : 0;
+  const radarW = Math.min(148, Math.max(96, w * 0.28));
+  const heatW = Math.max(120, w - radarW - 14);
+  drawEvolutionHeatmap(ctx, 0, 0, heatW, h - 12, replayHeat, { labels: true, playhead });
+
+  const now = replayWindowFingerprint(replayFrame);
+  if (now) {
+    drawFingerprintInto(ctx, heatW + 14, 0, radarW, h - 14, now.values, now.channels, { compact: true });
+    ctx.fillStyle = '#8a7f6c';
+    ctx.font = '7px ui-monospace, "SF Mono", Menlo, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    ctx.fillText('now · trailing window', heatW + 14 + radarW / 2, h - 11);
+  }
+  if (stamp) stamp.textContent = `${Math.round(playhead * 100)}% · ${now ? now.values.filter(Number.isFinite).length : 0} channels`;
+}
+
 function replayReflectOnDashboard() {
   const sample = replayCurrentSample();
   if (sample) drawFingerprint(sample);
   document.getElementById('replayNote')!.textContent =
     `Replaying "${replaySeries?.label}" — ${replaySeries?.time.length ?? 0} samples · ${replaySeries?.channels.length ?? 0} channels. Inspection only (fingerprint reflects the replayed moment; not fed to the detector/classifier).`;
+  drawReplayFingerprint();
 }
 
 function populateReplaySelect() {
@@ -11222,6 +12742,9 @@ async function loadReplay() {
   const fid = sel.value;
   if (!fid) {
     replayPlaying = false;
+    replaySeries = null;
+    replayHeat = null;
+    drawReplayFingerprint(true);
     const btn = document.getElementById('replayPlay');
     if (btn) btn.textContent = '▶ Play';
     if (note) note.textContent = sessions.length === 0
@@ -11231,6 +12754,7 @@ async function loadReplay() {
   }
   try {
     replaySeries = await invoke<SessionSeries>('load_session_series', { fileId: fid });
+    replayHeat = buildEvolutionMatrix(replaySeries, 72);
     replayFrame = 0;
     replayLastTs = null;
     if (replaySeries.time.length) {
@@ -11240,6 +12764,7 @@ async function loadReplay() {
       document.getElementById('replayTime')!.textContent = `00:00 / ${fmtRecTime(dur)}`;
     }
     replayReflectOnDashboard();
+    drawReplayFingerprint(true);
     replayPlaying = false;
     const btn = document.getElementById('replayPlay');
     if (btn) btn.textContent = '▶ Play';
@@ -11271,6 +12796,7 @@ function drawReplay() {
     ctx.font = '12px -apple-system, sans-serif';
     ctx.textAlign = 'center';
     ctx.fillText('Pick a session and press Load to replay', w / 2, h / 2);
+    drawReplayFingerprint();
     return;
   }
 
@@ -11314,6 +12840,7 @@ function drawReplay() {
     ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke();
   }
+  drawReplayFingerprint();
 }
 
 function replayTick(dtMs: number) {
@@ -11552,10 +13079,6 @@ document.getElementById('livePlayPause')!.addEventListener('click', toggleLivePa
 document.getElementById('liveClear')!.addEventListener('click', clearLiveView);
 document.getElementById('dashExplore')?.addEventListener('click', () => {
   showWorkspaceView('smells');
-});
-document.getElementById('dashCompare')?.addEventListener('click', () => {
-  showWorkspaceView('compare');
-  window.setTimeout(() => { void tryStarterCompare(); }, 80);
 });
 document.getElementById('dashConnect')?.addEventListener('click', () => {
   showWorkspaceView('system');
@@ -12536,13 +14059,10 @@ initRecipes();
 refreshBurnIn();
 refreshPlugins();
 refreshDataPanel();
-// Populate first, then paint: the library must never render as an empty state
-// on a machine that has the starter pack available.
-// Populate first, then paint: the library must never render as an empty state
-// on a machine that has the starter pack available.
-ensureStarterLibrary()
-  .catch(() => { /* optional */ })
-  .then(() => reloadLibrary())
+// A fresh install has no recordings. That is the correct empty state: the
+// library fills from the user's rig, their imports, or a corpus they fetch.
+// Nothing is silently seeded from the developer's machine.
+reloadLibrary()
   .then(() => landOnWork())
   .catch((e) => console.error('Boot chain failed:', e));
 
@@ -12554,9 +14074,13 @@ checkRecoveredSessions();
 // which now holds the starter pack — instead of a blank instrument panel.
 function landOnWork(): void {
   if (connected) return;
-  if (!sessions.length) return;
+  if (!sessions.length) {
+    // No rig and no data: show the corpus shelf, not an empty cockpit.
+    showWorkspaceView('datasets');
+    return;
+  }
   const onDashboard = document.querySelector('.tab-btn[data-tab="dashboard"]')?.classList.contains('active');
-  if (onDashboard) (document.querySelector('.tab-btn[data-tab="library"]') as HTMLElement | null)?.click();
+  if (onDashboard) showWorkspaceView('smells');
 }
 
 // Fit the window to the screen: never let it overstretch past the monitor's

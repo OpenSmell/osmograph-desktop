@@ -16,11 +16,11 @@ Osmograph is a local-first workbench for digitising the experiment around a smel
 - [The claim ladder](#claims)
 - [Fingerprints and the difference wheel](#fingerprints)
 - [How Check works](#check)
-- [Recipes, trim, and replay](#recipes)
+- [Transforms, trim, and replay](#recipes)
 
 **Vials**
 
-- [What a Vial is — and what “sealed” means](#vials)
+- [What a Vial is — and what “gated” means](#vials)
 - [Domain Vials: protocols, logs, and honest limits](#domain)
 - [Authoring a domain Vial](#authoring)
 
@@ -47,11 +47,11 @@ Osmograph turns a gas-sensor recording into a reproducible comparison: this samp
 
 It is not a universal smell identifier, a concentration meter, or a safety instrument. A sensor response is a mixture. The useful claim is a closed-set, same-array comparison with the uncertainty and limits attached.
 
-The quickest first loop is: open Explore → tick two smells → Analyse → Compare → read the same-array guard and the difference wheel → save a Check. If you have no hardware, the bundled SmellNet recordings are enough to do the whole loop; Home → Try a comparison runs the starter pair for you.
+The quickest first loop is: open Explore → Datasets, download the public SmellNet sensor set from Hugging Face, then tick two smells → Analyse → Compare → read the same-array guard and the difference wheel → save a Check. Nothing is preloaded.
 
-The app is organised by job: Home, Explore, Analyse, Vials, Data, Rigs, and Settings. Hardware controls appear on Home, Rigs, and Settings; Explore, Analyse, Vials, and Data work without a rig.
+The app is organised by job: Home, Explore, Analyse, Vials, and Fleet, with Settings and the Field Guide as utilities. Hardware controls appear on Home and Fleet; Explore, Analyse, and Vials work without a rig.
 
-- No hardware? Use Explore and Analyse → Compare. The bundled data is real and labelled.
+- No hardware? Download a real public corpus from Explore → Datasets, then use Gallery and Analyse → Compare.
 - Have a rig? Capture a baseline and a sample on the same channels, then use Check.
 - Want a reusable decision? Package a saved Check as a Vial, or install a Domain Vial for a field protocol.
 
@@ -61,11 +61,11 @@ The app is organised by job: Home, Explore, Analyse, Vials, Data, Rigs, and Sett
 
 *Three short loops that produce something useful without pretending to have a lab.*
 
-Tutorial A — read a fingerprint. Open Explore → Gallery. Pick Banana. Read the per-channel curves, the replicate spread, the channel count, and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison. On Home, Try a comparison runs this starter pair without hardware.
+Tutorial A — read a fingerprint. Download SmellNet in Explore → Datasets. Open Explore → Gallery, pick Banana, and read the per-channel curves, the replicate spread, the channel count, and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison.
 
-Tutorial B — save a Check. In Analyse → Check, choose a reference and a sample from the same array. Run Check. Read the lower bound and the p-value, not just the badge. Save the Check. Now open Vials → Decisions and package the saved Check. Inspect the validation gate before you trust the seal.
+Tutorial B — save a Separability result. In Analyse → Separability, read the class matrix, then choose a reference and a sample from the same array. Run the pair. Read the lower bound and the p-value, not just the badge. Save the result. Now open Vials → Decisions and package it. Inspect the validation gate before you trust the seal.
 
-Tutorial C — install a Domain Vial. Open Vials → Aromatory, install Fermentation Lab, and read the risk panel before the log. Add one reading with a pH, temperature, and visual note. The point is the record, not the sensor trace. Then open Plant Respiration and read its “no ethylene channel” limit.
+Tutorial C — install a Domain Vial. Open Vials → Aromatory, install Fermentation Lab, and read its scope and stop rules before the log. Add one reading with a pH, temperature, and visual note. The point is the record, not the sensor trace. Then open Plant Respiration and read its “no ethylene channel” limit.
 
 ## Methods
 
@@ -79,7 +79,7 @@ The software separates four kinds of statement. They are related, but they are n
 
 - Observation: “these recordings differ on this array.” Cheap, local, and easy to over-read.
 - Check: “on this array, this reference and this sample are distinguishable under this method.” Adds a paired comparison, a permutation test, and a lower confidence bound.
-- Sealed Vial: “this closed-set decision passed the local validation gate, with its array, limits, evidence, and method attached.” Still not a universal or cross-rig claim.
+- Gated Vial: “this closed-set decision passed the local validation gate, with its array, limits, evidence, and method attached.” Still not a universal or cross-rig claim. “Sealed” is reserved for published Vials that passed external review and carry a signature.
 - Decision: “use this Vial for this narrow, repeated choice.” Only valid inside the declared scope and only with the declared sample preparation.
 
 <a id="fingerprints"></a>
@@ -110,7 +110,7 @@ The current Check method is check.baseline-relative.v1, “Baseline-relative fin
 
 The result reports the number of held-out evaluations, a separation verdict, a 95% Wilson lower bound on the paired success rate, and a permutation p-value. A high point estimate with a wide interval is not a strong result. A p-value is not an effect size.
 
-The verdicts are deliberately plain: separable, fragile, confusable, insufficient. “Fragile” means the comparison worked in this sample but the evidence is not strong enough for a sealed claim. “Insufficient” means there are not enough paired evaluations to say anything useful.
+The verdicts are deliberately plain: separable, fragile, confusable, insufficient. “Fragile” means the comparison worked in this sample but the evidence is not strong enough for the local decision gate. “Insufficient” means there are not enough paired evaluations to say anything useful.
 
 - Method: check.baseline-relative.v1 · version 1.0.0.
 - Pairing: the reference and sample must share the same array channels.
@@ -119,11 +119,11 @@ The verdicts are deliberately plain: separable, fragile, confusable, insufficien
 
 <a id="recipes"></a>
 
-### Recipes, trim, and replay
+### Transforms, trim, and replay
 
 *A recipe is a named transform chain, not a model and not a smell.*
 
-Use Analyse → Recipes, or select a recording in Data → Recordings and press Trim. A recipe binds to one indexed recording, runs named transforms in order, previews the result, and can save the result as a new `.osmell` recording. The original is never overwritten. Runnable transforms include `trim.range` (cut to start/end seconds), gap fill, outlier removal, smoothing, detrending, baseline selection, response ratio, R0 normalization, and min-max/z-score scaling. Catalogued-but-unimplemented transforms are not presented as working.
+Use Analyse → Transforms, or select a recording in Explore → Recordings and press Transform. A transform pipeline binds to one indexed recording, runs named transforms in order, previews the result, and can save the result as a new `.osmell` recording. The original is never overwritten. Runnable transforms include `trim.range` (cut to start/end seconds), gap fill, outlier removal, smoothing, detrending, baseline selection, response ratio, R0 normalization, and min-max/z-score scaling. Catalogued-but-unimplemented transforms are not presented as working.
 
 Replay plays a recorded session at 0.5×–8× with a scrub bar. The live fingerprint reflects the replayed moment; replay does not feed the live detector or classifier. A saved Check is a snapshot of a verdict; reopening it recomputes against the current library.
 
@@ -135,7 +135,7 @@ Replay plays a recorded session at 0.5×–8× with a scrub bar. The live finger
 
 <a id="vials"></a>
 
-### What a Vial is — and what “sealed” means
+### What a Vial is — and what “gated” means
 
 *A Vial is a reusable, local-first decision pack, not a universal model.*
 
@@ -143,9 +143,9 @@ A decision Vial packages a closed-set claim with its evidence: identity and auth
 
 The local validation gate seals a Vial only when every critical check passes. The current gate requires a separable verdict, a lower bound of at least 55%, a permutation p-value of at most 0.05, explicit limits, source/evidence provenance, and no forbidden overclaim language. The recipe is advisory; the evidence is the gate.
 
-“Open” does not mean broken. It means the local evidence did not clear the gate, so the Vial is labelled unusable for a decision. “Sealed” is also scoped: it is a claim about this closed set on the array that produced the evidence. It is not external validation and it does not transfer to another rig.
+“Ungated” does not mean broken. It means the local evidence did not clear the gate, so the Vial is labelled unusable for a decision. “Gated” is also scoped: it is a claim about this closed set on the array that produced the evidence, checked only by the machine you are holding. It is not external validation and it does not transfer to another rig.
 
-- Sealed is a local evidence status, not a safety certification.
+- Gated is a local evidence status, not a safety certification. A published, externally reviewed, signed Vial will carry the “Sealed” state.
 - Cross-rig generalisation is explicitly refused until a calibration story exists.
 - Export and import use the osmograph.vial/1 manifest as .vial.json.
 
@@ -153,38 +153,38 @@ The local validation gate seals a Vial only when every critical check passes. Th
 
 ### Domain Vials: protocols, logs, and honest limits
 
-*A domain Vial carries a way of working, not just a pairwise verdict. It is declarative and host-rendered.*
+*A domain Vial carries a way of working, not just a pairwise verdict. Any Vial may stay declarative or add a sandboxed UI.*
 
-A domain Vial ships a protocol, a log, a risk model, decision rules, field notes, citations, and a custom workspace. The host renders the workspace from a declarative manifest; no third-party executable code runs in the app. This is the Stage 1 extension model in the design notes, not a sandboxed iframe runtime.
+A domain Vial ships a protocol, a log, a scope model, decision rules, field notes, citations, and a workspace. The host renders the declarative workspace from the manifest. A Vial may also add a sandboxed ui.html beside the manifest: a body fragment in an iframe with no network, storage, forms, frames, or Tauri access, fed by a typed host payload. A compact Home view can be added as home.html. Every author gets the same runtime and the same policy gate.
 
-The official Fermentation Lab and Plant Respiration packs are examples. Fermentation Lab makes food safety the first panel and refuses to turn a pleasant smell into a safety verdict. Plant Respiration states that the current constants table has no ethylene channel and that a change signal is not a pest or pathogen diagnosis.
-
-Anomaly Watch is the generic custom-domain pack. It documents the live anomaly engine’s contract: a per-device clean baseline, warming up, warning, critical, and emergency states, and the stop rules that keep a change signal from becoming a safety verdict. It is not a gas leak detector and it is not a safety device.
+The Fermentation Lab reference project is author-hosted and not bundled with this app. It makes food safety the first panel, refuses to turn a pleasant smell into a safety verdict, and adds a Home view built from the same log and array data. Plant Respiration is also author-hosted and stays declarative; it states that the current constants table has no ethylene channel, so a change signal is not a pest or pathogen diagnosis. Anomaly Watch is retired: the host owns the always-on anomaly signal, and a domain Vial owns the interpretation.
 
 Domain Vials are where domain knowledge becomes useful: a batch log with pH, temperature, salt, and visual cues; a plant log with light, water, leaf, and root context; stop rules that tell you when to discard or inspect. The sensor stays one column in a larger record.
 
-- Risk levels are explicit: low, medium, high, critical.
+- Scope and stop rules are explicit: what the record can support, and when to stop or inspect.
 - Every domain pack must state what it is and what it is not.
 - The log is stored locally and can be exported or cleared with site data.
-- A domain pack can be installed from a file or from a single HTTPS manifest URL.
+- A sandboxed UI can use live or recorded sensor windows, but it cannot call Tauri, reach the network, or invent a second detector.
+- A Vial can be installed from its manifest URL. A Vial with a workspace or Home UI must be installed from its URL so the host can fetch ui.html and home.html beside it.
 
 <a id="authoring"></a>
 
 ### Authoring a domain Vial
 
-*A community pack is a declarative manifest you can export, version, and share — not executable code.*
+*An author-hosted Vial is a manifest you can export, version, and share, with an optional sandboxed UI.*
 
-Start from Vials → Aromatory → Export on an official pack, or download the starter template. Change the id, author, licence, claims, citations, and workspace content. The full schema and widget vocabulary are in AUTHORING.md.
+Start from the authoring template in Vials → Aromatory. Change the id, author, licence, claims, citations, and workspace content. The full schema and widget vocabulary are in AUTHORING.md. There is no official tier: every author-hosted Vial runs through the same gate.
 
-The manifest uses schema osmograph.domain-pack/1. It must include hero, risk, docs, rig, and at least one of tracking, diagram, or rules. High and critical risk packs need a stop rule and at least three field-note sections. Citations must be real references, and whatItIsNot must name the claim you refuse to make.
+The manifest uses schema osmograph.domain-pack/1. It must include hero, scope, docs, rig, and at least one of tracking, diagram, or rules. Packs that touch safety-critical decisions need an explicit stop rule and at least three field-note sections. Citations must be real references, and whatItIsNot must name the claim you refuse to make.
 
-Validate without launching the app with npm run validate:vial — path/to/file.vial.json. Import it in the Aromatory, or host it in your own GitHub repo and use Install from URL with the raw HTTPS URL. The local gate checks identity, licence, risk framing, docs, citations, widget shape, executable or remote UI patterns, and known overclaim language. A pass is necessary, not sufficient, for trust.
+Validate without launching the app with npm run validate:vial — path/to/file.vial.json. If the Vial declares a ui or homeUi, the validator also checks the companion ui.html or home.html. Import a declarative manifest from a file, or host it in your own GitHub repo and use Install from URL with the raw HTTPS manifest URL. A Vial with a UI must be installed from its URL so the host can fetch the assets beside it.
 
-Community packs are always treated as community on import. The official.* id namespace and @opensmell handle are reserved. There is no hosted marketplace, signed registry feed, revocation service, or sandboxed code runtime. The submission unit is the .vial.json file; the public Aromatory page is a discovery list, not a trust seal.
+The registry is an index, not a store: it lists the author, version, source, and hash. It does not host the Vial, and a listing is not a review or endorsement. There is no hosted marketplace, signature verification, revocation service, or automatic update in this build. A pass through the local gate is necessary, not sufficient, for trust.
 
-- Data, not code: no JavaScript, custom HTML/CSS, remote images, or embedded resources.
+- The manifest stays declarative. Executable frontend code belongs in the separate ui.html or home.html and runs in the sandbox.
+- A sandboxed UI is available to every author, not a privileged tier.
 - Use a real author, licence, citations, and an explicit whatItIsNot.
-- Put the manifest in your own repo; install it from a raw HTTPS URL.
+- Put the manifest and optional ui.html/home.html in your own repo; install from the raw HTTPS manifest URL.
 - Export, re-import, and test the rendered workspace before you share it.
 - Do not claim official status, safety certification, gas leak detection, pathogen detection, diagnosis, universal smell ID, absolute concentration, or cross-rig transfer.
 
@@ -194,17 +194,17 @@ Community packs are always treated as community on import. The official.* id nam
 
 ### Data provenance and licensing
 
-*Bundled, fetched, and linked data are different. Attribution travels with the data.*
+*Fetched and reference-only data are different. Attribution travels with the data.*
 
-The starter library uses the public SmellNet dataset from the MIT Media Lab and MIT EECS, under the MIT licence. The public channel order is NO2, C2H5OH, VOC, CO, Alcohol, LPG; the app stores user arrays in the user order and never blends arrays. SmellNet is not bundled in full; the full release lives on Hugging Face.
+SmellNet is downloaded from its original Hugging Face release, not bundled. It is MIT licensed by the MIT Media Lab and MIT EECS. The public channel order is NO2, C2H5OH, VOC, CO, Alcohol, LPG; the app stores user arrays in the user order and never blends arrays.
 
-Food Freshness (Zenodo) and the Mendeley BME688 dataset are CC BY 4.0. UCI datasets remain link-only because their terms conflict. The dataset catalog records the licence, credit, and download policy for each entry; the canonical attribution record is NOTICE.md.
+Food Freshness (Zenodo) and the TADI methane release corpus are CC BY 4.0. UCI datasets remain reference-only because their terms conflict. The dataset catalog records the licence, credit, and download policy for each entry; the canonical attribution record is NOTICE.md.
 
-If you import your own data, it stays local. If you download a public dataset, the app records where it came from. If a dataset is link-only, the app sends you to the source instead of silently copying it.
+If you import your own data, it stays local. If you download a public dataset, the app records where it came from. Reference-only datasets are not shown as download buttons.
 
 - SmellNet: MIT licence, MIT Media Lab + MIT EECS. No MIT endorsement of this app.
-- Food Freshness and Mendeley BME688: CC BY 4.0. Keep attribution with redistributed copies.
-- UCI: link-only. Do not assume redistribution rights.
+- Food Freshness and TADI: CC BY 4.0. Keep attribution with redistributed copies.
+- UCI: reference-only. Do not assume redistribution rights.
 
 <a id="privacy"></a>
 
@@ -251,7 +251,7 @@ Baseline-relative: each channel is normalised to its own opening baseline before
 
 Check: a paired, same-array comparison with a verdict, a confidence bound, and a p-value.
 
-Domain Vial: a declarative workspace with a protocol, log, risk model, rules, and docs.
+Domain Vial: a declarative workspace with a protocol, log, scope model, rules, and docs.
 
 Fingerprint: the mean settled baseline-relative response per channel on the dominant array. Gallery cards draw it as a compact radar; the detail view shows the per-channel curves and replicates.
 
@@ -259,7 +259,7 @@ Permutation p-value: the probability of seeing a separation at least this strong
 
 Recipe: a named, ordered transform chain from one source recording to a previewed result. Saving the result creates a new `.osmell` recording.
 
-Sealed Vial: a local decision pack that passed every critical validation gate. Not a safety certification.
+Gated Vial: a local decision pack that passed every critical validation gate. Not a safety certification, not external review.
 
 Wilson lower bound: a conservative lower bound on the paired success rate, used to avoid over-reading a small sample.
 
@@ -279,8 +279,8 @@ If a claim in the app is stronger than its evidence, the correct fix is to weake
 
 ## Build, author, and inspect
 
-- [AUTHORING.md](AUTHORING.md) — the `.vial.json` schema, the policy gate, the widget vocabulary, and the submission path for community domain Vials.
+- [AUTHORING.md](AUTHORING.md) — the `.vial.json` schema, the policy gate, the widget vocabulary, the sandboxed UI contract, and the author-hosted submission path.
 - [NOTICE.md](NOTICE.md) — the canonical attribution and licensing record for datasets and bundled material.
 - [README.md](README.md) — build and development instructions.
 
-The local validation gate is not external certification. “Sealed” is a local evidence status. “Official” is a first-party label, not a safety or regulatory status. If a surface claims more than its evidence, that is a bug: open an issue with the surface, the claim, and the evidence you expected.
+The local validation gate is not external certification. “Gated” is a local evidence status. There is no official label and no privileged author tier: every Vial is an author-hosted project. If a surface claims more than its evidence, that is a bug: open an issue with the surface, the claim, and the evidence you expected.

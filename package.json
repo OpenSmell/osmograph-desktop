@@ -9,7 +9,10 @@
     "build": "vite build",
     "preview": "vite preview",
     "tauri": "tauri",
-    "validate:vial": "node scripts/validate-vial.mjs"
+    "validate:vial": "node scripts/validate-vial.mjs",
+    "scaffold:vial": "node scripts/scaffold-vial.mjs",
+    "test:vial-host": "node scripts/test-vial-host.mjs",
+    "test:vial-runtime": "node --experimental-strip-types scripts/test-vial-runtime.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

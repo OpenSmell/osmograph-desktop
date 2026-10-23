@@ -1,15 +1,14 @@
 {
   "schema": "osmograph.domain-pack/1",
-  "id": "community.example-coffee-roast",
-  "name": "Coffee Roast Log",
+  "id": "example.coffee-roast",
+  "name": "Coffee Roast Log (Example)",
   "version": "0.1.0",
   "author": "@example-author",
   "license": "CC-BY-4.0",
-  "tier": "community",
   "risk": "medium",
   "domain": "coffee",
-  "tagline": "Track the roast, not just the aroma.",
-  "summary": "A small example workspace for logging roast batches and the context that changes what the array response means. It is a template for authors, not a validated roasting controller.",
+  "tagline": "A template you can install, inspect, and replace.",
+  "summary": "A reference community manifest for testing URL install and the local policy gate. It is a template for authors, not a validated roasting controller or a real product.",
   "whatItIs": "A protocol and a local log for recording roast batch context, tasting notes, and a same-array comparison against a reference bean. It helps a person keep a reproducible record of what changed.",
   "whatItIsNot": "Not a roast defect classifier, not a universal coffee identifier, not a concentration meter, and not a safety verdict. A pleasant aroma does not prove a batch is good, and a changed signal does not prove a defect.",
   "citations": [
@@ -20,7 +19,7 @@
     {
       "type": "hero",
       "art": "generic",
-      "title": "Coffee Roast Log",
+      "title": "Coffee Roast Log (Example)",
       "subtitle": "A batch record with a sensor column, not a sensor verdict.",
       "note": "Community domain Vial · declarative · host-rendered · no executable code"
     },
@@ -79,7 +78,11 @@
           "id": "roast_level",
           "label": "Roast level",
           "type": "select",
-          "options": ["light", "medium", "dark"]
+          "options": [
+            "light",
+            "medium",
+            "dark"
+          ]
         }
       ],
       "logFields": [

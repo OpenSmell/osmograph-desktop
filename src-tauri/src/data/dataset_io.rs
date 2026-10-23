@@ -150,6 +150,89 @@ pub fn download_url(
     })
 }
 
+/// A single file inside a multi-file corpus. `path` is relative to the corpus root.
+#[derive(Clone, Debug)]
+pub struct BatchFile {
+    pub url: String,
+    pub path: String,
+}
+
+#[derive(Serialize, Clone)]
+pub struct BatchOutcome {
+    pub root: String,
+    pub files: Vec<String>,
+    pub bytes: u64,
+    pub cancelled: bool,
+}
+
+fn safe_relative(path: &str) -> Result<PathBuf, String> {
+    let rel = Path::new(path);
+    if rel.is_absolute() {
+        return Err(format!("Unsafe dataset path: {path}"));
+    }
+    let mut out = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::Normal(part) => out.push(part),
+            _ => return Err(format!("Unsafe dataset path: {path}")),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        return Err(format!("Empty dataset path: {path}"));
+    }
+    Ok(out)
+}
+
+/// Download a list of files into one corpus folder, preserving relative paths.
+/// The caller supplies the already-filtered list, so a Hugging Face tree fetch
+/// and an explicit URL list behave identically after this point.
+pub fn download_batch(
+    dest_root: &Path,
+    files: &[BatchFile],
+    control: &DownloadControl,
+    mut on_progress: impl FnMut(usize, usize, u64, Option<u64>, bool),
+) -> Result<BatchOutcome, String> {
+    fs::create_dir_all(dest_root).map_err(|e| e.to_string())?;
+    let total_bytes: Option<u64> = None;
+    let mut received_total: u64 = 0;
+    let mut saved: Vec<String> = Vec::new();
+
+    for (index, file) in files.iter().enumerate() {
+        if control.cancelled() {
+            return Ok(BatchOutcome {
+                root: dest_root.to_string_lossy().into_owned(),
+                files: saved,
+                bytes: received_total,
+                cancelled: true,
+            });
+        }
+        let rel = safe_relative(&file.path)?;
+        let parent = dest_root.join(rel.parent().unwrap_or_else(|| Path::new("")));
+        let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let outcome = download_url(&parent, &file.url, name, control, |received, _total, paused| {
+            on_progress(index, files.len(), received_total + received, total_bytes, paused);
+        })?;
+        if outcome.cancelled {
+            return Ok(BatchOutcome {
+                root: dest_root.to_string_lossy().into_owned(),
+                files: saved,
+                bytes: received_total,
+                cancelled: true,
+            });
+        }
+        received_total += outcome.bytes;
+        saved.push(outcome.path);
+        on_progress(index + 1, files.len(), received_total, total_bytes, false);
+    }
+
+    Ok(BatchOutcome {
+        root: dest_root.to_string_lossy().into_owned(),
+        files: saved,
+        bytes: received_total,
+        cancelled: false,
+    })
+}
+
 /// Extract every `.csv` entry from a zip into `dest_dir`, returning the paths.
 pub fn extract_csvs(zip_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>, String> {
     let file = fs::File::open(zip_path).map_err(|e| e.to_string())?;

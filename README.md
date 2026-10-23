@@ -13,22 +13,22 @@ not a universal smell identifier, a concentration meter, or a safety instrument.
   provenance, privacy, tutorials, known limits, and glossary. The same content is available in the
   app as **? Guide** and with `Ctrl/Cmd+K`.
 - [`AUTHORING.md`](AUTHORING.md) — how domain Vials work, the `.vial.json` schema, the widget
-  vocabulary, the local policy gate, security model, and the community submission path.
-- [`NOTICE.md`](NOTICE.md) — the canonical attribution and licensing record for datasets and bundled
+  vocabulary, the local policy gate, the sandboxed UI contract, and the author-hosted submission path.
+- [`NOTICE.md`](NOTICE.md) — the canonical attribution and licensing record for datasets and third-party
   material.
-- [`examples/community-workspace.vial.json`](examples/community-workspace.vial.json) — a complete,
-  validated community domain Vial.
+- [`examples/example-coffee-roast.vial.json`](examples/example-coffee-roast.vial.json) — a complete,
+  validated example domain Vial.
 
 ## Features
 
 - **Job-level navigation**: **Home** (live rig), **Explore** (smell library), **Analyse**
-  (Compare, Check, Recipes, Train, Change Log), **Vials**, **Data** (recordings + datasets),
-  **Rigs** (fleet), and **Settings** (hardware, calibration, release). Hardware controls stay on
-  Home, Rigs, and Settings; content workspaces stay quiet.
+  (Compare, Separability, Train), **Vials**, and **Explore** (gallery, recordings, datasets),
+  **Fleet** (devices and remote endpoints), and **Settings** (hardware, calibration, release). Hardware controls stay on
+  Home, Fleet, and Settings; content workspaces stay quiet.
 - **No-hardware first run**: Explore ships 22 real, labelled SmellNet smells. Home's
   **Try a comparison** selects the starter pair and opens Analyse → Compare without pretending a
   rig is connected.
-- **Recipes + trim**: source → named steps → preview → Save `.osmell`. Use `trim.range` to cut a
+- **Transforms + trim**: source → named steps → preview → Save `.osmell`. Use `trim.range` to cut a
   recording, smooth/filter, baseline, normalize, and add the derived result back to the library
   without overwriting the original.
 - **Live recording** from serial and BLE MOX sensor boards, with adaptive channel presets
@@ -51,42 +51,46 @@ Vials are installable ways of working, not just saved files.
   bound, permutation p-value, limits, provenance, and method. The local gate seals a Vial only when
   every critical check passes. “Sealed” is a local evidence status, not external validation.
 - **Domain Vials** package a protocol, a local log, a risk model, stop rules, field notes, citations,
-  and a host-rendered workspace. Official examples are **Anomaly Watch** (high risk), **Fermentation
-  Lab** (high risk), and **Plant Respiration** (medium risk). A domain Vial is declarative data: it
-  can be exported as `.vial.json`, inspected, versioned, shared, and imported on another
-  installation. It cannot ship executable code or custom HTML/CSS in Stage 1.
-- **Personal GitHub, no new registry repo.** Host the `.vial.json` in a repo you already control and
-  install it from the raw HTTPS URL in **Vials → Aromatory → Install from URL**. The app fetches one
-  manifest, runs the local gate, and records the source host. The public
-  [Aromatory page](https://www.opensmell.xyz/vials) is a discovery list backed by one JSON file in
-  the existing `opensmell-web` site.
-- **Community packs** are always treated as community on import, even if their manifest claims
-  official status. The `official.*` id namespace and `@opensmell` author handle are reserved.
-  “Official” means first-party, not correct, safe, or endorsed.
+  and a workspace. The app ships no domain Vial source. The reference projects live in author-hosted
+  repos: **Fermentation Lab** has a workspace UI and a compact Home view, **Plant Respiration** is
+  declarative, and **Anomaly Watch** is retired and unlisted. A published Vial can be exported as
+  `.vial.json`, inspected, versioned, shared, and installed on another installation.
+- **Any Vial may ship a UI.** The sandbox is the execution boundary, not a trust tier. A Vial with a
+  `ui.html` or `home.html` must be installed from its manifest URL so the host can fetch the assets
+  beside it.
+- **Personal GitHub, no new registry repo.** Host `vial.json` and optional `ui.html`/`home.html` in a
+  repo you already control and install from the raw HTTPS manifest URL in **Vials → Aromatory →
+  Install from URL**. The app fetches the manifest, runs the local gate, fetches the declared assets,
+  and records the source. The public [Aromatory page](https://www.opensmell.xyz/vials) is an index backed by one
+  JSON file in the existing `opensmell-web` site. It does not host the Vial.
+- **No official tier.** Every Vial is an author-hosted project. There is no reserved namespace, no
+  privileged author handle, and no built-in copy. A listing is discovery, not endorsement.
 
-The local policy gate runs on import. It checks identity, licence, risk framing, required docs and
-citations, widget shape, stop rules for high-risk packs, executable/remote UI patterns, and known
+The local policy gate runs on import. It checks identity, licence, scope framing, required docs and
+citations, widget shape, explicit stop rules, executable/remote UI patterns, and known
 overclaim language. It is heuristic: passing is necessary, not sufficient, for trust.
 
 Validate a manifest without launching the app:
 
 ```bash
-npm run validate:vial -- examples/community-workspace.vial.json
+npm run validate:vial -- examples/example-coffee-roast.vial.json
 ```
 
-Stage 1 includes direct HTTPS install of a single manifest. It does **not** include a hosted
-marketplace, a signed registry feed, revocation, automatic updates, sandboxed third-party code, or
-cross-rig calibration. Those are separate design problems; the authoring and submission limits are
-documented in [`AUTHORING.md`](AUTHORING.md).
+Stage 1 includes direct HTTPS install of a manifest and its optional sandboxed `ui.html`/`home.html`. It does
+**not** include a hosted marketplace, a signed registry feed, revocation, automatic updates, signed
+code bundles, per-Vial permissions, or cross-rig calibration. Those are separate design problems;
+the authoring and submission limits are documented in [`AUTHORING.md`](AUTHORING.md).
 
 ## Layout
 
 - `src-tauri/src/` — Rust backend: DAQ (`live`), session data (`data/`), quality/classifier,
   burn-in (`burnin`), plugins (`plugins`), and 60+ Tauri commands in `lib.rs`.
 - `src/main.ts` + `index.html` — TypeScript/Vite frontend.
-- `src/domainPacks.ts` — domain-Vial schema, official packs, local policy gate, import/export.
+- `src/domainPacks.ts` — domain-Vial schema, local policy gate, import/export, UI cache.
+- `src/vialRuntime.ts` — sandbox document builder, typed payload, CSP, and action parser.
 - `src/guide.ts` — the in-app field guide content; mirrored publicly in `GUIDE.md`.
-- `scripts/validate-vial.mjs` — CLI wrapper around the same domain-Vial gate.
+- `scripts/validate-vial.mjs` — CLI wrapper around the same domain-Vial gate and UI fragment checks.
+- `scripts/test-vial-runtime.mjs` — sandbox, payload, and parser contract test.
 
 ## Development
 

@@ -1,0 +1,18 @@
+{
+  "schema": "osmograph.vial-host/1",
+  "takenAt": 1,
+  "source": "none",
+  "samplingMode": "unknown",
+  "channels": [],
+  "environment": null,
+  "baseline": { "state": "none", "progress": 0, "ageSec": null },
+  "anomaly": {
+    "state": "unknown",
+    "score": null,
+    "confidence": null,
+    "alertLevel": 0,
+    "triggeredChannels": 0,
+    "consecutive": 0
+  },
+  "classifier": { "state": "none", "name": null, "label": null, "confidence": null }
+}
