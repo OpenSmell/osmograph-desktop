@@ -18,6 +18,32 @@ const LIVE_WINDOW_DEFAULT = 800; // default trailing-sample window; reset-zoom t
 // every channel (up to 64) gets its own distinct color.
 const PALETTE_ANCHORS = ['#0891b2', '#4338ca', '#0e7490', '#2563eb', '#06b6d4', '#7c3aed', '#164e63', '#93c5fd'];
 let lastAnomalyKey = '';  // anomaly-card state key: only re-stamp DOM when this CHANGES
+// Wall-clock of the moment this session's detector baseline finished warming.
+// Feeds the vial contract's baseline.ageSec; null until actually observed, so
+// the contract never ships an invented age.
+let baselineReadyAt: number | null = null;
+
+// Rolling per-channel health verdict from Rust, captured by the 2 s
+// updateSensorHealth() side panel poll and consumed by the vial snapshot.
+// Expiry (20 s without a successful poll) falls back to 'unknown' rather than
+// reusing a stale verdict.
+type ChannelHealth = 'ok' | 'stuck' | 'saturated' | 'noisy' | 'unknown';
+let sensorHealthCache: SensorHealthInfoApi[] | null = null;
+let sensorHealthAt = 0;
+
+/** Map the Rust health ladder onto the vial contract enum. Rust reports one
+ *  status string per channel plus the measurements behind it, so CRITICAL
+ *  (drift OR noise) resolves to whichever measurement drove it. */
+function healthEnumFor(channel: number): ChannelHealth {
+  if (!sensorHealthCache || Date.now() - sensorHealthAt > 20000) return 'unknown';
+  const h = sensorHealthCache.find(x => x.channel === channel);
+  if (!h) return 'unknown';
+  if (h.stuck || h.status === 'FAILED') return 'stuck';
+  if (h.status === 'OK') return 'ok';
+  if (h.status === 'CRITICAL') return h.cv >= h.drift_rate ? 'noisy' : 'saturated';
+  if (h.status === 'WARNING') return 'noisy';
+  return 'unknown';
+}
 let lastAnomalyReading: {
   state: VialHost.AnomalyState;
   score: number | null;
@@ -916,8 +942,48 @@ const fpCtx = fpCanvas.getContext('2d')!;
 // decay), so a single noisy sample cannot re-normalize the whole radar and make
 // the shape "breathe" or jerk sample to sample.
 let fingerprintScale: number[] = [];
+// Where the values currently ON the radar came from. The radar is a live-
+// monitoring surface; a replayed recording may drive it, but then the stamp
+// says REPLAY — cyan never marks replayed data, and a connected rig always
+// wins the canvas over replay so the two never flicker-fight at 10 Hz.
+type FpSource = 'live' | 'replay' | 'capture' | 'idle';
+let fpSource: FpSource = 'idle';
+let lastFpValues: number[] | null = null;
+
+const FP_SOURCE_META: Record<FpSource, { text: string; cls: string; title: string }> = {
+  live: { text: 'LIVE', cls: 'fp-source live', title: 'Live monitoring data from the connected rig' },
+  replay: { text: 'REPLAY', cls: 'fp-source replay', title: 'Replayed recording — not live data; the detector is not evaluating it' },
+  capture: { text: 'CAPTURE', cls: 'fp-source capture', title: 'Tail of previously captured samples — no rig connected' },
+  idle: { text: '—', cls: 'fp-source', title: 'No data has reached the radar yet' },
+};
+
+function currentFpSource(): FpSource {
+  if (connected) return 'live';
+  const replayOpen = document.getElementById('replayPanel')?.style.display !== 'none';
+  if (replayOpen && replaySeries) return 'replay';
+  return historyData.some(ch => ch.length > 0) ? 'capture' : 'idle';
+}
+
+/** Re-evaluate which source the radar reflects and keep the stamp, tooltip and
+ *  pixels in agreement. Cheap enough to call every second and after each draw. */
+function refreshFpSource(): void {
+  const next = currentFpSource();
+  if (next === fpSource) return;
+  const meta = FP_SOURCE_META[next];
+  const el = document.getElementById('fpSource');
+  if (el) {
+    if (el.textContent !== meta.text) el.textContent = meta.text;
+    el.className = meta.cls;
+    el.title = meta.title;
+  }
+  const was = fpSource;
+  fpSource = next;
+  // Redraw so the canvas shape matches the stamp, not just the label.
+  if (lastFpValues && was !== 'idle' && next !== 'idle') drawFingerprint(lastFpValues);
+}
 
 function drawFingerprint(values: number[]) {
+  lastFpValues = values.slice();
   const rect = fpCanvas.parentElement!.getBoundingClientRect();
   fpCanvas.width = Math.max(1, Math.floor(rect.width - 8));
   fpCanvas.height = Math.max(80, Math.floor(rect.height - 8));
@@ -1336,6 +1402,7 @@ async function ingestReading(values: number[]) {
 
   // Update fingerprint
   drawFingerprint(values);
+  refreshFpSource();
 
   try {
     const result = await invoke<{
@@ -1343,6 +1410,10 @@ async function ingestReading(values: number[]) {
       triggered_channels: number[]; alert_level: number; alert_name: string;
       consecutive_anomalies: number; warming_up: boolean; baseline_progress: number;
     }>('ingest_reading_with_failsafe', { reading: values });
+
+    // Baseline age is a real observation, not a guess: stamp the first tick
+    // where the detector reports the baseline ready in this session.
+    if (!result.warming_up && baselineReadyAt === null) baselineReadyAt = Date.now();
 
     // Anomaly card — state-transition guard: only re-stamp DOM when the
     // composite state actually CHANGES, not every ~10Hz tick. This kills the
@@ -1586,6 +1657,7 @@ function clearAnomalyForNoRig(): void {
 // few seconds, flag it — a plugged device that isn't streaming now visibly
 // shows as "NO DATA" instead of silently looking live.
 function updatePlotLinkState() {
+  refreshFpSource();
   const el = document.getElementById('plotLinkState');
   if (!el) return;
   const wasNoRig = document.body.classList.contains('no-rig');
@@ -1675,6 +1747,7 @@ async function toggleConnection() {
       setPlotLink(true);
       document.getElementById('fDevice')!.textContent = addr;
       sampleCount = 0;
+      baselineReadyAt = null;
       lastDataAt = Date.now();
       bootloaderHinted = false;
       document.getElementById('bootBanner')?.classList.remove('show');
@@ -1702,6 +1775,7 @@ async function toggleConnection() {
       setPlotLink(true);
       document.getElementById('fDevice')!.textContent = addr;
       sampleCount = 0;
+      baselineReadyAt = null;
       lastDataAt = Date.now();
       bootloaderHinted = false;
       document.getElementById('bootBanner')?.classList.remove('show');
@@ -1724,6 +1798,7 @@ async function toggleConnection() {
       setPlotLink(true);
       document.getElementById('fDevice')!.textContent = port;
       sampleCount = 0;
+      baselineReadyAt = null;
       lastDataAt = Date.now();
       bootloaderHinted = false;
       document.getElementById('bootBanner')?.classList.remove('show');
@@ -1754,6 +1829,8 @@ interface SensorHealthInfoApi {
 async function updateSensorHealth() {
   try {
     const health = await invoke<SensorHealthInfoApi[]>('get_sensor_health');
+    sensorHealthCache = health;
+    sensorHealthAt = Date.now();
     const el = document.getElementById('sensorHealthList')!;
     if (health.length === 0) {
       el.innerHTML = '<div style="font-size:10px;color:var(--text-3)">No data yet</div>';
@@ -3981,18 +4058,26 @@ function currentHostSnapshot(): VialHost.VialHostSnapshot {
   return {
     schema: VialHost.VIAL_HOST_SCHEMA,
     takenAt: Date.now(),
+    // 'live' only when a rig streams; the contract's other values (replay,
+    // dataset) belong to explicitly chosen sources, which Home never is.
     source: connected ? 'live' : 'none',
+    // True for this host by construction: every source feeds an ordered
+    // array; there is no trial-discrete mode in Osmograph today.
     samplingMode: 'timeseries',
     channels: chNames.map((name, i) => ({
       id: `ch${i}`,
       label: name,
       kind: kindOf(i),
+      unit: KIND_META[kindOf(i)].unit,
+      // The Rust rolling-window verdict; 'unknown' while unmeasured.
+      health: healthEnumFor(i),
     })),
     environment: lastEnv ? { temperature: lastEnv.temperature, humidity: lastEnv.humidity } : null,
     baseline: {
       state: warming ? 'warming' : anomalyState === 'unknown' ? 'none' : 'ready',
       progress: lastAnomalyReading.baselineProgress,
-      ageSec: null,
+      // Age only when observed in this session; null is honest elsewhere.
+      ageSec: baselineReadyAt !== null ? Math.max(0, Math.round((Date.now() - baselineReadyAt) / 1000)) : null,
     },
     anomaly: {
       state: anomalyState,
@@ -7151,9 +7236,11 @@ async function cacheDomainUi(pack: Domain.DomainPack, manifestUrl: string): Prom
 function runtimeSourceOptions(): VialRuntime.VialSourceOption[] {
   const options: VialRuntime.VialSourceOption[] = [{
     id: 'live',
-    label: connected ? 'Live array' : 'Live buffer',
-    kind: 'live',
-    detail: connected ? 'This rig, current session' : 'No rig connected',
+    // "Live" must mean a connected rig. Without one, the buffer is the tail of
+    // past samples — a capture, not a stream — and must not borrow the word.
+    label: connected ? 'Live array' : 'Captured buffer',
+    kind: connected ? 'live' : 'recording',
+    detail: connected ? 'This rig, current session' : 'No rig connected — the tail of previously captured samples',
   }];
   for (const session of sessions) {
     if (!session.file_id) continue;
@@ -7176,8 +7263,10 @@ function liveVialSeries(): VialRuntime.VialSeriesWindow | null {
   if (n < 4) return null;
   const sampled = VialRuntime.downsampleChannels(raw, 600);
   return {
-    source: 'live',
-    label: connected ? 'Live array' : 'Live buffer (no rig)',
+    // Source follows reality, not the slot name: a connected rig is live; with
+    // no rig the same bytes are a capture and vials must brand them as such.
+    source: connected ? 'live' : 'recording',
+    label: connected ? 'Live array' : 'Captured buffer — no rig connected',
     channels,
     time: sampled.indices,
     timeUnit: 'sample',
@@ -11229,41 +11318,6 @@ function dlDone(job: DlJob, text: string, opts: { failed?: boolean; actions?: Ar
   }
 }
 
-/** Load an imported session onto the live dashboard so it actually plays there.
- * The dashboard is the surface people value and tinker on; a dataset should end up
- * on it, not in an orphan list (see FOUNDER_STRATEGY_DUMP.md). */
-async function playSessionInDashboard(fileId: string, label: string) {
-  const series = await invoke<SessionSeries>('load_session_series', { fileId });
-  const nCh = series.channels.length;
-  const nS = series.time.length;
-  if (!nCh || !nS) throw new Error('session has no samples');
-  setChannelCount(nCh, series.channels);
-  for (let i = 0; i < nS; i++) {
-    for (let c = 0; c < nCh; c++) {
-      const v = series.values[c]?.[i] ?? 0;
-      traceData[c]?.push(v);
-      historyData[c]?.push(v);
-    }
-  }
-  livePaused = false;
-  frozenTrace = [];
-  liveScrollSeek = 0;
-  isLiveScrubbing = false;
-  liveWindowSamples = Math.min(MAX_HISTORY, Math.max(2, nS));
-  traceDirty = true;
-  const cm = document.getElementById('connMsg');
-  if (cm) { cm.textContent = `Showing “${label}” — ${nS} samples · ${nCh} channels`; cm.style.color = 'var(--text-3)'; }
-  (document.querySelector('.tab-btn[data-tab="dashboard"]') as HTMLElement | null)?.click();
-  requestAnimationFrame(() => {
-    resizeTraces();
-    drawTraces();
-    updateScrubber();
-    updateTransportUI();
-    const ps = document.getElementById('plotSamples');
-    if (ps) ps.textContent = `${nS} SAMP`;
-  });
-}
-
 interface DatasetBatchProgress {
   filename: string;
   files_done: number;
@@ -12704,11 +12758,14 @@ function drawReplayFingerprint(force = false): void {
 }
 
 function replayReflectOnDashboard() {
-  const sample = replayCurrentSample();
+  // A connected rig always owns the Home radar; replay drives it only when
+  // there is no live stream to fight (the panel has its own radar regardless).
+  const sample = !connected ? replayCurrentSample() : null;
   if (sample) drawFingerprint(sample);
   document.getElementById('replayNote')!.textContent =
     `Replaying "${replaySeries?.label}" — ${replaySeries?.time.length ?? 0} samples · ${replaySeries?.channels.length ?? 0} channels. Inspection only (fingerprint reflects the replayed moment; not fed to the detector/classifier).`;
   drawReplayFingerprint();
+  if (sample) refreshFpSource();
 }
 
 function populateReplaySelect() {
@@ -12726,6 +12783,7 @@ function populateReplaySelect() {
 function openReplayPanel() {
   populateReplaySelect();
   document.getElementById('replayPanel')!.style.display = '';
+  refreshFpSource();
 }
 
 function closeReplayPanel() {
@@ -12733,6 +12791,7 @@ function closeReplayPanel() {
   document.getElementById('replayPanel')!.style.display = 'none';
   const btn = document.getElementById('replayPlay');
   if (btn) btn.textContent = '▶ Play';
+  refreshFpSource();
 }
 
 async function loadReplay() {
@@ -13001,6 +13060,7 @@ function clearLiveView() {
   traceDirty = true;
   updateTransportUI();
   updateScrubber();
+  refreshFpSource();
 }
 // Seek: samples back from the newest sample. 0 = live following.
 function setLiveSeek(offsetSamples: number) {

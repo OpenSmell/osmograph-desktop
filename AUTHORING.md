@@ -77,12 +77,12 @@ A Vial does not read the raw feature vector. It receives a small, versioned snap
 
 | Field | Meaning |
 |---|---|
-| `source` | `live`, `replay`, `dataset`, or `none`. |
-| `samplingMode` | `timeseries`, `trial`, or `unknown`. Timeseries-only primitives must refuse trial-level data. |
-| `channels` | Per-channel id, label, kind, unit, and health. |
-| `environment` | Temperature and humidity, or `null`. Context, not an excuse. |
-| `baseline` | `none`, `warming`, `ready`, or `stale`, plus progress. No alarm before the host says ready. |
-| `anomaly` | Host state, score, confidence, alert level, triggered channels, and consecutive count. |
+| `source` | `live` (connected rig), `replay`, `dataset`, or `none`. The Home snapshot is `live` only while a rig streams; else `none`. The workspace source picker can load a `recording` — a captured series window labelled as such, never as live. |
+| `samplingMode` | `timeseries`, `trial`, or `unknown`. Osmograph currently ships `timeseries` by construction; timeseries-only primitives must still refuse trial-level data. |
+| `channels` | Per-channel `id`, `label`, `kind`, `unit`, and `health`. `unit` is the channel's natural unit (e.g. `ΔR/R₀` for analog MOX). `health` is the host's rolling-window verdict: `ok`, `stuck`, `saturated`, `noisy`, or `unknown` while unmeasured. |
+| `environment` | Temperature (`°C`) and humidity (`%RH`), or `null`. Context, not an excuse. |
+| `baseline` | `none`, `warming`, `ready`, or `stale`, plus `progress`. `ageSec` is the seconds since the baseline became ready **in this session** — measured, or `null` when the host has not observed it. No alarm before the host says ready. |
+| `anomaly` | Host state (`unknown`, `normal`, `warning`, `critical`), score, confidence, alert level, triggered channels, and consecutive count. |
 | `classifier` | `none` or loaded, with a closed-set label and confidence. |
 
 The host owns the data plane, the detector, the classifier, and every refusal. A Vial may explain a host state, add a protocol, and point to the next human action. It may not override the host, invent a second detector, or turn a change signal into an identity, concentration, cross-rig claim, or safety verdict.
@@ -250,7 +250,7 @@ The host sends one JSON payload over `postMessage`:
 - `series` is a downsampled, JSON-safe window (at most about 600 points). Missing values are `null`; do not turn them into zeroes.
 - `fingerprint` is baseline-relative: the settled response against the opening window. It is descriptive, not a classifier.
 - `evolution` is a signed `ΔR/R0` matrix over equal time bins. Use it to show change over time, not only a mean.
-- `sources` includes `live` and available recordings. `selectedSource` says which one is loaded. The UI can request another with `set-source`; the host caches recording windows per source.
+- `sources` includes `live` and available recordings. Its first entry is the live slot: `kind: "live"` only while a rig is connected — with no rig it is `kind: "recording"`, labelled "Captured buffer", because the same bytes are then the tail of past samples, not a stream. `selectedSource` says which one is loaded. The UI can request another with `set-source`; the host caches recording windows per source.
 - `events` is the host anomaly event history. A Vial may explain it; it may not invent a second detector.
 
 #### Bridge and actions

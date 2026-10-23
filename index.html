@@ -852,6 +852,19 @@
       color: var(--cyan);
       margin-left: 4px;
     }
+    /* Source stamp next to the radar title: cyan is reserved for live data,
+       replay gets ink, no stream gets an em dash. Colour = signal. */
+    .fp-source {
+      font-family: var(--font-mono);
+      font-size: 8px;
+      letter-spacing: 0.14em;
+      padding: 1px 4px;
+      margin-left: 6px;
+      border: 1px solid currentColor;
+    }
+    .fp-source.live { color: var(--cyan); }
+    .fp-source.replay { color: var(--text-0); background: var(--green-dim); }
+    .fp-source.capture { color: var(--text-2); background: transparent; }
     button.fp-save {
       float: right;
       display: inline-flex;
@@ -3725,7 +3738,7 @@
                   </div>
                   <div class="pheno-sep"></div>
                   <div class="pheno-cell grow" id="phenoBound">
-                    <div class="pheno-cell-head">Fingerprint <span class="fp-hint">ⓘ</span><button id="exportFingerprintPng" class="mini fp-save" title="Save this fingerprint as an image" aria-label="Save fingerprint as image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button></div>
+                    <div class="pheno-cell-head">Fingerprint <span id="fpSource" class="fp-source">—</span><span class="fp-hint">ⓘ</span><button id="exportFingerprintPng" class="mini fp-save" title="Save this fingerprint as an image" aria-label="Save fingerprint as image"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg></button></div>
                     <canvas id="fingerprint"></canvas>
                   </div>
                 </div>
