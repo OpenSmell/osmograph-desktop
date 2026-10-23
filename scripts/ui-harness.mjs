@@ -186,6 +186,33 @@ if (takeoverBtn) {
   if (!take.active || take.dashboard !== 'none') errors.push('takeover did not replace the instrument');
   if (take.frame[1] < 320) errors.push(`takeover frame too small: ${take.frame[1]}px`);
 
+  // Programmable Vial: the domain module declares host transforms and a
+  // trajectory, then arms a single-unit watch through the host gate. The host
+  // owns the acceptance; the Vial only declares intent.
+  await page.waitForTimeout(1600);
+  let watchArmed = null;
+  for (const f of page.frames()) {
+    if (f === page.mainFrame()) continue;
+    if (!(await f.locator('#watchLimits input[data-channel]').count())) continue;
+    const declared = await page.evaluate(() => ({
+      transforms: localStorage.getItem('osmograph.vial.transforms.praisejamesx.fermentation'),
+      trajectory: localStorage.getItem('osmograph.vial.trajectorySpec.praisejamesx.fermentation'),
+    }));
+    if (!declared.transforms) errors.push('programmable vial: host transforms were not declared');
+    if (!declared.trajectory) errors.push('programmable vial: trajectory spec was not declared');
+    await f.locator('#watchApply').click().catch(() => {});
+    await page.waitForTimeout(900);
+    watchArmed = await page.evaluate(() => {
+      try { return JSON.parse(localStorage.getItem('osmograph.vial.detection.praisejamesx.fermentation') || 'null'); } catch { return null; }
+    });
+    break;
+  }
+  console.log('programmable vial:', JSON.stringify(watchArmed));
+  if (!watchArmed || !watchArmed.enabled || !Object.keys(watchArmed.perChannelLimits || {}).length) {
+    errors.push('programmable vial: watch was not armed on the host');
+  }
+  await shot('03c2-home-watch');
+
   // Drive the sandboxed Vial's own button and verify the host acts on it.
   let bridgeWorkspace = null;
   for (const f of page.frames()) {

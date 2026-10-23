@@ -257,8 +257,8 @@ export function parseVialActionEnvelope(value: unknown): VialActionEnvelope | nu
     if (Array.isArray(raw.fields)) {
       for (const item of raw.fields) {
         if (typeof item !== 'string') continue;
-        if (!safeActionKey(item)) continue;
-        fields.push(item.slice(0, 40));
+        if (!/^[a-z0-9_.-]{1,40}$/i.test(item) || item.includes('..')) continue;
+        fields.push(item);
         if (fields.length >= 8) break;
       }
     }
