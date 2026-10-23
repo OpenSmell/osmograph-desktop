@@ -7887,6 +7887,15 @@ const COMMANDS: CommandAction[] = [
   { id: 'guide-authoring', group: 'Guide', title: 'Field guide: Authoring a domain Vial', hint: 'schema + gate', run: () => openGuide('authoring') },
   { id: 'guide-data', group: 'Guide', title: 'Field guide: Data provenance', hint: 'licences', run: () => openGuide('data') },
   { id: 'guide-limits', group: 'Guide', title: 'Field guide: Known limits', hint: 'refusals', run: () => openGuide('limits') },
+  // Do: real verbs, not navigation. Each respects the same guards the clicked
+  // button has (streaming checks, selections) — the palette must not become a
+  // shortcut around the refusals.
+  { id: 'do-connect', group: 'Do', title: 'Connect / disconnect the rig', hint: 'uses the selected port + baud', run: () => { activateTab('dashboard'); void toggleConnection(); } },
+  { id: 'do-record', group: 'Do', title: 'Record an exposure', hint: 'baseline → exposure → recovery', run: () => { activateTab('dashboard'); openRecordModal(); } },
+  { id: 'do-stop-record', group: 'Do', title: 'Stop & save the recording', hint: 'finishes early, still saves', run: () => { if (recPhaseActive) void stopPhaseRecordingFromUI(); else showToast('No recording in progress.'); } },
+  { id: 'do-check', group: 'Do', title: 'Run a separability check', hint: 'reference vs sample, same array', run: () => { activateSmellsView('check'); void runCheck(); } },
+  { id: 'do-clear', group: 'Do', title: 'Clear the live view', hint: 'empty the buffers', run: () => { activateTab('dashboard'); clearLiveView(); } },
+  { id: 'do-burnin', group: 'Do', title: 'Start a burn-in check', hint: 'long-run rig health', run: () => { activateSmellsView('fleet'); void invoke('burnin_start', { hours: null }).then((s) => { const st = s as { running?: boolean; total_hours?: number }; showToast(st.running ? `Burn-in running — target ${st.total_hours || 0} h. Fleet tab shows the countdown.` : 'Burn-in is already complete.'); }).catch((e) => showToast(String(e).replace(/Error invoking remote method '.*': /, ''))); } },
 ];
 
 let commandActive = 0;
