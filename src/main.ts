@@ -11232,38 +11232,21 @@ function saveDetectionToRust() {
   invoke('detection_set_config', { config: detectionConfig }).catch(e => console.error('detection_set_config failed:', e));
 }
 function captureDetectionFromDom() {
-  detectionConfig.smoothing_alpha = Number((document.getElementById('detSmoothing') as HTMLInputElement).value) || 0.6;
-  detectionConfig.drift_alpha = Number((document.getElementById('detDrift') as HTMLInputElement).value) || 0.002;
   detectionConfig.sensitivity = Number((document.getElementById('detSensitivity') as HTMLInputElement).value) || 1.0;
   saveDetectionToRust();
 }
 function applyDetectionToDom() {
-  const set = (id: string, v: string) => {
-    const el = document.getElementById(id) as HTMLInputElement | null;
-    if (el) el.value = v;
-  };
-  set('detSmoothing', String(detectionConfig.smoothing_alpha));
-  set('detDrift', String(detectionConfig.drift_alpha));
-  set('detSensitivity', String(detectionConfig.sensitivity));
+  const el = document.getElementById('detSensitivity') as HTMLInputElement | null;
+  if (el) el.value = String(detectionConfig.sensitivity);
   const sv = document.getElementById('detSensitivityVal');
   if (sv) sv.textContent = `${detectionConfig.sensitivity.toFixed(1)}×`;
-  const sm = document.getElementById('detSmoothingVal');
-  if (sm) sm.textContent = detectionConfig.smoothing_alpha.toFixed(2);
-  const dr = document.getElementById('detDriftVal');
-  if (dr) dr.textContent = detectionConfig.drift_alpha.toFixed(3);
 }
 
-['detSmoothing', 'detDrift', 'detSensitivity'].forEach(id => {
-  document.getElementById(id)!.addEventListener('change', () => { captureDetectionFromDom(); });
-});
+// The dual-Kalman engine ignores the legacy smoothing/drift fields, so the UI
+// exposes only the control that actually reaches it.
+document.getElementById('detSensitivity')!.addEventListener('change', () => { captureDetectionFromDom(); });
 document.getElementById('detSensitivity')!.addEventListener('input', (e) => {
   document.getElementById('detSensitivityVal')!.textContent = `${(e.target as HTMLInputElement).value}×`;
-});
-document.getElementById('detSmoothing')!.addEventListener('input', (e) => {
-  document.getElementById('detSmoothingVal')!.textContent = Number((e.target as HTMLInputElement).value).toFixed(2);
-});
-document.getElementById('detDrift')!.addEventListener('input', (e) => {
-  document.getElementById('detDriftVal')!.textContent = Number((e.target as HTMLInputElement).value).toFixed(3);
 });
 
 // Load once at startup: prefer Rust-side defaults (fresh), fall back to saved local.

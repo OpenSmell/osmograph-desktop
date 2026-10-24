@@ -2953,6 +2953,30 @@
       overflow-wrap: anywhere;
     }
 
+    /* Detection evidence: the measured operating points, not prose. */
+    .det-evidence {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid var(--border);
+      font-size: 10px;
+      line-height: 1.5;
+      color: var(--text-2);
+    }
+    .det-evidence-row { display: flex; gap: 8px; align-items: baseline; }
+    .det-evidence-row + .det-evidence-row { margin-top: 4px; }
+    .det-evidence-k {
+      flex: none;
+      min-width: 34px;
+      font-family: var(--font-mono);
+      color: var(--text-0);
+    }
+    .det-evidence-note {
+      margin: 8px 0 0;
+      color: var(--text-3);
+      font-size: 10px;
+      line-height: 1.45;
+    }
+
     .card {
       background: var(--bg-2);
       border: 1px solid var(--border);
@@ -4802,20 +4826,14 @@ Confidence: 97.3%</div>
                 <input type="range" id="detSensitivity" min="0.2" max="5" step="0.1" value="1" style="flex:1;max-width:200px" />
                 <span id="detSensitivityVal">1.0×</span>
               </div>
-              <div class="form-row">
-                <label>Smoothing (EWMA weight per sample)</label>
-                <input type="range" id="detSmoothing" min="0.1" max="1" step="0.05" value="0.6" style="flex:1;max-width:200px" />
-                <span id="detSmoothingVal">0.60</span>
-              </div>
-              <div class="form-row">
-                <label>Drift forgiveness (baseline chase rate)</label>
-                <input type="range" id="detDrift" min="0" max="0.05" step="0.001" value="0.002" style="flex:1;max-width:200px" />
-                <span id="detDriftVal">0.002</span>
-              </div>
               <div id="detStatus" class="hint" style="margin-top:6px">
-                Sensitivity &gt; 1 flags smaller deviations; &lt; 1 requires a bigger
-                difference. Smoothing dampens single-sample spikes; drift forgives
-                slow environmental change without masking real steps. Applied live.
+                &gt; 1 flags smaller deviations, &lt; 1 needs a bigger one. Applied live.
+              </div>
+              <div class="det-evidence">
+                <div class="det-evidence-row"><span class="det-evidence-k">1.0×</span><span>conservative — near-zero false alarms on a settled rig</span></div>
+                <div class="det-evidence-row"><span class="det-evidence-k">3.0×</span><span>89/89 CO and 95/98 methane square-waves, 0.09–0.16% clean FPR (UCI dynamic mixtures)</span></div>
+                <div class="det-evidence-row"><span class="det-evidence-k">3.0×</span><span>6/68 home-activity events — slow, weak changes stay invisible</span></div>
+                <p class="det-evidence-note">Measured on a controlled 8-channel array. This flags a change against your own baseline; it does not identify a gas and is not a safety alarm.</p>
               </div>
             </div>
           </div>
