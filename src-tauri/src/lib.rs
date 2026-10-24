@@ -2311,22 +2311,33 @@ fn get_session_index(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
 #[tauri::command]
 fn install_playground_sample(state: State<AppState>) -> Result<SessionRecord, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    std::fs::create_dir_all(&dir)
+    let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    install_playground_into(&dir, &mut cache, &mut index)
+}
+
+/// The filesystem half of `install_playground_sample`, with explicit locks so a
+/// test can prove the bundled recording is written, parsed and indexed — the
+/// path the mock harness cannot exercise.
+fn install_playground_into(
+    dir: &std::path::Path,
+    cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+    index: &mut SessionIndex,
+) -> Result<SessionRecord, String> {
+    std::fs::create_dir_all(dir)
         .map_err(|e| format!("cannot create the recordings folder: {e}"))?;
     let path = dir.join(PLAYGROUND_SAMPLE_FILE);
     if !path.exists() {
         std::fs::write(&path, PLAYGROUND_SAMPLE_CSV)
             .map_err(|e| format!("cannot write the playground recording: {e}"))?;
     }
-    let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
-    let file = recording_from_path(&path, &mut cache)
+    let file = recording_from_path(&path, cache)
         .ok_or_else(|| "the bundled playground recording could not be read".to_string())?;
-    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
     let mut record = build_record_from_file(&file);
     record.label = "SmellNet apple · playground".to_string();
     record.notes = "Bundled SmellNet recording (MIT). Replay only — not a live rig.".to_string();
     index.upsert(record.clone());
-    let _ = index.save(&dir);
+    let _ = index.save(dir);
     Ok(record)
 }
 
@@ -4033,6 +4044,37 @@ mod tests {
         assert_eq!(avr_pins_for(3), vec!["A0", "A1", "A2"]);
         assert_eq!(avr_pins_for(6), vec!["A0", "A1", "A2", "A3", "A4", "A5"]);
         assert_eq!(avr_pins_for(8), vec!["A0", "A1", "A2", "A3", "A4", "A5"]);
+    }
+
+    #[test]
+    fn playground_installs_once_and_indexes_the_real_recording() {
+        let dir = std::env::temp_dir()
+            .join(format!("osmograph-playground-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut cache = std::collections::HashMap::new();
+        let mut index = SessionIndex::default();
+
+        let first = super::install_playground_into(&dir, &mut cache, &mut index).expect("installs");
+        // The bundled bytes are copied verbatim: attribution travels with them.
+        let on_disk = std::fs::read_to_string(dir.join(super::PLAYGROUND_SAMPLE_FILE)).unwrap();
+        assert_eq!(on_disk, super::PLAYGROUND_SAMPLE_CSV);
+        assert_eq!(first.sensor_count, 6, "SmellNet apple_6 carries six channels");
+        assert!(first.duration_sec > 0.0, "a real recording has a duration");
+        assert_eq!(first.label, "SmellNet apple · playground");
+        assert!(first.notes.contains("Replay only"));
+        assert_eq!(index.records.len(), 1);
+
+        // Calling it again is idempotent: one record, not a duplicate per click.
+        let second = super::install_playground_into(&dir, &mut cache, &mut index).expect("reinstalls");
+        assert_eq!(second.file_id, first.file_id);
+        assert_eq!(index.records.len(), 1);
+
+        // The index on disk can be read back by the normal load path.
+        let reloaded = SessionIndex::load(&dir);
+        assert_eq!(reloaded.records.len(), 1);
+        assert_eq!(reloaded.records[0].sensor_count, 6);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
