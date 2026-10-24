@@ -46,7 +46,14 @@ const SEED = `try {
 const errors = [];
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+page.on('console', m => {
+  if (m.type() !== 'error') return;
+  // The dev-only tap mirrors readings to a local listener on :5501; with no
+  // listener attached the browser logs one connection error per frame. Dev
+  // plumbing, never a product error (it cannot ship: DEV-only).
+  if (/127\.0\.0\.1:5501/.test(m.location()?.url || '')) return;
+  errors.push('console: ' + m.text());
+});
 page.on('pageerror', e => errors.push('pageerror: ' + (e.stack || e.message)));
 
 await page.addInitScript({ content: MOCK });

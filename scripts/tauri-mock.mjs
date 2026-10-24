@@ -76,7 +76,6 @@ export const MOCK = String.raw`
       case 'plugin:os|platform': return ok('linux');
       case 'get_data_dir': return ok('/tmp/opencode/ui/data');
       case 'get_recordings_dir': return ok('/tmp/opencode/ui/data/recordings');
-      case 'get_plugins_dir': return ok('/tmp/opencode/ui/data/plugins');
       case 'dataset_dir': return ok('/tmp/opencode/ui/data/datasets');
       case 'get_session_index': return ok(self.playgroundInstalled ? [...sessions, playground] : sessions);
       case 'install_playground_sample': self.playgroundInstalled = true; return ok(playground);
@@ -89,6 +88,7 @@ export const MOCK = String.raw`
       case 'assess_recording_health': return ok(health);
       case 'get_sensor_health': return ok(health);
       case 'list_serial_ports': return ok([{ name: '/dev/ttyACM0', description: 'Harness rig (mock)', kind: 'serial', hw_type: 'usb', manufacturer: 'OpenSmell' }]);
+      case 'open_https_url': (window.__MOCK_OPENED = window.__MOCK_OPENED || []).push(a.url); return ok(null);
       case 'connect_serial': return ok(null);
       case 'disconnect_serial': return ok(null);
       case 'get_phase_recorder_state': return ok({ active: false, phase: 'idle', phase_name: '', elapsed_sec: 0, remaining_sec: 0, sample_count: 0, phases: [] });

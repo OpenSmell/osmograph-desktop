@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getVersion } from '@tauri-apps/api/app';
 import { DATASET_CATALOG, REFERENCE_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
 import * as Vial from './vials';
 import * as Domain from './domainPacks';
@@ -6776,11 +6777,11 @@ let vialDeleteArm: { id: string; timer: number; button: HTMLButtonElement } | nu
 
 function vialStatusOf(v: Vial.VialManifest): Vial.VialStatus {
   if (!v.validation) return 'draft';
-  return v.validation.passed ? 'sealed' : 'open';
+  return v.validation.passed ? 'gated' : 'open';
 }
 
 function vialStatusLabel(status: Vial.VialStatus): string {
-  return status === 'sealed' ? 'Gated' : status === 'open' ? 'Ungated' : 'Draft';
+  return status === 'gated' ? 'Gated' : status === 'open' ? 'Ungated' : 'Draft';
 }
 
 function vialCorrect(c: Vial.VialClaim): string {
@@ -7032,7 +7033,7 @@ function saveVialFromModal(publish: boolean): void {
     renderVials();
     openVialDetail(vial.id);
     if (!publish) showToast('Vial draft saved. Validate it before using it for a decision.');
-    else if (vial.status === 'sealed') showToast('Saved. Every critical check passed — the evidence carries this claim. "Sealed" is reserved for published, reviewed, signed Vials.');
+    else if (vial.status === 'gated') showToast('Saved as Gated. Every critical check passed on the stored evidence. This is a local status — not external review, and not "Sealed".');
     else showToast('Vial saved as Open. Validation failed — inspect the gate before using it.');
   } catch (err) {
     setVialError(err instanceof Error ? err.message : 'Could not save this Vial.');
@@ -8686,7 +8687,7 @@ document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   if (target.closest('[data-domain-url]')) { showDomainUrlBar(); return; }
   if (target.closest('[data-domain-template]')) { downloadDomainTemplate(); return; }
   if (target.closest('[data-domain-submit]')) {
-    void invoke('open_release_page', { url: 'https://github.com/OpenSmell/opensmell-web/issues/new?template=vial-submission.yml' });
+    void invoke('open_https_url', { url: 'https://github.com/OpenSmell/opensmell-web/issues/new?template=vial-submission.yml' });
     return;
   }
   const del = target.closest<HTMLButtonElement>('[data-domain-delete]');
@@ -8839,11 +8840,11 @@ function renderVials(): void {
   const summary = document.getElementById('vialsSummary');
   if (!list) return;
   const vials = Vial.loadVials();
-  const sealed = vials.filter(v => vialStatusOf(v) === 'sealed').length;
+  const gated = vials.filter(v => vialStatusOf(v) === 'gated').length;
   const uses = vials.reduce((n, v) => n + (v.usage?.uses || 0), 0);
   const allDomain = Domain.allDomainPacks();
   const domainCount = Domain.loadInstalledIds().filter(id => allDomain.some(p => p.id === id)).length;
-  if (summary) summary.textContent = `${domainCount} domain · ${vials.length} decision${vials.length === 1 ? '' : 's'} · ${sealed} gated · ${uses} use${uses === 1 ? '' : 's'}`;
+  if (summary) summary.textContent = `${domainCount} domain · ${vials.length} decision${vials.length === 1 ? '' : 's'} · ${gated} gated · ${uses} use${uses === 1 ? '' : 's'}`;
   const workspaces = document.getElementById('vialsWorkspacesCount');
   const decisions = document.getElementById('vialsDecisionsCount');
   const aromatory = document.getElementById('vialsAromatoryCount');
@@ -8922,7 +8923,7 @@ function validateStoredVial(id: string): void {
   Vial.upsertVial(next);
   renderVials();
   openVialDetail(id);
-  showToast(next.status === 'sealed'
+  showToast(next.status === 'gated'
     ? 'Gated. Every critical check passes on the stored evidence (local status — no external review).'
     : 'Ungated. The stored evidence does not support this decision yet.');
 }
@@ -9259,14 +9260,14 @@ function openVialUse(id: string): void {
   const result = document.getElementById('vialUseResult');
   if (!modal || !intro || !select || !result) return;
   vialUseId = id;
-  intro.textContent = `${vial.name} · reference ${vial.claim.reference} · ${vialStatusLabel(vialStatusOf(vial))}${vial.status === 'sealed' ? '' : ' — ungated: exploratory only'}`;
+  intro.textContent = `${vial.name} · reference ${vial.claim.reference} · ${vialStatusLabel(vialStatusOf(vial))}${vial.status === 'gated' ? '' : ' — ungated: exploratory only'}`;
   select.innerHTML = candidates
     .map(c => `<option value="${escapeHtmlText(c.key)}">${escapeHtmlText(titleCase(c.substance))}</option>`)
     .join('');
   const preferred = candidates.find(c => c.key === vial.claim.sampleKey);
   if (preferred) select.value = preferred.key;
-  result.innerHTML = `<div class="vial-validation-summary ${vialStatusOf(vial) === 'sealed' ? 'pass' : 'fail'}">
-    ${vialStatusOf(vial) === 'sealed'
+  result.innerHTML = `<div class="vial-validation-summary ${vialStatusOf(vial) === 'gated' ? 'pass' : 'fail'}">
+    ${vialStatusOf(vial) === 'gated'
       ? 'Gated Vial (local gate passed). The result below is a check on this sample, not a guarantee about a different rig.'
       : 'Ungated Vial. This is an exploratory check; do not treat it as a validated decision.'}
   </div>`;
@@ -9352,7 +9353,7 @@ function importVialFile(file: File): void {
       Vial.upsertVial(checked);
       renderVials();
       openVialDetail(checked.id);
-      showToast(checked.status === 'sealed'
+      showToast(checked.status === 'gated'
         ? 'Vial imported, local gate passed. This is a local status — not external review, and not a "Sealed" signature.'
         : 'Vial imported ungated. Its evidence does not pass the local gate.');
     } catch (err) {
@@ -14937,11 +14938,11 @@ async function runUpdateCheck(force: boolean) {
           const b = document.createElement('button');
           b.id = 'updateOpenBtn';
           b.textContent = 'Open download page';
-          b.addEventListener('click', () => invoke('open_release_page', { url: res.download_url }));
+          b.addEventListener('click', () => invoke('open_https_url', { url: res.download_url }));
           document.getElementById('updateStatus')!.after(b);
           return b;
         })();
-      (openBtn as HTMLButtonElement).onclick = () => invoke('open_release_page', { url: res.download_url });
+      (openBtn as HTMLButtonElement).onclick = () => invoke('open_https_url', { url: res.download_url });
     } else {
       renderUpdateStatus('Up to date', 'update-ok');
       renderUpdateNotes('', '');
@@ -14953,6 +14954,61 @@ async function runUpdateCheck(force: boolean) {
     btn.disabled = false;
   }
 }
+
+// === Feedback: a prefilled issue the user reviews before anything leaves ===
+// Memory only. The last few failures are quoted back to the person reporting
+// them, never uploaded, and never written to disk.
+const recentFailures: string[] = [];
+function noteFailure(message: string): void {
+  const at = new Date().toISOString().slice(11, 19);
+  recentFailures.push(`${at}Z ${message}`.slice(0, 240));
+  if (recentFailures.length > 5) recentFailures.shift();
+}
+window.addEventListener('error', (e) => noteFailure(String(e.message || e.error || 'script error')));
+window.addEventListener('unhandledrejection', (e) => {
+  const reason = e.reason as { message?: string } | string | undefined;
+  noteFailure(String(typeof reason === 'string' ? reason : reason?.message || 'unhandled rejection'));
+});
+
+async function reportIssue(): Promise<void> {
+  const version = await getVersion().catch(() => 'dev');
+  const linkText = document.getElementById('plotLinkState')?.textContent?.trim() || 'unknown';
+  const rig = connected
+    ? `${activeMode || 'serial'} · ${activePort || '—'} @ ${activeBaud || '—'} · ${channelCount || 'auto'} channels · ${liveRateHz.toFixed(1)} Hz`
+    : `not connected · last mode ${activeMode || 'none'}`;
+  const body = [
+    '## What happened',
+    '',
+    '',
+    '## What you expected',
+    '',
+    '',
+    '## Steps to reproduce',
+    '1. ',
+    '',
+    '<details><summary>Diagnostics (no recordings)</summary>',
+    '',
+    '```',
+    `Osmograph ${version}`,
+    `Platform: ${navigator.platform}`,
+    `UA: ${navigator.userAgent}`,
+    `Rig: ${rig}`,
+    `Link: ${linkText} · ${sampleCount} samples this session`,
+    `Vials: ${Vial.loadVials().length} decisions · ${Domain.allDomainPacks().length} domain packs`,
+    recentFailures.length ? `Recent failures:\n${recentFailures.join('\n')}` : 'Recent failures: none captured',
+    '```',
+    '',
+    '</details>',
+  ].join('\n');
+  const url = `https://github.com/OpenSmell/osmograph-desktop/issues/new?${new URLSearchParams({ title: '[Report] ', body })}`;
+  try {
+    await invoke('open_https_url', { url });
+    showToast('Opened a prefilled issue in your browser. Edit it there, then Submit.');
+  } catch (e) {
+    showToast(`Could not open the browser: ${e}`);
+  }
+}
+document.getElementById('reportIssueBtn')?.addEventListener('click', () => { void reportIssue(); });
 
 // Restore persisted policy onto the radios.
 (function initUpdatePolicy() {

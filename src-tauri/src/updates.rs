@@ -8,11 +8,10 @@
 //! so the ETag plus the 24h gate keeps us far below that.
 //!
 //! This never downloads an installer. `download_url` is only opened in the
-//! user's browser by `open_release_page` when they explicitly ask for it.
+//! user's browser when they explicitly ask for it.
 
 use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -287,40 +286,6 @@ pub fn check_for_updates(policy: String, force: bool) -> Result<UpdateCheck, Str
     let policy = UpdatePolicy::parse(&policy);
     let now = chrono::Utc::now().timestamp();
     check(env!("CARGO_PKG_VERSION"), policy, force, now)
-}
-
-/// Open the release/installer URL in the user's default browser. Only HTTPS is
-/// accepted so a malformed payload can never hand the OS a hostile scheme.
-#[tauri::command]
-pub fn open_release_page(url: String) -> Result<(), String> {
-    if !url.starts_with("https://") {
-        return Err("Refusing to open a non-HTTPS URL.".to_string());
-    }
-    open_in_browser(&url)
-}
-
-fn open_in_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args(["/C", "start", "", url]);
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = Command::new("open");
-        c.arg(url);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = Command::new("xdg-open");
-        c.arg(url);
-        c
-    };
-    cmd.spawn()
-        .map(|_| ())
-        .map_err(|e| format!("Could not open your browser: {}", e))
 }
 
 #[cfg(test)]

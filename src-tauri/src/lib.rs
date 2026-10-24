@@ -2,7 +2,6 @@ mod data;
 mod classifier;
 mod live;
 mod burnin;
-mod plugins;
 mod phenotype;
 mod recipe;
 mod updates;
@@ -3640,21 +3639,38 @@ fn burnin_reset(state: State<'_, AppState>, hours: Option<f64>) -> Result<burnin
     burnin::reset(&burnin_dir(&state), hours)
 }
 
-// === Plugins ===
-
-#[tauri::command]
-fn discover_plugins() -> Result<Vec<plugins::PluginInfo>, String> {
-    plugins::discover(&plugins::default_plugin_dir())
-}
-
-#[tauri::command]
-fn get_plugins_dir() -> Result<String, String> {
-    let dir = plugins::default_plugin_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    Ok(dir.to_string_lossy().to_string())
-}
-
 // === Tauri Entry ===
+
+/// Open an HTTPS URL in the user's default browser. There is exactly one
+/// opener in the app (release pages, Vial submission, issue reports); it
+/// refuses every other scheme so a payload can never hand the OS a hostile URL.
+#[tauri::command]
+fn open_https_url(url: String) -> Result<(), String> {
+    if !url.starts_with("https://") {
+        return Err("Refusing to open a non-HTTPS URL.".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", "", &url]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("open");
+        c.arg(&url);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut cmd = {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(&url);
+        c
+    };
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|e| format!("Could not open your browser: {e}"))
+}
 
 #[tauri::command]
 fn get_data_dir() -> Result<String, String> {
@@ -3792,8 +3808,6 @@ pub fn run() {    env_logger::init();
             burnin_reset,
             recover_phase_sessions,
             recover_phase_session,
-            discover_plugins,
-            get_plugins_dir,
             recipe::recipe_list,
             recipe::recipe_save,
             recipe::recipe_load,
@@ -3811,7 +3825,7 @@ pub fn run() {    env_logger::init();
             live::get_live_classification,
             phenotype::compute_phenotype,
             updates::check_for_updates,
-            updates::open_release_page,
+            open_https_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -1701,7 +1701,7 @@
       transition: border-color .12s ease, box-shadow .12s ease;
     }
     .vial-card:hover { border-color: var(--border-strong); box-shadow: 0 4px 18px rgba(29,26,22,0.05); }
-    .vial-card.sealed { border-left: 3px solid var(--green); }
+    .vial-card.gated { border-left: 3px solid var(--green); }
     .vial-card.open { border-left: 3px solid #c98a15; }
     .vial-card.draft { border-left: 3px solid var(--text-3); }
     .vial-card-head { display: flex; align-items: flex-start; gap: 8px; }
@@ -1711,7 +1711,7 @@
       margin-left: auto; flex-shrink: 0; font-family: var(--font-mono); font-size: 8px;
       text-transform: uppercase; letter-spacing: 0.12em; padding: 2px 6px; border: 1px solid currentColor;
     }
-    .vial-status.sealed { color: var(--green); background: var(--green-dim); }
+    .vial-status.gated { color: var(--green); background: var(--green-dim); }
     .vial-status.open { color: #a56a0a; background: var(--yellow-dim); }
     .vial-status.draft { color: var(--text-3); background: var(--bg-2); }
     .vial-question { font-size: 12px; color: var(--text-1); line-height: 1.4; }
@@ -5004,6 +5004,13 @@ Confidence: 97.3%</div>
             <h2>About Osmograph</h2>
             <div class="card">
               <p class="hint">Osmograph is the software for smell. Connect your gas-sensor rig — or open a recording — and monitor, record and study what it senses. Everything stays on your device.</p>
+            </div>
+            <div class="card">
+              <h3>Report a problem</h3>
+              <p class="hint">Opens a prefilled issue on GitHub with the app version, platform, and rig state. Nothing is sent until you press Submit there; your recordings are never included.</p>
+              <div class="form-row">
+                <button id="reportIssueBtn">Report a problem</button>
+              </div>
             </div>
             <div class="card">
               <h3>Links</h3>

@@ -328,6 +328,26 @@ for (const sys of sysNavs) {
 }
 console.log('settings panels:', sysNavs.join(', '));
 
+// Feedback: the About panel composes a prefilled GitHub issue locally. Nothing
+// leaves the app; the shell only opens the browser at an HTTPS issue URL.
+await page.click('.sys-nav-item[data-sys="about"]').catch(() => {});
+await page.waitForTimeout(250);
+const reportBtn = page.locator('#reportIssueBtn');
+if (await reportBtn.isVisible().catch(() => false)) {
+  await reportBtn.click();
+  await page.waitForTimeout(900);
+  const opened = await page.evaluate(() => (window.__MOCK_OPENED || []).slice(-1)[0] || '');
+  console.log('report issue url:', opened.slice(0, 96));
+  if (!/^https:\/\/github\.com\/OpenSmell\/osmograph-desktop\/issues\/new\?/.test(opened)) {
+    errors.push('report button did not open a prefilled GitHub issue');
+  }
+  if (!/Diagnostics/.test(decodeURIComponent(opened))) {
+    errors.push('report issue body has no diagnostics');
+  }
+} else {
+  errors.push('About panel has no report button');
+}
+
 // Open the installed Fermentation Lab workspace (real sandboxed UI, real host
 // bridge) and capture both the host chrome and the iframe surface.
 // The Home bridge test above leaves a Vial workspace open; close it so the

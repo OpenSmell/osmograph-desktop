@@ -7,7 +7,10 @@
 // inspect, or submit to a registry later.
 
 export type SeparationVerdict = 'separable' | 'fragile' | 'confusable' | 'insufficient';
-export type VialStatus = 'draft' | 'open' | 'sealed';
+// There is deliberately no 'sealed' status here. Sealed means external review
+// plus a verified signature, and this client verifies neither; it must never be
+// minted locally. 'gated' is the strongest thing a local gate can say.
+export type VialStatus = 'draft' | 'open' | 'gated';
 
 export interface VialEvidence {
   checkId?: string;
@@ -241,7 +244,7 @@ export function validateVial(vial: VialManifest): VialValidation {
 
 export function applyValidation(vial: VialManifest): VialManifest {
   const validation = validateVial(vial);
-  return { ...vial, validation, status: validation.passed ? 'sealed' : 'open' };
+  return { ...vial, validation, status: validation.passed ? 'gated' : 'open' };
 }
 
 export function loadVials(): VialManifest[] {
@@ -257,10 +260,18 @@ export function loadVials(): VialManifest[] {
         && typeof o.id === 'string'
         && typeof o.name === 'string'
         && !!o.claim && typeof o.claim === 'object';
-    }).slice(0, MAX_VIALS);
+    }).map(migrateVialStatus).slice(0, MAX_VIALS);
   } catch {
     return [];
   }
+}
+
+// Older builds wrote `status: 'sealed'` when the local gate passed. That is not
+// what sealed means, so a stored manifest is read as Gated and can never carry
+// the stronger word forward.
+function migrateVialStatus(vial: VialManifest): VialManifest {
+  if ((vial.status as string) !== 'sealed') return vial;
+  return { ...vial, status: vial.validation?.passed ? 'gated' : 'open' };
 }
 
 export function persistVials(vials: VialManifest[]): void {
