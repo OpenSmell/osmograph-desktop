@@ -62,7 +62,11 @@ pub fn read_osmell(path: &Path) -> Result<OsmellBundle, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
-    let names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+    let names: Vec<String> = archive
+        .file_names()
+        .map(|name| name.map(|name| name.into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Invalid zip entry name: {e}"))?;
     if !names.iter().any(|n| n == "manifest.json") || !names.iter().any(|n| n == "data.csv") {
         return Err("Not a valid .osmell file: missing manifest.json or data.csv.".to_string());
     }

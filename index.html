@@ -173,8 +173,8 @@
 
     /* === Title Bar — solid ink band (paper & ink brand) === */
     .titlebar {
-      background: #1a1a17;
-      border-bottom: none;
+      background: #fbf8f2;
+      border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
       padding: 0 14px;
@@ -185,7 +185,7 @@
     .titlebar .logo {
       font-size: 13px;
       font-weight: 800;
-      color: #fbf8f2;
+      color: #1a1a17;
       letter-spacing: 3px;
       -webkit-app-region: no-drag;
     }
@@ -406,18 +406,17 @@
     }
     .icon-btn:hover { color: var(--text-0); background: var(--bg-4); }
 
-    /* Controls that live on the dark titlebar — light text so nothing reads
-       dark-on-dark, with a light hairline border against the #1a1a17 ink bar. */
+    /* Titlebar controls on warm paper — ink text, hairline borders. */
     .titlebar button,
     .titlebar .icon-btn {
-      color: #fbf8f2;
-      border-color: rgba(251, 248, 242, 0.35);
+      color: #1a1a17;
+      border-color: var(--border);
       background: transparent;
     }
     .titlebar button:hover,
-    .titlebar .icon-btn:hover { background: #2a2a2a; color: #fbf8f2; }
-    .titlebar button.green { background: #fbf8f2; color: #1a1a17; border-color: #fbf8f2; }
-    .titlebar button.green:hover { background: #d9d2c2; border-color: #d9d2c2; color: #1a1a17; }
+    .titlebar .icon-btn:hover { background: var(--bg-3); color: #1a1a17; }
+    .titlebar button.green { background: #fbf8f2; color: #1a1a17; border-color: var(--border); }
+    .titlebar button.green:hover { background: #d9d2c2; border-color: var(--border); color: #1a1a17; }
 
     button.mini {
       padding: 1px 7px;
@@ -1189,6 +1188,17 @@
       padding: 3px 9px; border-bottom: var(--hairline) solid var(--border); background: var(--bg-2);
     }
     .vial-takeover-fill { flex: 1; }
+    .vial-host-truth {
+      display: flex; align-items: center; gap: 16px; flex: none; min-height: 30px;
+      padding: 4px 10px; overflow-x: auto; border-bottom: var(--hairline) solid var(--border);
+      background: var(--bg-0); font-family: var(--font-mono); font-size: 9px; white-space: nowrap;
+    }
+    .vial-host-fact { display: inline-flex; align-items: baseline; gap: 6px; }
+    .vial-host-fact b { color: var(--text-3); font-size: 8px; font-weight: 500; letter-spacing: .06em; text-transform: uppercase; }
+    .vial-host-value { color: var(--text-1); }
+    .vial-host-value.live { color: var(--cyan); }
+    .vial-host-value.warning { color: var(--yellow); }
+    .vial-host-value.critical { color: var(--red); font-weight: 700; }
     .vial-takeover-frame { flex: 1; width: 100%; min-height: 0; border: 0; display: block; }
     .vial-home-stage-bar {
       display: flex; align-items: center; gap: 9px; min-height: 26px; padding: 3px 9px;
@@ -3064,7 +3074,7 @@
 .periph-body { transition: opacity .2s ease; }
 .periph-body.off { opacity: .45; pointer-events: none; }
 .oled-preview {
-    background: #000;
+    background: #141412;
     border: 1px solid var(--border);
     border-radius: var(--radius);
     padding: 12px;
@@ -3698,6 +3708,12 @@
             <button class="mini-btn" type="button" id="vialTakeoverWorkspace">Workspace</button>
             <button class="mini-btn primary" type="button" id="vialTakeoverExit" title="Return Home to the live instrument (Esc)">Exit vial view</button>
           </div>
+          <div class="vial-host-truth" aria-label="Instrument-owned status">
+            <span class="vial-host-fact"><b>Vial input</b><span class="vial-host-value" id="vialHostInput">—</span></span>
+            <span class="vial-host-fact"><b>Rig</b><span class="vial-host-value" id="vialHostRig">—</span></span>
+            <span class="vial-host-fact"><b>Baseline</b><span class="vial-host-value" id="vialHostBaseline">—</span></span>
+            <span class="vial-host-fact"><b>Change</b><span class="vial-host-value" id="vialHostChange">—</span></span>
+          </div>
           <iframe id="vialTakeoverFrame" class="vial-takeover-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="Sandboxed Vial Home view"></iframe>
         </div>
         <div class="dashboard">
@@ -3748,11 +3764,11 @@
               <div class="canvas-empty" id="dashboardEmpty">
                 <div class="canvas-empty-card">
                   <b>No rig connected.</b>
-                  <p>Connect an e-nose, replay a real recording in the Playground, or open a corpus from Explore → Datasets.</p>
+                  <p>Replay a real SmellNet recording, browse the smell library, or connect a rig for live readings.</p>
                   <div class="canvas-empty-actions">
-                    <button class="mini-btn primary" id="dashExplore" type="button">Open Gallery →</button>
-                    <button class="mini-btn" id="dashPlayground" type="button">Playground</button>
-                    <button class="mini-btn" id="dashConnect" type="button">Connect a rig</button>
+                    <button class="mini-btn primary" id="dashPlayground" type="button">Replay sample</button>
+                    <button class="mini-btn" id="dashExplore" type="button">Browse Gallery</button>
+                    <button class="mini-btn" id="dashConnect" type="button">Connect rig</button>
                   </div>
                 </div>
               </div>
@@ -3905,7 +3921,7 @@
                   <div class="check-head">
                     <div>
                       <h2>Separability</h2>
-                      <p class="hint">Which smells can this array tell apart? Read the class matrix first, then open any pair for the leave-one-recording-out evidence. This is the gate before Train — it uses saved replicates, not a trained model.</p>
+                      <p class="hint">Which smells can this array tell apart? Read the class matrix first, then open any pair for the leave-one-recording-out evidence. This is the gate before Train — it uses saved replicates.</p>
                     </div>
                     <div class="check-head-actions">
                       <span class="coord-tag" id="checkStamp">not run</span>
@@ -4224,7 +4240,7 @@
                 <span style="flex:1"></span>
                 <button id="eventsBack" class="mini-btn" type="button">← Home</button>
               </div>
-              <p class="hint" style="margin-bottom:8px">Anomaly events from this device — what changed, when, and for how long. This is the always-on host layer, not a Vial. No labels are needed.</p>
+              <p class="hint" style="margin-bottom:8px">Anomaly events from this device — what changed, when, and for how long. Host layer. No labels are needed.</p>
               <div id="changeLog" class="change-log"><div class="cl-empty">No events recorded yet.</div></div>
             </div>
           </div><!-- /src-changelog -->
@@ -4448,7 +4464,7 @@
             <input id="fleetRemoteAddr" type="text" placeholder="host:port · e.g. 192.168.1.42:8080" autocomplete="off" />
             <button id="fleetRemoteConnect" class="green" type="button">Connect</button>
             <button id="fleetRemoteCancel" type="button">Cancel</button>
-            <span id="fleetRemoteMsg">HTTPS is not used here — this is the device stream endpoint, not a manifest.</span>
+            <span id="fleetRemoteMsg">HTTPS is not used here — this is the device stream endpoint.</span>
           </div>
           <div class="fleet-grid hud-panel" id="fleetGrid"></div>
           <div class="fleet-health hud-panel">
@@ -5248,14 +5264,14 @@ Confidence: 97.3%</div>
       <div class="sd-read-key">
         One panel per channel. Thin lines are individual recordings; the bold line is
         their mean. The shape shows <b>how the response changes over time</b>; the signed
-        bars below show <b>where it settles</b>. Both describe this array, not a chemical.
+        bars below show <b>where it settles</b>. Both describe this array.
       </div>
       <div class="smell-detail-body">
         <div>
           <div class="sd-section-title">What the array sees</div>
           <div id="sdBars" class="sd-bars"></div>
           <div class="sd-caption">Settled response, baseline-relative. Teal = reducing,
-            amber = oxidising. <b>n/a</b> means the channel did not move — not a zero.</div>
+            amber = oxidising. <b>n/a</b> means the channel did not move.</div>
         </div>
         <div>
           <div class="sd-section-title">Closest confusable</div>

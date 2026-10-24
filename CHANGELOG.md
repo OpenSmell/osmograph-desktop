@@ -1,5 +1,10 @@
 # Osmograph Changelog
 
+## v0.1.2-beta.1 — public beta
+- First public beta for hands-on feedback; this is a pre-release, not the stable channel.
+- Selecting a Vial in Fleet now opens its full Home workspace, with host-owned rig and data status.
+- Fixes release builds failing to resolve the yanked `zip` 2.x dependency.
+
 ## v0.1.1
 - Auto-update checker with configurable policy (stable channel default; opt-in prerelease)
 - Release assets: stable versionless filenames (`Osmograph-setup.exe`, `Osmograph.msi`,

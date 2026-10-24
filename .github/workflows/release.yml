@@ -1,8 +1,10 @@
 name: Build & Release
 
-# Manual only — we build a release when we decide to, never on every push.
-# Run it from the Actions tab (workflow_dispatch) or `gh workflow run release.yml`.
+# Tag pushes build and publish releases; workflow_dispatch supports manual rebuilds.
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
@@ -168,5 +170,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ !contains(github.ref_name, '-') }}
           generate_release_notes: true
           files: release-assets/**

@@ -214,6 +214,25 @@ if (takeoverBtn) {
   console.log('takeover state:', JSON.stringify(take));
   if (!take.active || take.dashboard !== 'none') errors.push('takeover did not replace the instrument');
   if (take.frame[1] < 320) errors.push(`takeover frame too small: ${take.frame[1]}px`);
+  await page.evaluate(() => {
+    window.__MOCK_EMIT('serial-data', {
+      channels: [1710, 205, 0, 0, 0, 0],
+      timestamp: Date.now(),
+      raw_line: 'RIG,1710,205,0,0,0,0',
+    });
+  });
+  await page.waitForTimeout(1300);
+  const hostTruth = await page.evaluate(() => ({
+    input: document.getElementById('vialHostInput')?.textContent || '',
+    rig: document.getElementById('vialHostRig')?.textContent || '',
+    baseline: document.getElementById('vialHostBaseline')?.textContent || '',
+    change: document.getElementById('vialHostChange')?.textContent || '',
+  }));
+  console.log('host-owned Home status:', JSON.stringify(hostTruth));
+  if (hostTruth.input !== 'Live array' || hostTruth.rig !== 'Live data') {
+    errors.push('Vial Home did not show the live source and instrument state');
+  }
+  if (!hostTruth.baseline || !hostTruth.change) errors.push('Vial Home host status is incomplete');
 
   // Programmable Vial: the domain module declares host transforms and a
   // trajectory, then arms a single-unit watch through the host gate. The host
@@ -277,6 +296,50 @@ if (takeoverBtn) {
   console.log('after exit:', JSON.stringify(back));
   if (back.active || back.dashboard === 'none' || !back.bar) errors.push('takeover exit did not restore Home');
   await shot('03e-home-exit');
+
+  const fleetSelect = await page.evaluate((vialId) => {
+    const grid = document.getElementById('fleetGrid');
+    if (!grid) return false;
+    const select = document.createElement('select');
+    select.className = 'fleet-vial-select';
+    select.innerHTML = `<option value="">None</option><option value="${vialId}">Fermentation Lab</option>`;
+    grid.appendChild(select);
+    select.value = vialId;
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }, 'praisejamesx.fermentation');
+  if (!fleetSelect) {
+    errors.push('Fleet Vial selection test could not mount its control');
+  } else {
+    await page.waitForTimeout(700);
+    const applied = await page.evaluate(() => ({
+      active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      selected: localStorage.getItem('osmograph.homeVial.v1') || '',
+    }));
+    if (!applied.active || applied.selected !== 'praisejamesx.fermentation') {
+      errors.push('Fleet Home Vial selection did not activate and persist the Vial');
+    }
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    await page.waitForFunction(() =>
+      document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      undefined,
+      { timeout: 8000 },
+    ).catch(() => errors.push('selected Home Vial was not restored after reload'));
+    const restored = await page.evaluate(() => ({
+      active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      selected: localStorage.getItem('osmograph.homeVial.v1') || '',
+    }));
+    if (!restored.active || restored.selected !== 'praisejamesx.fermentation') {
+      errors.push('selected Home Vial did not survive an app reload');
+    }
+    await page.click('#vialTakeoverExit').catch(() => errors.push('restored Home Vial exit was not clickable'));
+    await page.waitForTimeout(300);
+    const exited = await page.evaluate(() => ({
+      active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      selected: localStorage.getItem('osmograph.homeVial.v1') || '',
+    }));
+    if (exited.active || exited.selected) errors.push('exiting a restored Home Vial did not return to core Home');
+  }
 } else {
   errors.push('no Vial takeover control found on Home');
 }

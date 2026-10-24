@@ -21,10 +21,13 @@ not a universal smell identifier, a concentration meter, or a safety instrument.
 
 ## Features
 
-- **Job-level navigation**: **Home** (live rig), **Explore** (smell library), **Analyse**
+- **Job-level navigation**: **Home** (live rig or selected domain Vial), **Explore** (smell library), **Analyse**
   (Compare, Separability, Train), **Vials**, and **Explore** (gallery, recordings, datasets),
   **Fleet** (devices and remote endpoints), and **Settings** (hardware, calibration, release). Hardware controls stay on
   Home, Fleet, and Settings; content workspaces stay quiet.
+- **Vial Home handoff**: choosing a Home Vial in Fleet opens its sandboxed domain view in place of
+  the core dashboard and restores that choice on launch. Instrument link, baseline, and change state
+  remain host-rendered; Exit returns to the core Home.
 - **No-hardware first run**: Explore ships 22 real, labelled SmellNet smells. Home's
   **Try a comparison** selects the starter pair and opens Analyse → Compare without pretending a
   rig is connected.

@@ -968,7 +968,10 @@ mod tests {
 
         let file = fs::File::open(&path).unwrap();
         let mut archive = zip::ZipArchive::new(file).unwrap();
-        let mut names: Vec<String> = archive.file_names().map(|s| s.to_string()).collect();
+        let mut names: Vec<String> = archive
+            .file_names()
+            .map(|name| name.unwrap().into_owned())
+            .collect();
         names.sort();
         // quality.json ships in every recorder bundle — the scorer runs at save
         // time so the library and the training gate never need a re-analysis.

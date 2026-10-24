@@ -246,7 +246,10 @@ pub fn extract_csvs(zip_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>, St
         if entry.is_dir() {
             continue;
         }
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("Invalid zip entry name: {e}"))?
+            .into_owned();
         if !name.to_ascii_lowercase().ends_with(".csv") {
             continue;
         }

@@ -3423,8 +3423,8 @@ function renderFleet() {
     const badgeHtml = `<span class="fleet-kind ${recognizedTxt ? 'recognized' : 'unknown'}">${recognizedTxt ? '●' : '○'} ${kindLabel}</span>`;
     const vialRow = installedHomeVials.length
       ? `<div class="dev-vial-row">
-          <span class="dev-vial-label">Apply Vial</span>
-          <select class="fleet-vial-select" data-device-id="${esc(d.id)}" title="Choose which installed Vial contributes to the live Home view">
+          <span class="dev-vial-label">Home Vial</span>
+          <select class="fleet-vial-select" data-device-id="${esc(d.id)}" title="Choose the Vial for Home. A Vial with a Home view opens in place of the dashboard.">
             <option value="">None</option>
             ${installedHomeVials.map(p => `<option value="${esc(p.id)}"${p.id === appliedVial ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
           </select>
@@ -7500,9 +7500,16 @@ interface ActiveVialRuntime {
 const VIAL_SOURCE_KEY = 'osmograph.vial.source.';
 let activeVialRuntime: ActiveVialRuntime | null = null;
 let homeVialRuntime: ActiveVialRuntime | null = null;
-/** Which Vial currently owns Home, if any. Deliberately in-memory: a takeover
- *  ends when the app restarts, so Home always comes back as the instrument. */
-let homeTakeoverVialId: string | null = null;
+/** Which Vial currently owns Home, if any. The selected Home Vial is restored
+ *  on launch; exiting its view clears the selection and returns to the instrument. */
+let homeTakeoverVialId: string | null = selectedHomeVialId();
+if (homeTakeoverVialId) {
+  window.setTimeout(() => {
+    if (!homeTakeoverVialId) return;
+    activateWorkspace('dashboard');
+    renderVialHome();
+  }, 0);
+}
 
 function uiCacheKey(id: string, kind: 'workspace' | 'home'): string {
   return kind === 'home' ? `${id}::home` : id;
@@ -7971,7 +7978,7 @@ function vialHomeBarHtml(pack: Domain.DomainPack): string {
     <span class="vial-takeover-fill"></span>
     ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
     <button class="mini-btn" type="button" data-vial-action="open-workspace" data-vial-id="${escapeHtmlText(pack.id)}">Workspace</button>
-    <button class="mini-btn primary" type="button" data-vial-action="takeover" data-vial-id="${escapeHtmlText(pack.id)}" title="Fill Home with this Vial's sandboxed Home view (exit any time)">Take over Home</button>
+    <button class="mini-btn primary" type="button" data-vial-action="takeover" data-vial-id="${escapeHtmlText(pack.id)}" title="Use this Vial as Home; exit any time to return to the instrument">Use as Home</button>
   </div>`;
 }
 
@@ -7999,8 +8006,58 @@ function clearHomeTakeover(): void {
 function exitHomeTakeover(notify = true): void {
   if (!homeTakeoverVialId) return;
   clearHomeTakeover();
-  renderVialHome();
+  setSelectedHomeVialId('');
   if (notify) showToast('Home returned to the instrument.');
+}
+
+function updateVialHostTruth(runtime: ActiveVialRuntime | null): void {
+  const snapshot = currentHostSnapshot(runtime);
+  const fresh = connected && Date.now() - lastDataAt <= 3000;
+  const replay = runtime?.source.startsWith('rec:') || false;
+  const input = document.getElementById('vialHostInput');
+  if (input) {
+    input.textContent = replay ? 'Replay · inspection only'
+      : fresh ? 'Live array'
+      : connected ? 'Captured · link has no data'
+      : historyData.some(channel => channel.length > 0) ? 'Captured buffer · no rig'
+      : 'No input';
+    input.className = `vial-host-value${fresh && !replay ? ' live' : ''}`;
+    input.title = replay
+      ? runtime?.sources.find(source => source.id === runtime.source)?.label || 'Saved recording'
+      : '';
+  }
+
+  const rig = document.getElementById('vialHostRig');
+  if (rig) {
+    rig.textContent = fresh ? 'Live data'
+      : connected ? 'No data'
+      : 'No rig connected';
+    rig.className = `vial-host-value${fresh ? ' live' : connected ? ' warning' : ''}`;
+  }
+
+  const baseline = document.getElementById('vialHostBaseline');
+  if (baseline) {
+    baseline.textContent = snapshot.baseline.state === 'warming'
+      ? `Warming · ${Math.round(snapshot.baseline.progress * 100)}%`
+      : snapshot.baseline.state === 'ready' && snapshot.baseline.ageSec !== null
+        ? `Ready · ${snapshot.baseline.ageSec}s`
+        : snapshot.baseline.state === 'ready'
+          ? 'Ready'
+          : snapshot.baseline.state === 'stale'
+            ? 'Stale'
+            : 'Not ready';
+    baseline.className = `vial-host-value${snapshot.baseline.state === 'warming' || snapshot.baseline.state === 'stale' ? ' warning' : ''}`;
+  }
+
+  const change = document.getElementById('vialHostChange');
+  if (change) {
+    change.textContent = replay ? 'Not evaluated on replay'
+      : !fresh || snapshot.anomaly.state === 'unknown' ? 'Not evaluated'
+      : snapshot.anomaly.state === 'normal' ? 'No change detected'
+      : snapshot.anomaly.state === 'warning' ? `Change warning · ${snapshot.anomaly.triggeredChannels} channels`
+      : `Critical change · ${snapshot.anomaly.triggeredChannels} channels`;
+    change.className = `vial-host-value${!replay && fresh && snapshot.anomaly.state === 'warning' ? ' warning' : ''}${!replay && fresh && snapshot.anomaly.state === 'critical' ? ' critical' : ''}`;
+  }
 }
 
 function renderHomeTakeover(pack: Domain.DomainPack, homeHtml: string): void {
@@ -8009,6 +8066,7 @@ function renderHomeTakeover(pack: Domain.DomainPack, homeHtml: string): void {
   if (!panel || !shell) return;
   panel.classList.add('vial-takeover');
   shell.hidden = false;
+  updateVialHostTruth(homeVialRuntime?.pack.id === pack.id ? homeVialRuntime : null);
 
   const name = document.getElementById('vialTakeoverName');
   if (name) name.textContent = pack.name;
@@ -8080,9 +8138,10 @@ function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: 
     void sendVialData(runtime, true);
   }, { once: true });
   runtime.timer = window.setInterval(() => {
-    if (runtime.destroyed || !runtime.ready || runtime.source !== 'live') return;
+    if (runtime.destroyed || !runtime.ready) return;
     if (iframe.offsetParent === null) return;
-    void sendVialData(runtime);
+    if (runtime.mount === 'home') updateVialHostTruth(runtime);
+    if (runtime.source === 'live') void sendVialData(runtime);
   }, 1200);
 }
 
@@ -8357,6 +8416,10 @@ function armOrRemoveDomainVial(id: string, button: HTMLButtonElement): void {
     window.clearTimeout(domainRemoveArm.timer);
     domainRemoveArm = null;
     Domain.uninstallDomainPack(id);
+    if (selectedHomeVialId() === id) {
+      clearHomeTakeover();
+      setSelectedHomeVialId('');
+    }
     if (activeDomainPackId === id) closeDomainWorkspace();
     else renderVials();
     renderVialHome();
@@ -8386,6 +8449,10 @@ function armOrDeleteDomainPack(id: string, button: HTMLButtonElement): void {
     Domain.deleteDomainState(id);
     Domain.clearDomainUi(id);
     localStorage.removeItem(`osmograph.vial.source.${id}`);
+    if (selectedHomeVialId() === id) {
+      clearHomeTakeover();
+      setSelectedHomeVialId('');
+    }
     if (activeDomainPackId === id) closeDomainWorkspace();
     else renderVials();
     renderVialHome();
@@ -10995,8 +11062,31 @@ document.getElementById('fleetGrid')?.addEventListener('click', (ev) => {
 document.getElementById('fleetGrid')?.addEventListener('change', (ev) => {
   const select = (ev.target as HTMLElement).closest<HTMLSelectElement>('.fleet-vial-select');
   if (!select) return;
-  setSelectedHomeVialId(select.value);
-  showToast(select.value ? 'Vial applied to the live Home view.' : 'Live Home Vial cleared.');
+  if (!select.value) {
+    clearHomeTakeover();
+    setSelectedHomeVialId('');
+    showToast('Core instrument Home restored.');
+    return;
+  }
+  const pack = Domain.domainPackById(select.value);
+  if (!pack?.home) {
+    select.value = selectedHomeVialId() || '';
+    showToast('That Home Vial is no longer installed.');
+    return;
+  }
+  if (pack.homeUi) {
+    if (!resolveDomainUiHtml(pack, 'home')) {
+      select.value = selectedHomeVialId() || '';
+      showToast(`${pack.name} Home view is not cached. Reinstall the Vial to fetch it.`);
+      return;
+    }
+    activateHomeTakeover(pack.id);
+    if (homeTakeoverVialId === pack.id) showToast(`${pack.name} is now Home.`);
+    return;
+  }
+  clearHomeTakeover();
+  setSelectedHomeVialId(pack.id);
+  showToast(`${pack.name} is set as the Home summary.`);
 });
 
 // OLED + Buzzer: conditional (only if the user actually has the peripheral
