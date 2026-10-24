@@ -13,9 +13,11 @@ export const MOCK = String.raw`
   const callbacks = new Map();   // id -> fn
   let nextId = 1;
 
-  const mkSeries = (base, jitter) => {
-    const n = 450, t0 = NOW / 1000 - 60;
-    const time = Array.from({ length: n }, (_, i) => t0 + i * 0.1);
+  const mkSeries = (base, jitter, label = 'coffee') => {
+    // Time is RELATIVE seconds from the start of the recording, matching the
+    // Rust load_session_series contract (relative_seconds).
+    const n = 450;
+    const time = Array.from({ length: n }, (_, i) => i * 0.1);
     const values = CH.map((_, ci) => {
       const r0 = base + ci * 320;
       // baseline 0-18s, exposure ramp 18-38s, recovery 38-60s
@@ -28,7 +30,7 @@ export const MOCK = String.raw`
         return r0 * (1 + resp) + noise;
       });
     });
-    return { label: 'coffee', channels: CH.slice(), time, values };
+    return { label, channels: CH.slice(), time, values };
     void jitter;
   };
 
@@ -37,6 +39,8 @@ export const MOCK = String.raw`
     { file_id: 'h2', substance: 'mint', label: 'mint', timestamp: (NOW - 10_800_000) / 1000, duration_sec: 60, sensor_count: 6, quality: 74, csv_path: '/tmp/opencode/ui/mint.csv', quality_report: null },
     { file_id: 'h3', substance: 'ethanol', label: 'ethanol', timestamp: (NOW - 93_600_000) / 1000, duration_sec: 60, sensor_count: 6, quality: 68, csv_path: '/tmp/opencode/ui/ethanol.csv', quality_report: null },
   ];
+
+  const playground = { file_id: 'playground', substance: 'apple (SmellNet)', label: 'SmellNet apple \u00b7 playground', timestamp: NOW / 1000, duration_sec: 60, sensor_count: 6, quality: 74, csv_path: '/tmp/opencode/ui/playground.csv', quality_report: null };
 
   const health = CH.map((_, i) => ({
     channel: i, health_score: (92 - i * 3) / 100, mean: 2000 + i * 320, std: 12 + i,
@@ -74,11 +78,13 @@ export const MOCK = String.raw`
       case 'get_recordings_dir': return ok('/tmp/opencode/ui/data/recordings');
       case 'get_plugins_dir': return ok('/tmp/opencode/ui/data/plugins');
       case 'dataset_dir': return ok('/tmp/opencode/ui/data/datasets');
-      case 'get_session_index': return ok(sessions);
+      case 'get_session_index': return ok(self.playgroundInstalled ? [...sessions, playground] : sessions);
+      case 'install_playground_sample': self.playgroundInstalled = true; return ok(playground);
       case 'import_recordings': return ok(0);
       case 'load_session_series': {
+        if (a.fileId === 'playground') return ok(mkSeries(1800, 2.5, 'apple (SmellNet)'));
         const i = ['h1', 'h2', 'h3'].indexOf(a.fileId);
-        return ok(mkSeries(1800 + (i < 0 ? 0 : i) * 150, 2.5));
+        return ok(mkSeries(1800 + (i < 0 ? 0 : i) * 150, 2.5, sessions[i]?.substance || 'coffee'));
       }
       case 'assess_recording_health': return ok(health);
       case 'get_sensor_health': return ok(health);

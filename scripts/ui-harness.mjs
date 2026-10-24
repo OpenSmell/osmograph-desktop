@@ -58,7 +58,14 @@ const SEED = `try {
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const errors = [];
-page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+page.on('console', m => {
+  if (m.type() !== 'error') return;
+  // The dev-only tap mirrors readings to a local listener on :5501. With no
+  // listener attached the browser logs a connection error per frame; that is
+  // dev plumbing, never a product error, and it cannot ship (DEV-only).
+  if (/127\.0\.0\.1:5501/.test(m.location()?.url || '')) return;
+  errors.push('console: ' + m.text());
+});
 page.on('pageerror', e => errors.push('pageerror: ' + (e.stack || e.message)));
 
 await page.addInitScript({ content: MOCK });
@@ -78,6 +85,23 @@ const shot = async (name) => {
 };
 
 await shot('01-boot');
+
+// No-hardware first run: the dashboard offers the Playground (a real
+// recording, replayed) so the app has value on a machine that has never seen a
+// rig. The empty state is only on screen while no link exists, which can race
+// boot auto-connect — assert the control exists and is inside that state, and
+// exercise the full flow through the command palette at the end.
+const pgEntry = await page.evaluate(() => {
+  const button = document.getElementById('dashPlayground');
+  const empty = document.getElementById('dashboardEmpty');
+  return {
+    present: !!button,
+    inEmptyState: !!button && !!empty && empty.contains(button),
+    emptyVisible: !!empty && empty.getBoundingClientRect().height > 0,
+  };
+});
+console.log('playground entry:', JSON.stringify(pgEntry));
+if (!pgEntry.inEmptyState) errors.push('the no-rig dashboard does not offer the Playground');
 
 // Connect the synthetic rig through the real Connect button path.
 await page.evaluate(() => {
@@ -106,7 +130,6 @@ await page.evaluate(() => {
 const stream = await page.evaluateHandle(async () => {
   const CH = ['MQ-135', 'MQ-3', 'MQ-6', 'MQ-7', 'MQ-4', 'MQ-8'];
   const emit = window.__MOCK_EMIT;
-  const t0 = Date.now();
   for (let i = 0; i < 200; i++) {
     const s = i * 0.1;
     const chans = CH.map((_, ci) => {
@@ -117,7 +140,7 @@ const stream = await page.evaluateHandle(async () => {
       const noise = (Math.sin(i * 1.9 + ci * 1.3) + Math.cos(i * 0.41 + ci * 2.2)) * 2.2;
       return Math.round(r0 * (1 + resp) + noise);
     });
-    emit('serial-data', { channels: chans, timestamp: t0 + i * 100, raw_line: 'MOCK,' + chans.join(',') });
+    emit('serial-data', { channels: chans, timestamp: Date.now(), raw_line: 'MOCK,' + chans.join(',') });
     await new Promise(r => setTimeout(r, 80));
   }
 });
@@ -134,11 +157,11 @@ await shot('03-home-live');
 
 // Mirror the real CP2102 rig: two active channels and four idle zeros. This
 // catches axis/fingerprint/legend behavior that only a lopsided stream exposes.
-await page.click('#connectBtn').catch(() => {});
+await page.click('#connectBtn').catch(() => errors.push('connect: first disconnect click failed'));
 await page.waitForTimeout(400);
-await page.click('#connectBtn').catch(() => {});
+await page.click('#connectBtn').catch(() => errors.push('connect: second connect click failed'));
 await page.waitForTimeout(500);
-await page.click('#liveClear').catch(() => {});
+await page.click('#liveClear').catch(() => errors.push('live: clear button not clickable'));
 await page.waitForTimeout(300);
 await page.evaluate(async () => {
   const emit = window.__MOCK_EMIT;
@@ -154,6 +177,12 @@ await page.evaluate(async () => {
 });
 await page.waitForTimeout(1200);
 await shot('03a-home-two-channel-rig');
+console.log('two-channel counters:', JSON.stringify(await page.evaluate(() => ({
+  samples: document.getElementById('plotSamples')?.textContent || '',
+  link: document.getElementById('plotLinkState')?.textContent || '',
+  fp: document.getElementById('fpSource')?.textContent || document.querySelector('.fp-source')?.textContent || '',
+  detN: window.detN || 0,
+}))));
 console.log('two-channel state:', JSON.stringify(await page.evaluate(() => ({
   anomaly: document.getElementById('anomalyLabel')?.textContent,
   sub: document.getElementById('anomalySub')?.textContent,
@@ -336,6 +365,34 @@ if (await openBtn.isVisible().catch(() => false)) {
     workspaceEl: !!document.querySelector('.domain-workspace, #domainWorkspace'),
   }))));
   errors.push('vial workspace: Open button for praisejamesx.fermentation not found');
+}
+
+// Playground: the no-hardware path end to end. A real SmellNet recording is
+// installed into the library and opened in the replay panel, stamped REPLAY.
+await page.keyboard.press('Control+k').catch(() => {});
+await page.waitForTimeout(400);
+const palette = page.locator('#commandInput');
+if (await palette.isVisible().catch(() => false)) {
+  await palette.fill('Playground');
+  await page.waitForTimeout(300);
+  const cmd = page.locator('#commandList .command-item').first();
+  if (await cmd.isVisible().catch(() => false)) {
+    await cmd.click();
+    await page.waitForTimeout(1600);
+    const pgState = await page.evaluate(() => ({
+      panel: document.getElementById('replayPanel')?.style.display !== 'none',
+      selected: document.getElementById('replaySession')?.value || '',
+      options: document.getElementById('replaySession')?.options?.length || 0,
+    }));
+    console.log('playground:', JSON.stringify(pgState));
+    if (!pgState.panel) errors.push('playground did not open the replay panel');
+    if (!pgState.selected) errors.push('playground did not select a recording to replay');
+    await shot('07-playground');
+  } else {
+    errors.push('command palette has no Playground command');
+  }
+} else {
+  errors.push('command palette did not open');
 }
 
 fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ errors, tabs }, null, 2));

@@ -30,6 +30,12 @@ use opensmell::{
     protocol::{OsmProtocol, OsmMessage},
 };
 
+/// The bundled no-hardware recording (SmellNet, MIT — see
+/// `examples/playground/NOTICE.md`). It is compiled into the binary so the
+/// playground works offline and on a fresh machine.
+const PLAYGROUND_SAMPLE_FILE: &str = "playground_smellnet_apple_6.csv";
+const PLAYGROUND_SAMPLE_CSV: &str = include_str!("../examples/playground/smellnet_apple_6.csv");
+
 pub struct AppState {
     pub detector: Arc<Mutex<AdaptiveAnomalyDetector>>,
     pub fail_safe: Arc<Mutex<FailSafeSystem>>,
@@ -2299,6 +2305,32 @@ fn get_session_index(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
     Ok(index.records.clone())
 }
 
+/// One real recording ships with the app so a machine with no rig still has
+/// something true to explore. It is copied into the recordings directory and
+/// indexed like any other session — the replay surfaces stamp it REPLAY and the
+/// detector never sees it.
+#[tauri::command]
+fn install_playground_sample(state: State<AppState>) -> Result<SessionRecord, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("cannot create the recordings folder: {e}"))?;
+    let path = dir.join(PLAYGROUND_SAMPLE_FILE);
+    if !path.exists() {
+        std::fs::write(&path, PLAYGROUND_SAMPLE_CSV)
+            .map_err(|e| format!("cannot write the playground recording: {e}"))?;
+    }
+    let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+    let file = recording_from_path(&path, &mut cache)
+        .ok_or_else(|| "the bundled playground recording could not be read".to_string())?;
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let mut record = build_record_from_file(&file);
+    record.label = "SmellNet apple · playground".to_string();
+    record.notes = "Bundled SmellNet recording (MIT). Replay only — not a live rig.".to_string();
+    index.upsert(record.clone());
+    let _ = index.save(&dir);
+    Ok(record)
+}
+
 #[tauri::command]
 fn remove_session(state: State<AppState>, file_id: String) -> Result<(), String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
@@ -3722,6 +3754,7 @@ pub fn run() {    env_logger::init();
             dataset_control,
             dataset_extract,
             get_session_index,
+            install_playground_sample,
             remove_session,
             rename_session,
             clear_recordings,

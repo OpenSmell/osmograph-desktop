@@ -2191,7 +2191,7 @@ function qualityBadge(q: number): { label: string; cls: string } {
 function renderLibrary() {
   const body = document.getElementById('libBody')!;
   if (sessions.length === 0) {
-    body.innerHTML = `<tr class="empty-row"><td colspan="9">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong>. No hardware? Open <strong>Datasets</strong> in Explore and download a corpus.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="9">No sessions yet — connect a device and record, or use <strong>Import</strong> / <strong>Import Folder</strong>. No hardware? <button class="text-link" type="button" data-playground>Open the Playground</button> (a real SmellNet recording, replayed) or download a corpus from <strong>Datasets</strong>.</td></tr>`;
     document.getElementById('libStatus')!.textContent = '0 sessions';
     return;
   }
@@ -8530,6 +8530,7 @@ const COMMANDS: CommandAction[] = [
   { id: 'vials', group: 'Go', title: 'Vials', hint: 'domain workspaces + decisions', run: () => activateSmellsView('vials') },
   { id: 'aromatory', group: 'Go', title: 'Vials → Aromatory', hint: 'install a domain Vial', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); window.setTimeout(() => document.getElementById('domainCatalog')?.scrollIntoView({ block: 'start' }), 80); } },
   { id: 'sessions', group: 'Go', title: 'Explore → Recordings', hint: 'import, inspect, replay, trim', run: () => activateSmellsView('sessions') },
+  { id: 'playground', group: 'Go', title: 'Playground', hint: 'replay a real recording, no rig needed', run: () => { void openPlayground(); } },
   { id: 'datasets', group: 'Go', title: 'Explore → Datasets', hint: 'download a public corpus', run: () => activateSmellsView('datasets') },
   { id: 'train', group: 'Go', title: 'Analyse → Train', hint: 'teach this array', run: () => activateSmellsView('train') },
   { id: 'changelog', group: 'Go', title: 'Analyse → Events', hint: 'anomaly history from this device', run: () => activateSmellsView('changelog') },
@@ -10362,6 +10363,28 @@ function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
       quality_report: report,
     };
   });
+}
+
+/// Install the bundled recording and open it in the replay panel. This is the
+/// no-hardware path: a real SmellNet file (MIT) copied into the library and
+/// then replayed. Every replay surface stamps it REPLAY — it never feeds the
+/// detector or the classifier.
+async function openPlayground(): Promise<void> {
+  try {
+    const rec = await invoke<RawSessionRecord>('install_playground_sample');
+    await reloadLibrary();
+    showWorkspaceView('sessions');
+    const sel = document.getElementById('replaySession') as HTMLSelectElement | null;
+    if (sel && rec?.file_id) {
+      populateReplaySelect();
+      sel.value = rec.file_id;
+    }
+    openReplayPanel();
+    await loadReplay();
+    showToast('Playground loaded — a real SmellNet recording (MIT). Replay only; no rig needed.');
+  } catch (e) {
+    showToast(`Playground unavailable: ${e}`);
+  }
 }
 
 async function reloadLibrary() {
@@ -13802,6 +13825,13 @@ document.getElementById('livePlayPause')!.addEventListener('click', toggleLivePa
 document.getElementById('liveClear')!.addEventListener('click', clearLiveView);
 document.getElementById('dashExplore')?.addEventListener('click', () => {
   showWorkspaceView('smells');
+});
+document.getElementById('dashPlayground')?.addEventListener('click', () => {
+  void openPlayground();
+});
+document.addEventListener('click', (event) => {
+  const target = (event.target as HTMLElement | null)?.closest('[data-playground]');
+  if (target) void openPlayground();
 });
 document.getElementById('dashConnect')?.addEventListener('click', () => {
   showWorkspaceView('system');
