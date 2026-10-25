@@ -638,7 +638,7 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
   add('tagline', 'Tagline', pack.tagline.trim().length >= 4 && pack.tagline.trim().length <= 160, true, 'One honest line about the workspace.');
   add('summary', 'Summary', pack.summary.trim().length >= 30 && pack.summary.trim().length <= 600, true, 'Explain the workspace and its scope.');
   add('what-it-is', 'What it is', pack.whatItIs.trim().length >= 30, true, 'State the useful claim or protocol.');
-  add('what-it-is-not', 'What it is not', pack.whatItIsNot.trim().length >= 30 && /(?:not|cannot|no\s|never|without|refuse)/i.test(pack.whatItIsNot), true, 'Name the claim you refuse to make.');
+  add('what-it-is-not', 'Operating envelope', pack.whatItIsNot.trim().length >= 30 && /(?:not|cannot|no\s|never|without|refuse)/i.test(pack.whatItIsNot), true, 'Name the conditions where the check refuses.');
   add('citations', 'Citations', pack.citations.length >= 1 && pack.citations.every(c => c.trim().length >= 10), true, 'At least one real reference, not a vibe.');
   add('docs', 'Field notes', pack.docs.length >= 2 && pack.docs.every(d => d.title.trim() && d.body.length >= 1), true, 'At least two documented sections with body text.');
   add('hero', 'Overview panel', widgetTypes.has('hero'), true, 'A domain Vial needs an overview.');

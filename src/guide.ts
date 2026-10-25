@@ -122,7 +122,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     ],
     bullets: [
       'Scope and stop rules are explicit: what the record can support, and when to stop or inspect.',
-      'Every domain pack must state what it is and what it is not.',
+      'Every domain pack states its scope and the conditions it refuses.',
       'The log is stored locally and can be exported or cleared with site data.',
       'A sandboxed UI can use live or recorded sensor windows, but it cannot call Tauri, reach the network, or invent a second detector.',
       'A Vial can be installed from its manifest URL. A Vial with a workspace or Home UI must be installed from its URL so the host can fetch ui.html and home.html beside it.',
@@ -135,14 +135,14 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     summary: 'An author-hosted Vial is a manifest you can export, version, and share, with an optional sandboxed UI.',
     paragraphs: [
       'Start from the authoring template in Vials → Aromatory. Change the id, author, licence, claims, citations, and workspace content. The full schema and widget vocabulary are in AUTHORING.md. There is no official tier: every author-hosted Vial runs through the same gate.',
-      'The manifest uses schema osmograph.domain-pack/1. It must include hero, scope, docs, rig, and at least one of tracking, diagram, or rules. Packs that touch safety-critical decisions need an explicit stop rule and at least three field-note sections. Citations must be real references, and whatItIsNot must name the claim you refuse to make.',
+      'The manifest uses schema osmograph.domain-pack/1. It must include hero, scope, docs, rig, and at least one of tracking, diagram, or rules. Packs that touch safety-critical decisions need an explicit stop rule and at least three field-note sections. Citations must be real references, and the scope must name the operating envelope.',
       'Validate without launching the app with npm run validate:vial — path/to/file.vial.json. If the Vial declares a ui or homeUi, the validator also checks the companion ui.html or home.html. Import a declarative manifest from a file, or host it in your own GitHub repo and use Install from URL with the raw HTTPS manifest URL. A Vial with a UI must be installed from its URL so the host can fetch the assets beside it.',
       'The registry is an index, not a store: it lists the author, version, source, and hash. It does not host the Vial, and a listing is not a review or endorsement. There is no hosted marketplace, signature verification, revocation service, or automatic update in this build. A pass through the local gate is necessary, not sufficient, for trust.',
     ],
     bullets: [
       'The manifest stays declarative. Executable frontend code belongs in the separate ui.html or home.html and runs in the sandbox.',
       'A sandboxed UI is available to every author, not a privileged tier.',
-      'Use a real author, licence, citations, and an explicit whatItIsNot.',
+      'Use a real author, licence, and citations, and declare the operating envelope.',
       'Put the manifest and optional ui.html/home.html in your own repo; install from the raw HTTPS manifest URL.',
       'Export, re-import, and test the rendered workspace before you share it.',
       'Do not claim official status, safety certification, gas leak detection, pathogen detection, diagnosis, universal smell ID, absolute concentration, or cross-rig transfer.',

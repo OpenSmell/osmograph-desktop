@@ -7218,8 +7218,7 @@ function domainWidgetHtml(w: Domain.DomainWidget, pack: Domain.DomainPack, state
           <h2>${escapeHtmlText(w.title)}</h2>
         <p>${escapeHtmlText(w.subtitle)}</p>
         <p>${escapeHtmlText(pack.summary)}</p>
-        <p><b>What it is:</b> ${escapeHtmlText(pack.whatItIs)}</p>
-        <p><b>What it is not:</b> ${escapeHtmlText(pack.whatItIsNot)}</p>
+        <p><b>Scope:</b> ${escapeHtmlText(pack.whatItIs)}</p>
         <div class="domain-hero-note">${escapeHtmlText(w.note)}</div>
       </div>
       <div>${domainArtSvg(w.art)}</div>
@@ -9060,16 +9059,16 @@ function starterDomainPack(): Domain.DomainPack {
     tagline: 'A short, honest line about the decision this workspace supports.',
     summary: 'Explain the narrow, repeated decision this workspace is for, the context it records, and the evidence it refuses to claim.',
     whatItIs: 'A protocol and a log for a narrow domain task. Replace this with the specific useful thing your workspace helps a person do.',
-    whatItIsNot: 'Not a universal smell identifier, not a concentration meter, not a diagnosis, and not a cross-rig claim. Replace this with the exact refusal that matters in your domain.',
+    whatItIsNot: 'Validated on the array and protocol recorded above. Replace this with the operating envelope, including the conditions where the check refuses.',
     citations: [
       'Replace with a real reference: author, year, title, venue. A citation is not decoration; it is the context for your claims.',
     ],
     widgets: [
       { type: 'hero', art: 'generic', title: 'My domain workspace', subtitle: 'A protocol, a log, and the limits that keep it honest.', note: 'Personal Vial · host-rendered · add a sandboxed UI when you need a custom screen' },
-      { type: 'risk', level: 'medium', headline: 'What this workspace is not allowed to claim.', body: 'Name the decision the user might wrongly make here, and the evidence that would be required to make it.', always: ['Record the context that changes the interpretation.'], never: ['Do not turn a sensor change into a diagnosis.'] },
+      { type: 'risk', level: 'medium', headline: 'Operating boundary.', body: 'Name the decision this workspace supports and the conditions where it refuses.', always: ['Record the context that changes the interpretation.'], never: ['Keep the sensor in its measurement role.'] },
       { type: 'metrics', title: 'What this workspace can claim', items: [
         { label: 'Signal', value: 'Change detection', hint: 'Same array, same sample preparation, against your own baseline.' },
-        { label: 'Not a', value: 'Universal answer', hint: 'State the closed set and the scope.' },
+        { label: 'Scope', value: 'Closed set', hint: 'State the array, protocol, and operating envelope.' },
         { label: 'Primary record', value: 'Context + log', hint: 'The sensor is one column, not the verdict.' },
       ] },
       { type: 'detector', title: 'Detector contract', intro: 'If this workspace uses the live anomaly engine, copy this panel and replace the domain-specific actions. Do not invent a second detector.', baseline: 'A fresh clean-air window on this exact array. Verify a quiet baseline before you arm it.', levels: [
