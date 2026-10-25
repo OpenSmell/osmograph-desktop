@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 
 const runtime = await import('../src/vialRuntime.ts');
+const profileModule = await import('../src/vialProfile.ts');
 
 // The desktop test owns the runtime contract, not any author's Vial. A real Vial
 // project validates its own fragments; keeping a fixture here means the test
@@ -75,6 +76,39 @@ test('sandbox rejects remote scripts', () => {
 
 test('sandbox rejects javascript URLs', () => {
   assert.throws(() => runtime.assertSandboxableUi('<a href="javascript:alert(1)">x</a>'), /javascript/i);
+});
+
+test('profile admissibility refuses a warming baseline and low coverage', () => {
+  const profile = structuredClone(profileModule.VIAL_PROFILE_DEFAULTS);
+  profile.detection.perChannelLimits = { ch0: 0.1, ch1: 0.1 };
+  profile.admissibility.minCoverage = 0.5;
+  const warming = profileModule.profileAdmissibility(profile, {
+    baselineState: 'warming',
+    channelLive: { ch0: true, ch1: true },
+  });
+  assert.equal(warming.admissible, false);
+  assert.match(warming.reason, /baseline/i);
+  const half = profileModule.profileAdmissibility(profile, {
+    baselineState: 'ready',
+    channelLive: { ch0: true, ch1: false },
+  });
+  assert.equal(half.admissible, true);
+  const none = profileModule.profileAdmissibility(profile, {
+    baselineState: 'ready',
+    channelLive: { ch0: false, ch1: false },
+  });
+  assert.equal(none.admissible, false);
+  assert.match(none.reason, /coverage/i);
+});
+
+test('sandbox rejects an unknown osmograph method', () => {
+  assert.throws(() => runtime.assertSandboxableUi('<script>osmograph.getSnapshot()</script>'), /unknown osmograph method/i);
+});
+
+test('sandbox rejects network, storage, and code evaluation', () => {
+  assert.throws(() => runtime.assertSandboxableUi('<script>fetch("/x")</script>'), /network/i);
+  assert.throws(() => runtime.assertSandboxableUi('<script>localStorage.setItem("x", "1")</script>'), /storage/i);
+  assert.throws(() => runtime.assertSandboxableUi('<script>eval("1")</script>'), /evaluate strings/i);
 });
 
 test('downsample keeps a bounded window and preserves nulls', () => {

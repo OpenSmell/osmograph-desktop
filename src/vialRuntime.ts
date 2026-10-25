@@ -62,6 +62,9 @@ export interface VialTransforms {
   baseline: VialBaseline;
   conditioning: string[];
   response: VialResponse;
+  /** Seconds of the early series used as R0 when baseline is `first-n`.
+   *  A v2 manifest declares this; legacy UI calls use the 15-sample default. */
+  r0WindowS?: number;
 }
 
 function median3(values: Array<number | null>): Array<number | null> {
@@ -84,7 +87,10 @@ export function applyVialTransforms(window: VialSeriesWindow, t: VialTransforms)
   const values = window.values.map(channel => {
     const conditioned = conditioning.includes('median3') ? median3(channel) : channel;
     const finite = conditioned.filter((v): v is number => v !== null && Number.isFinite(v));
-    const head = t.baseline === 'session-mean' ? finite : finite.slice(0, 15);
+    const r0Samples = t.r0WindowS && t.r0WindowS > 0 && window.time.length
+      ? Math.max(1, window.time.filter(tv => tv - window.time[0] <= t.r0WindowS!).length)
+      : 15;
+    const head = t.baseline === 'session-mean' ? finite : finite.slice(0, r0Samples);
     const r0 = head.length ? head.reduce((a, b) => a + b, 0) / head.length : null;
     return conditioned.map(v => {
       if (v === null || !Number.isFinite(v)) return null;
@@ -358,6 +364,24 @@ export function assertSandboxableUi(html: string): void {
     throw new Error('A Vial UI cannot load remote images or media.');
   }
   if (/javascript\s*:/i.test(html)) throw new Error('A Vial UI cannot use javascript: URLs.');
+  if (/\b(?:fetch|XMLHttpRequest|WebSocket|EventSource)\s*\(/i.test(html)) {
+    throw new Error('A Vial UI cannot use the network; the sandbox has no network access.');
+  }
+  if (/\b(?:localStorage|sessionStorage|indexedDB)\b/i.test(html)) {
+    throw new Error('A Vial UI cannot use browser storage; the sandbox has no storage access.');
+  }
+  if (/\beval\s*\(|new\s+Function\s*\(/i.test(html)) {
+    throw new Error('A Vial UI cannot evaluate strings as code.');
+  }
+  const allowed = new Set([
+    'version', 'onData', 'action', 'ready', 'toast',
+    'setDetection', 'setTransforms', 'setTrajectory',
+  ]);
+  for (const match of html.matchAll(/osmograph\.([A-Za-z_$][\w$]*)/g)) {
+    if (!allowed.has(match[1])) {
+      throw new Error(`A Vial UI calls an unknown osmograph method: ${match[1]}.`);
+    }
+  }
 }
 
 const SANDBOX_BASE_CSS = `

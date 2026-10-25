@@ -5,7 +5,7 @@
 // local gate as a file import.
 
 export const VIAL_REGISTRY_URL =
-  'https://raw.githubusercontent.com/opensmell/opensmell-web/main/public/vials/registry.json';
+  'https://raw.githubusercontent.com/OpenSmell/OpenSmell-web/main/public/vials/registry.json';
 
 export interface RegistryVialEntry {
   id: string;
@@ -16,11 +16,16 @@ export interface RegistryVialEntry {
   domain: string;
   tagline: string;
   summary: string;
+  /** The manifest contract the registry reviewed. Missing means the entry
+   *  predates v2; it remains installable as Ungated. */
+  schema?: 'osmograph.domain-pack/1' | 'osmograph.domain-pack/2';
   hasUi?: boolean;
   evidence?: 'A' | 'B' | 'C' | 'D';
   atlasRefs?: string[];
   /** sha256 hex of the manifest file, so an install can detect upstream edits. */
   hash?: string;
+  /** sha256 hex of every sandboxed UI asset, keyed by its relative filename. */
+  assets?: Record<string, string>;
   manifestUrl: string | null;
   sourceUrl: string | null;
   install: string;
@@ -42,8 +47,21 @@ function asEntry(value: unknown): RegistryVialEntry | null {
   const evidence = ['A', 'B', 'C', 'D'].includes(str('evidence'))
     ? (str('evidence') as 'A' | 'B' | 'C' | 'D')
     : undefined;
+  const schema = str('schema') === 'osmograph.domain-pack/2'
+    ? 'osmograph.domain-pack/2' as const
+    : str('schema') === 'osmograph.domain-pack/1'
+      ? 'osmograph.domain-pack/1' as const
+      : undefined;
   const atlasRefs = Array.isArray(raw.atlasRefs)
     ? raw.atlasRefs.filter((ref): ref is string => typeof ref === 'string')
+    : undefined;
+  const assets = raw.assets && typeof raw.assets === 'object' && !Array.isArray(raw.assets)
+    ? Object.fromEntries(
+        Object.entries(raw.assets as Record<string, unknown>)
+          .filter(([key, value]) => /^[a-z0-9][a-z0-9._-]*\.html$/i.test(key)
+            && typeof value === 'string'
+            && /^[a-f0-9]{64}$/i.test(value)) as Array<[string, string]>
+      )
     : undefined;
   return {
     id,
@@ -54,10 +72,12 @@ function asEntry(value: unknown): RegistryVialEntry | null {
     domain: str('domain'),
     tagline: str('tagline'),
     summary: str('summary'),
+    schema,
     hasUi: raw.hasUi === true,
     evidence,
     atlasRefs,
     hash: str('hash') || undefined,
+    assets: assets && Object.keys(assets).length ? assets : undefined,
     manifestUrl,
     sourceUrl: str('sourceUrl') || null,
     install: str('install'),
@@ -71,6 +91,9 @@ export async function fetchVialRegistry(timeoutMs = 9000): Promise<RegistryVialE
     const response = await fetch(VIAL_REGISTRY_URL, {
       headers: { Accept: 'application/json' },
       redirect: 'follow',
+      // GitHub's raw host caches for a few minutes. A newly approved Vial
+      // should appear on the next Aromatory open, not after a restart.
+      cache: 'no-cache',
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(`Registry returned HTTP ${response.status}.`);

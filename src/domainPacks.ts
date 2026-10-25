@@ -9,6 +9,12 @@
 // The sandbox is the execution boundary; it is not a signature or a review.
 
 import type { VialHomeActionKind, VialHomeSpec } from './vialHost';
+import {
+  coerceAnomalyProfile,
+  validateAnomalyProfile,
+  type VialAnomalyProfile,
+  type VialEvidenceSpec,
+} from './vialProfile';
 
 export interface DomainUiSpec {
   /** Only the host-owned sandbox bridge is supported today. */
@@ -67,7 +73,9 @@ export interface DomainDoc {
 }
 
 export interface DomainPack {
-  schema: 'osmograph.domain-pack/1';
+  /** v2 makes the anomaly profile and evidence part of the contract. v1
+   *  manifests remain installable as legacy entries. */
+  schema: 'osmograph.domain-pack/1' | 'osmograph.domain-pack/2';
   id: string;
   name: string;
   version: string;
@@ -80,9 +88,22 @@ export interface DomainPack {
   domain: string;
   tagline: string;
   summary: string;
-  whatItIs: string;
-  whatItIsNot: string;
+  /** v2 positive scope: the decision this Vial supports. */
+  scope?: string;
+  /** v2 operating envelope: the conditions where the Vial refuses. */
+  limits?: string[];
+  /** v1 compatibility fields. New manifests use scope/limits. */
+  whatItIs?: string;
+  whatItIsNot?: string;
+  /** The programmable anomaly profile. Required for v2. */
+  anomaly?: VialAnomalyProfile;
+  /** Held-out evidence and declarative fixtures. Required for a reviewed listing. */
+  evidence?: VialEvidenceSpec;
   citations: string[];
+  /** Runtime provenance, set by the host after fetching the manifest. Never
+   *  trusted from the manifest itself. */
+  manifestHash?: string;
+  assetHashes?: Record<string, string>;
   widgets: DomainWidget[];
   docs: DomainDoc[];
   /** Optional Home contribution, rendered by the host from a typed snapshot. */
@@ -478,6 +499,38 @@ function coerceHome(value: unknown): VialHomeSpec | undefined {
   };
 }
 
+function coerceEvidence(value: unknown): VialEvidenceSpec | undefined {
+  if (!isRecord(value)) return undefined;
+  const grade = value.grade;
+  if (grade !== 'A' && grade !== 'B' && grade !== 'C' && grade !== 'D') return undefined;
+  const metrics = isRecord(value.metrics) ? value.metrics : {};
+  const metric = (key: string): number | undefined => {
+    const n = typeof metrics[key] === 'number' ? metrics[key] : NaN;
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const fixtures = Array.isArray(value.fixtures)
+    ? value.fixtures.filter(isRecord).slice(0, 64).map(f => ({
+        id: asString(f.id),
+        file: asString(f.file),
+        expect: (typeof f.expect === 'string' ? f.expect : '') as VialEvidenceSpec['fixtures'][number]['expect'],
+      }))
+    : [];
+  return {
+    grade,
+    reportUrl: asString(value.reportUrl),
+    measuredAt: asString(value.measuredAt),
+    dataset: asString(value.dataset),
+    metrics: {
+      farPerMonth: metric('farPerMonth'),
+      latencyS: metric('latencyS'),
+      mde: metric('mde'),
+      nSamples: metric('nSamples'),
+      nAlarms: metric('nAlarms'),
+    },
+    fixtures,
+  };
+}
+
 function coercePack(raw: unknown): DomainPack {
   const source = isRecord(raw) ? raw : {};
   const docs = Array.isArray(source.docs) ? source.docs.filter(isRecord).map(d => ({
@@ -487,8 +540,17 @@ function coercePack(raw: unknown): DomainPack {
   const home = coerceHome(source.home);
   const ui = coerceUi(source.ui);
   const homeUi = coerceUi(source.homeUi, 'home');
+  const scope = asString(source.scope);
+  const limits = asStringArray(source.limits);
+  const legacyScope = asString(source.whatItIs);
+  const legacyLimits = asString(source.whatItIsNot);
+  const schema = source.schema === 'osmograph.domain-pack/2' ? 'osmograph.domain-pack/2' : 'osmograph.domain-pack/1';
+  const anomaly = schema === 'osmograph.domain-pack/2' && isRecord(source.anomaly)
+    ? coerceAnomalyProfile(source.anomaly)
+    : undefined;
+  const evidence = schema === 'osmograph.domain-pack/2' ? coerceEvidence(source.evidence) : undefined;
   return {
-    schema: 'osmograph.domain-pack/1',
+    schema,
     id: asString(source.id),
     name: asString(source.name),
     version: asString(source.version),
@@ -499,8 +561,16 @@ function coercePack(raw: unknown): DomainPack {
     domain: asString(source.domain),
     tagline: asString(source.tagline),
     summary: asString(source.summary),
-    whatItIs: asString(source.whatItIs),
-    whatItIsNot: asString(source.whatItIsNot),
+    scope: schema === 'osmograph.domain-pack/2'
+      ? (scope || undefined)
+      : (scope || legacyScope || undefined),
+    limits: schema === 'osmograph.domain-pack/2'
+      ? (limits.length ? limits : undefined)
+      : (limits.length ? limits : (legacyLimits ? [legacyLimits] : undefined)),
+    whatItIs: schema === 'osmograph.domain-pack/1' ? (legacyScope || undefined) : undefined,
+    whatItIsNot: schema === 'osmograph.domain-pack/1' ? (legacyLimits || undefined) : undefined,
+    anomaly,
+    evidence,
     citations: asStringArray(source.citations),
     widgets,
     docs,
@@ -553,8 +623,11 @@ export function domainPackById(id: string): DomainPack | undefined {
 function allPackText(pack: DomainPack): string {
   const chunks: string[] = [
     pack.id, pack.name, pack.author, pack.license, pack.domain, pack.tagline,
-    pack.summary, pack.whatItIs, pack.whatItIsNot, ...pack.citations,
+    pack.summary, pack.scope || pack.whatItIs || '',
+    ...(pack.limits?.length ? pack.limits : (pack.whatItIsNot ? [pack.whatItIsNot] : [])),
+    ...pack.citations,
   ];
+  if (pack.evidence) chunks.push(pack.evidence.dataset, pack.evidence.reportUrl);
   for (const doc of pack.docs) chunks.push(doc.title, ...doc.body);
   for (const widget of pack.widgets) {
     chunks.push(JSON.stringify(widget));
@@ -619,7 +692,10 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
   const text = allPackText(pack);
   const widgetTypes = new Set(pack.widgets.map(w => w.type));
 
-  add('schema', 'Manifest schema', pack.schema === 'osmograph.domain-pack/1', true, 'Expected osmograph.domain-pack/1.');
+  add('schema', 'Manifest schema', pack.schema === 'osmograph.domain-pack/1' || pack.schema === 'osmograph.domain-pack/2', true,
+    pack.schema === 'osmograph.domain-pack/2'
+      ? 'osmograph.domain-pack/2: profile, UI, and evidence.'
+      : 'Legacy osmograph.domain-pack/1. Installable; re-author as v2 to be listed.');
   if (pack.minHost != null) {
     const ok = minHostSatisfied(pack.minHost);
     add('min-host', 'Host version', ok, true, ok
@@ -637,8 +713,49 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
   add('domain', 'Domain', pack.domain.trim().length >= 2, true, 'Name the domain, for example fermentation or plants.');
   add('tagline', 'Tagline', pack.tagline.trim().length >= 4 && pack.tagline.trim().length <= 160, true, 'One honest line about the workspace.');
   add('summary', 'Summary', pack.summary.trim().length >= 30 && pack.summary.trim().length <= 600, true, 'Explain the workspace and its scope.');
-  add('what-it-is', 'What it is', pack.whatItIs.trim().length >= 30, true, 'State the useful claim or protocol.');
-  add('what-it-is-not', 'Operating envelope', pack.whatItIsNot.trim().length >= 30 && /(?:not|cannot|no\s|never|without|refuse)/i.test(pack.whatItIsNot), true, 'Name the conditions where the check refuses.');
+  const scope = (pack.scope || pack.whatItIs || '').trim();
+  add('scope', 'Scope', scope.length >= 30, true, 'State the decision this Vial supports.');
+  if (pack.schema === 'osmograph.domain-pack/2') {
+    const limits = pack.limits || [];
+    add('limits', 'Operating envelope', limits.length >= 1 && limits.every(l => l.trim().length >= 10), true,
+      'Name at least one condition where the Vial refuses or stops.');
+    add('anomaly', 'Anomaly profile', !!pack.anomaly, true,
+      'A v2 Vial must declare the anomaly block: baseline, transforms, detection, escalation.');
+    if (pack.anomaly) {
+      const profile = validateAnomalyProfile(pack.anomaly);
+      add('anomaly-values', 'Profile values', profile.errors.length === 0, true,
+        profile.errors.length ? profile.errors[0] : 'Baseline, thresholds, persistence, hysteresis, and escalation are in range.');
+      for (const warning of profile.warnings) add('anomaly-note', 'Profile note', true, false, warning);
+    }
+    if (pack.evidence) {
+      const ev = pack.evidence;
+      const metrics = ev.metrics;
+      const hasNumber = [metrics.farPerMonth, metrics.latencyS, metrics.mde, metrics.nSamples, metrics.nAlarms]
+        .some(v => typeof v === 'number' && Number.isFinite(v));
+      add('evidence', 'Held-out evidence', /^https:\/\//i.test(ev.reportUrl) && ev.dataset.trim().length >= 10 && hasNumber, true,
+        'A v2 Vial needs an https evidence report, the dataset it describes, and at least one measured number.');
+      add('evidence-date', 'Evidence date', /^\d{4}-\d{2}-\d{2}/.test(ev.measuredAt), false,
+        ev.measuredAt ? `Measured ${ev.measuredAt}.` : 'Add the measurement date.');
+      const badFixture = ev.fixtures.find(f =>
+        !f.id.trim()
+        || !/^fixtures\/[a-z0-9][a-z0-9._-]*\.json$/i.test(f.file)
+        || !['normal', 'warning', 'critical', 'emergency'].includes(f.expect));
+      add('evidence-fixtures', 'Declarative fixtures', !!ev.fixtures.length && !badFixture, false,
+        !ev.fixtures.length
+          ? 'No fixtures declared; `noses test` can only check the static surface.'
+          : badFixture
+            ? `Each fixture needs an id, a fixtures/<name>.json path, and an expected state: ${badFixture.file || badFixture.id}.`
+            : `${ev.fixtures.length} fixture(s).`);
+    } else {
+      add('evidence', 'Held-out evidence', false, true,
+        'A v2 Vial needs an evidence block with a report URL, the dataset, and measured numbers.');
+    }
+  } else {
+    add('anomaly', 'Anomaly profile', false, false,
+      'Legacy manifest has no programmable profile. It installs as Ungated; re-author as v2 to be listed.');
+    add('what-it-is-not', 'Operating envelope', (pack.whatItIsNot || '').trim().length >= 30 && /(?:not|cannot|no\s|never|without|refuse)/i.test(pack.whatItIsNot || ''), true,
+      'Name the conditions where the check refuses.');
+  }
   add('citations', 'Citations', pack.citations.length >= 1 && pack.citations.every(c => c.trim().length >= 10), true, 'At least one real reference, not a vibe.');
   add('docs', 'Field notes', pack.docs.length >= 2 && pack.docs.every(d => d.title.trim() && d.body.length >= 1), true, 'At least two documented sections with body text.');
   add('hero', 'Overview panel', widgetTypes.has('hero'), true, 'A domain Vial needs an overview.');
@@ -720,8 +837,11 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
 
 export function domainPackToJson(pack: DomainPack): string {
   // A manifest describes the UI asset; it never embeds it. The author-hosted
-  // ui.html beside the manifest is the canonical source.
-  return JSON.stringify(pack, null, 2);
+  // ui.html beside the manifest is the canonical source. Runtime provenance
+  // (the hash of the bytes we fetched, and the assets we verified) is not part
+  // of the author's manifest and must not round-trip into an export.
+  const { manifestHash: _manifestHash, assetHashes: _assetHashes, sourceUrl: _sourceUrl, uiUrl: _uiUrl, ...manifest } = pack;
+  return JSON.stringify(manifest, null, 2);
 }
 
 export function inspectDomainPackJson(raw: string, sourceUrl?: string): DomainImportResult {
@@ -731,8 +851,8 @@ export function inspectDomainPackJson(raw: string, sourceUrl?: string): DomainIm
   } catch {
     throw new Error('That file is not valid JSON.');
   }
-  if (!isRecord(parsed) || parsed.schema !== 'osmograph.domain-pack/1') {
-    throw new Error('Expected a domain pack with schema osmograph.domain-pack/1.');
+  if (!isRecord(parsed) || (parsed.schema !== 'osmograph.domain-pack/1' && parsed.schema !== 'osmograph.domain-pack/2')) {
+    throw new Error('Expected a Vial manifest with schema osmograph.domain-pack/2 (or legacy /1).');
   }
   const pack = coercePack(parsed);
   pack.sourceUrl = sourceUrl;

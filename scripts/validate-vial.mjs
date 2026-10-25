@@ -22,12 +22,35 @@ if (!target) {
   process.exit(2);
 }
 
-async function loadModule(relativePath) {
-  const source = fs.readFileSync(path.join(root, relativePath), 'utf8');
-  const js = ts.transpileModule(source, {
+const moduleUrls = new Map();
+
+// Transpile a local TypeScript module and inline its relative imports as data
+// URLs. The app modules import each other, so a single-file data URL cannot
+// resolve `./vialProfile` on its own.
+function moduleUrl(file) {
+  const resolved = path.resolve(file);
+  const cached = moduleUrls.get(resolved);
+  if (cached) return cached;
+  const source = fs.readFileSync(resolved, 'utf8');
+  let js = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
   }).outputText;
-  return import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
+  js = js.replace(/(from\s+['"])(\.[^'"]+)(['"])/g, (match, open, specifier, close) => {
+    let target = path.resolve(path.dirname(resolved), specifier);
+    if (!fs.existsSync(target)) {
+      if (fs.existsSync(`${target}.ts`)) target = `${target}.ts`;
+      else if (fs.existsSync(path.join(target, 'index.ts'))) target = path.join(target, 'index.ts');
+      else return match;
+    }
+    return `${open}${moduleUrl(target)}${close}`;
+  });
+  const url = `data:text/javascript;base64,${Buffer.from(js).toString('base64')}`;
+  moduleUrls.set(resolved, url);
+  return url;
+}
+
+async function loadModule(relativePath) {
+  return import(moduleUrl(path.join(root, relativePath)));
 }
 
 function resolveProject(input) {
@@ -99,7 +122,11 @@ for (const [label, spec] of [['ui-asset', pack.ui], ['home-ui-asset', pack.homeU
     break;
   }
   try {
-    Runtime.assertSandboxableUi(fs.readFileSync(uiPath, 'utf8'));
+    const html = fs.readFileSync(uiPath, 'utf8');
+    Runtime.assertSandboxableUi(html);
+    if (pack.anomaly && /\b(?:setDetection|setTransforms)\b/.test(html)) {
+      throw new Error('A v2 UI must not call setDetection or setTransforms; the profile is compiled from the manifest.');
+    }
   } catch (err) {
     uiError = `${label}: ${err instanceof Error ? err.message : String(err)}`;
     break;
@@ -108,9 +135,15 @@ for (const [label, spec] of [['ui-asset', pack.ui], ['home-ui-asset', pack.homeU
 
 const ok = validation.passed && !uiError;
 console.log(`${ok ? 'PASS' : 'FAIL'} ${pack.id}@${pack.version} — ${passed}/${total} policy checks`);
+const printed = new Set();
 for (const check of validation.checks) {
-  if (!check.passed) console.log(`  ${check.critical ? 'ERROR' : 'warn '} ${check.id}: ${check.detail}`);
+  if (!check.passed) {
+    console.log(`  ${check.critical ? 'ERROR' : 'warn '} ${check.id}: ${check.detail}`);
+    printed.add(check.detail);
+  }
 }
-for (const warning of validation.warnings) console.log(`  warn  ${warning}`);
+for (const warning of validation.warnings) {
+  if (!printed.has(warning)) console.log(`  warn  ${warning}`);
+}
 if (uiError) console.log(`  ERROR ${uiError}`);
 process.exit(ok ? 0 : 1);

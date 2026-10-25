@@ -16,10 +16,10 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     id: 'start',
     group: 'Start',
     title: 'Start here: what Osmograph is',
-    summary: 'A local-first workbench for digitising the experiment around a smell, not the smell itself.',
+    summary: 'A local-first workbench for digitising the experiment around a smell.',
     paragraphs: [
       'Osmograph turns a gas-sensor recording into a reproducible comparison: this sample, on this array, against this reference, under this method. The core objects are Session, Recipe, Result, Experiment, Check, Vial, and Library.',
-      'It is not a universal smell identifier, a concentration meter, or a safety instrument. A sensor response is a mixture. The useful claim is a closed-set, same-array comparison with the uncertainty and limits attached.',
+      'A sensor response is a mixture. The useful claim is a closed-set, same-array comparison with the uncertainty and limits attached; identity, concentration, and safety decisions each need their own primary measurement.',
       'The quickest first loop is: open Explore → Datasets, download the public SmellNet sensor set from Hugging Face, then tick two smells → Analyse → Compare → read the same-array guard and the difference wheel → save a Separability result. Nothing is preloaded.',
       'The app is organised by job: Home, Explore, Analyse, Vials, and Fleet, with Settings and the Field Guide as utilities. Hardware controls appear on Home and Fleet; Explore, Analyse, and Vials work without a rig.',
     ],
@@ -40,7 +40,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     bullets: [
       'Observation: “these recordings differ on this array.” Cheap, local, and easy to over-read.',
       'Separability: “on this array, this reference and this sample are distinguishable under this method.” Adds a paired comparison, a permutation test, and a lower confidence bound. The class matrix shows the same evidence for every pair at once.',
-      'Gated Vial: “this closed-set decision passed the local validation gate, with its array, limits, evidence, and method attached.” Still not a universal or cross-rig claim. "Sealed" is reserved for published Vials that passed external review and carry a signature.',
+      'Gated Vial: “this closed-set decision passed the local validation gate, with its array, limits, evidence, and method attached.” The claim is scoped to that array and preparation; a signature, if one exists, is external and is recorded separately.',
       'Decision: “use this Vial for this narrow, repeated choice.” Only valid inside the declared scope and only with the declared sample preparation.',
     ],
   },
@@ -48,17 +48,17 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     id: 'fingerprints',
     group: 'Methods',
     title: 'Fingerprints and the difference wheel',
-    summary: 'A fingerprint is a signed, normalised response shape — not a chemical ID or a time-series scentprint.',
+    summary: 'A fingerprint is a signed, normalised response shape for comparison on one array.',
     paragraphs: [
-      'Gallery cards show a compact radar: the mean settled response of each channel on the dominant array, normalised against its own baseline and drawn on one scale. It is a visual hash for scanning the library, not a chemical image.',
+      'Gallery cards show a compact radar: the mean settled response of each channel on the dominant array, normalised against its own baseline and drawn on one scale. It is a visual hash for scanning the library.',
       'Open a smell and the detail view shows the evidence behind that hash: one small panel per channel, thin lines for each replicate, a bold line for their mean, and relative time left to right. That is where kinetics and replicate spread become visible. The detail view is a static summary of recordings. The inspector now also has an Over time view, and Replay has a fingerprint evolution heatmap, so the transformation is visible without pretending the mean is the whole story.',
-      'The signed difference wheel is the comparison view. Positive values point outward in teal; negative values point inward in amber; a zero ring separates them. It is intentionally not a time-series plot and not a blended array.',
+      'The signed difference wheel is the comparison view. Positive values point outward in teal; negative values point inward in amber; a zero ring separates them. It is a compact comparison of settled responses.',
       'The same-array guard is a hard rule. If the reference and sample do not share the same channel set, the comparison is refused. A six-channel SmellNet fingerprint and a user rig fingerprint are not the same object, even if both have six numbers.',
     ],
     bullets: [
       'Same array only. Order and channel identity matter.',
       'Normalised, not absolute. The number is not ppm or concentration.',
-      'A fingerprint is evidence of a response pattern, not a species identification.',
+      'A fingerprint is evidence of a response pattern. Species identification needs its own primary evidence.',
     ],
   },
   {
@@ -68,7 +68,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     summary: 'A baseline-relative, paired comparison with an explicit uncertainty and a permutation test.',
     paragraphs: [
       'The current method is check.baseline-relative.v1, “Baseline-relative fingerprint check”, version 1.0.0. It has three steps: normalise each recording to its own baseline, compare the signed channel differences, and estimate whether the observed separation could arise by chance.',
-      'The class matrix scores every pair of classes without the permutation test, so it stays responsive. Open a cell and the pair bench reports the number of held-out evaluations, a separation verdict, a 95% Wilson lower bound on the paired success rate, and a permutation p-value. A high point estimate with a wide interval is not a strong result. A p-value is not an effect size.',
+      'The class matrix scores every pair of classes without the permutation test, so it stays responsive. Open a cell and the pair bench reports the number of held-out evaluations, a separation verdict, a 95% Wilson lower bound on the paired success rate, and a permutation p-value. Read the interval with the point estimate, and report the effect size alongside the p-value.',
       'The verdicts are deliberately plain: separable, fragile, confusable, insufficient. Use the matrix to choose which classes are ready for Train, then use Train to select the actual recordings. “Fragile” means the comparison worked in this sample but the evidence is not strong enough for the local decision gate. “Insufficient” means there are not enough paired evaluations to say anything useful.',
     ],
     bullets: [
@@ -82,7 +82,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     id: 'recipes',
     group: 'Methods',
     title: 'Transforms, trim, and replay',
-    summary: 'A transform pipeline is a named chain, not a model and not a smell.',
+    summary: 'A transform pipeline is a named chain of deterministic operations on a response.',
     paragraphs: [
       'Use Analyse → Transforms, or select a recording in Explore → Recordings and press Trim. A transform pipeline binds to one indexed recording, runs named transforms in order, previews the result, and can save the result as a new .osmell recording. The original is never overwritten.',
       'Runnable transforms include trim.range (cut to start/end seconds), gap fill, outlier removal, smoothing, detrending, baseline selection, response ratio, R0 normalization, and min-max/z-score scaling. Catalogued-but-unimplemented transforms are not presented as working.',
@@ -98,26 +98,26 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     id: 'vials',
     group: 'Vials',
     title: 'What a Vial is — and what "gated" means',
-    summary: 'A Vial is a reusable, local-first decision pack, not a universal model.',
+    summary: 'A Vial is a programmable anomaly app: a profile program, a sandboxed domain UI, and evidence.',
     paragraphs: [
-      'A decision Vial packages a closed-set claim with its evidence: identity and author, licence, reference and sample names, the unique array channels, at least three recordings per side, at least six held-out evaluations, the separation verdict, the 95% Wilson lower bound, the permutation p-value, explicit limits, provenance, and the method reference.',
-      'The local validation gate seals a Vial only when every critical check passes. The current gate requires a separable verdict, a lower bound of at least 55%, a permutation p-value of at most 0.05, explicit limits, source/evidence provenance, and no forbidden overclaim language. The recipe is advisory; the evidence is the gate.',
-      '“Ungated” does not mean broken. It means the local evidence did not clear the gate, so the Vial is labelled unusable for a decision. “Gated” is also scoped: it is a claim about this closed set on the array that produced the evidence, checked only by the machine you are holding. It is not external validation and it does not transfer to another rig.',
+      'A v2 Vial packages three things: an anomaly profile (baseline, transforms, per-channel limits, min-channel corroboration, persistence, hysteresis, escalation, admissibility, and a false-alarm target), a sandboxed domain UI or declarative workspace, and a held-out evidence block with fixtures. The host compiles the profile into a detector owned by that Vial; the UI interprets the host snapshot and cannot change the detector.',
+      'The local gate checks the schema, the profile ranges, the evidence block, citations, the sandbox, and placeholders. “Open” means the local gate failed and the UI labels the Vial Ungated. “Gated” means every critical check passed. A registry listing adds a human review of the claim and its evidence, and pins the manifest sha256 and every UI asset sha256.',
+      'A listing is scoped to the declared array and preparation. A signature is external and is not minted locally. Every install re-runs the gate and verifies the pinned bytes; an update is a second, verified install.',
     ],
     bullets: [
-      'Gated is a local evidence status, not a safety certification. A published, externally reviewed, signed Vial will carry the "Sealed" state.',
-      'Cross-rig generalisation is explicitly refused until a calibration story exists.',
-      'Export and import use the osmograph.vial/1 manifest as .vial.json.',
+      'Gated is a local evidence status. A registry listing records human review; neither is a signature.',
+      'Cross-rig generalisation needs its own calibration evidence.',
+      'The separate Decisions tab keeps a saved Separability result as a local decision record. A domain Vial is a programmable app with its own profile, UI, and evidence.',
     ],
   },
   {
     id: 'domain',
     group: 'Vials',
     title: 'Domain Vials: protocols, logs, and honest limits',
-    summary: 'A domain Vial carries a way of working, not just a pairwise verdict. Any Vial may stay declarative or add a sandboxed UI.',
+    summary: 'A domain Vial carries a way of working beyond a pairwise verdict. Any Vial may stay declarative or add a sandboxed UI.',
     paragraphs: [
       'A domain Vial ships a protocol, a log, a scope model, decision rules, field notes, citations, and a workspace. The host renders the declarative workspace from the manifest. A Vial may also add a sandboxed ui.html beside the manifest: a body fragment in an iframe with no network, storage, forms, frames, or Tauri access, fed by a typed host payload. A compact Home view can be added as home.html. Every author gets the same runtime and the same policy gate.',
-      'The Fermentation Lab reference project is author-hosted and not bundled with this app. It makes food safety the first panel, refuses to turn a pleasant smell into a safety verdict, and adds a Home view built from the same log and array data. Plant Respiration is also author-hosted and stays declarative; it states that the current constants table has no ethylene channel, so a change signal is not a pest or pathogen diagnosis. Anomaly Watch is retired: the host owns the always-on anomaly signal, and a domain Vial owns the interpretation.',
+      'Fermentation Lab is author-hosted. Its first panel is the batch record, its stop rules point at the primary measurement, and its Home view is built from the same log and array data. Plant Respiration is author-hosted and declarative; its constants table has no ethylene channel, so a change signal is the starting point for a primary pest or pathogen check. Anomaly Watch is retired: the host owns the always-on anomaly signal, and each domain Vial owns the interpretation.',
       'Domain Vials are where domain knowledge becomes useful: a batch log with pH, temperature, salt, and visual cues; a plant log with light, water, leaf, and root context; stop rules that tell you when to discard or inspect. The sensor stays one column in a larger record.',
     ],
     bullets: [
@@ -134,18 +134,18 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     title: 'Authoring a domain Vial',
     summary: 'An author-hosted Vial is a manifest you can export, version, and share, with an optional sandboxed UI.',
     paragraphs: [
-      'Start from the authoring template in Vials → Aromatory. Change the id, author, licence, claims, citations, and workspace content. The full schema and widget vocabulary are in AUTHORING.md. There is no official tier: every author-hosted Vial runs through the same gate.',
-      'The manifest uses schema osmograph.domain-pack/1. It must include hero, scope, docs, rig, and at least one of tracking, diagram, or rules. Packs that touch safety-critical decisions need an explicit stop rule and at least three field-note sections. Citations must be real references, and the scope must name the operating envelope.',
-      'Validate without launching the app with npm run validate:vial — path/to/file.vial.json. If the Vial declares a ui or homeUi, the validator also checks the companion ui.html or home.html. Import a declarative manifest from a file, or host it in your own GitHub repo and use Install from URL with the raw HTTPS manifest URL. A Vial with a UI must be installed from its URL so the host can fetch the assets beside it.',
-      'The registry is an index, not a store: it lists the author, version, source, and hash. It does not host the Vial, and a listing is not a review or endorsement. There is no hosted marketplace, signature verification, revocation service, or automatic update in this build. A pass through the local gate is necessary, not sufficient, for trust.',
+      'Scaffold with noses new, then edit the id, author, licence, scope, operating envelope, citations, anomaly profile, and evidence. The full schema and widget vocabulary are in the website Vial tutorials. Every author-hosted Vial runs through the same host gate.',
+      'The manifest uses schema osmograph.domain-pack/2. It must declare the anomaly profile (baseline, transforms, detection, persistence, hysteresis, escalation), the scope, the operating envelope, citations, and a held-out evidence block with at least one fixture. Packs that touch safety-critical decisions need an explicit stop rule and at least three field-note sections.',
+      'Validate without launching the app with noses lint and noses test. noses test runs the declaration fixtures against the profile state machine and checks the sandbox bridge surface. A Vial with a UI must be installed from its URL so the host can fetch and hash the assets beside the manifest.',
+      'The registry pins the author, version, source, manifest sha256, and every UI asset sha256. The host re-runs the same gate and verifies those hashes on every install, and the Aromatory offers an update when the registry pins a newer version. A listing records a human review of the claim and its evidence; the host gate remains the authority at install.',
     ],
     bullets: [
       'The manifest stays declarative. Executable frontend code belongs in the separate ui.html or home.html and runs in the sandbox.',
-      'A sandboxed UI is available to every author, not a privileged tier.',
+      'Every author gets the same sandboxed UI runtime and the same policy gate.',
       'Use a real author, licence, and citations, and declare the operating envelope.',
       'Put the manifest and optional ui.html/home.html in your own repo; install from the raw HTTPS manifest URL.',
       'Export, re-import, and test the rendered workspace before you share it.',
-      'Do not claim official status, safety certification, gas leak detection, pathogen detection, diagnosis, universal smell ID, absolute concentration, or cross-rig transfer.',
+      'Claims stay inside the declared scope: identity, concentration, diagnosis, and cross-rig transfer each need their own evidence.',
     ],
   },
   {
@@ -187,7 +187,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     summary: 'Three short loops that produce something useful without pretending to have a lab.',
     paragraphs: [
       'Tutorial A — read a fingerprint. Download SmellNet in Explore → Datasets. Open Explore → Gallery, pick Banana, and read the per-channel curves, the replicate spread, the channel count, and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison.',
-      'Tutorial B — save a Separability result. In Analyse → Separability, read the class matrix, then choose a reference and a sample from the same array. Run the pair. Read the lower bound and the p-value, not just the badge. Save the result. Now open Vials → Decisions and package the saved result. Inspect the validation gate before you trust the seal.',
+      'Tutorial B — save a Separability result. In Analyse → Separability, read the class matrix, then choose a reference and a sample from the same array. Run the pair. Read the lower bound and the p-value, not just the badge. Save the result. Now open Vials → Decisions to keep the record. Read the validation gate before you rely on the result.',
       'Tutorial C — install a Domain Vial. Open Vials → Aromatory, install Fermentation Lab, and read its scope and stop rules before the log. Add one reading with a pH, temperature, and visual note. The point is the record, not the sensor trace. Then open Plant Respiration and read its “no ethylene channel” limit.',
     ],
   },
@@ -195,9 +195,9 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     id: 'limits',
     group: 'Reference',
     title: 'Known limits (read before claiming)',
-    summary: 'The refusal list is part of the product, not a disclaimer bolted on at the end.',
+    summary: 'The refusal list is part of the product.',
     paragraphs: [
-      'These limits are current engineering truths. If a future version removes one, the change needs evidence and a migration story, not a marketing sentence.',
+      'These limits are current engineering truths. If a future version removes one, the change needs evidence and a migration story.',
     ],
     bullets: [
       'No universal smell ID. The same molecule can smell different; the same smell can come from different mixtures.',

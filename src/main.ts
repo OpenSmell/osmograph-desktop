@@ -6,6 +6,7 @@ import * as Vial from './vials';
 import * as Domain from './domainPacks';
 import * as VialHost from './vialHost';
 import * as VialRuntime from './vialRuntime';
+import * as VialProfile from './vialProfile';
 import { fetchVialRegistry, type RegistryVialEntry } from './vialRegistry';
 import { GUIDE_SECTIONS, guideSection } from './guide';
 
@@ -71,6 +72,88 @@ let lastAnomalyReading: {
   state: 'unknown', score: null, confidence: null, alertLevel: 0,
   triggeredChannels: 0, consecutive: 0, warming: false, baselineProgress: 0,
 };
+
+/** A Vial's own detector verdict, keyed by Vial id. The base app keeps its
+ *  detector; a Vial profile never mutates the global one. */
+interface VialDetectorResult {
+  is_anomaly: boolean;
+  anomaly_votes: number;
+  max_confidence: number;
+  raw_score: number;
+  calibrated_confidence: number;
+  triggered_channels: number[];
+  max_delta: number;
+  alert_level: number;
+  alert_name: string;
+  consecutive_anomalies: number;
+  anomalous_seconds: number;
+  sensor_failures: unknown[];
+  degraded_sensors: number[];
+  warming_up: boolean;
+  baseline_progress: number;
+  smoothed: number[];
+}
+const vialDetectorResults = new Map<string, VialDetectorResult>();
+const vialDetectorResets = new Map<string, Promise<unknown>>();
+
+/** Compile a Vial's declared profile into its own Rust detector. The base
+ *  app's detection config is read once for the legacy fields and never
+ *  mutated, so two Vials can run different persistence and escalation. */
+async function syncVialDetector(pack: Domain.DomainPack, reset = false): Promise<void> {
+  if (!pack.anomaly) {
+    vialDetectorResults.delete(pack.id);
+    return;
+  }
+  try {
+    const pendingReset = vialDetectorResets.get(pack.id);
+    if (pendingReset) await pendingReset;
+    if (reset) await resetVialDetector(pack.id);
+    const base = await invoke<Record<string, unknown>>('detection_get_config');
+    const merged = { ...base, ...VialProfile.profileToDetectorConfig(pack.anomaly) };
+    await invoke('vial_detection_set_config', {
+      vialId: pack.id,
+      channels: Math.max(1, chNames.length || 1),
+      config: merged,
+    });
+  } catch (error) {
+    console.error('vial_detection_set_config failed', error);
+  }
+}
+
+function openVialPacks(): Domain.DomainPack[] {
+  const packs = [activeVialRuntime?.pack, homeVialRuntime?.pack]
+    .filter((pack): pack is Domain.DomainPack => !!pack);
+  const seen = new Set<string>();
+  return packs.filter((pack) => {
+    if (seen.has(pack.id)) return false;
+    seen.add(pack.id);
+    return true;
+  });
+}
+
+/** Recompile every open Vial after a rig layout change. A Vial opened before
+ *  the device announced its width must not keep a detector built for the
+ *  placeholder channel count. */
+function syncOpenVialDetectors(reset = false): void {
+  for (const pack of openVialPacks()) {
+    if (pack.anomaly) void syncVialDetector(pack, reset);
+  }
+}
+
+/** Feed one reading to a Vial detector. The result is read by the next host
+ *  snapshot; a failed call leaves the previous verdict in place. */
+async function feedVialDetector(pack: Domain.DomainPack, reading: number[]): Promise<void> {
+  if (!pack.anomaly || !connected) return;
+  try {
+    const result = await invoke<VialDetectorResult>('vial_detection_ingest', {
+      vialId: pack.id,
+      reading,
+    });
+    vialDetectorResults.set(pack.id, result);
+  } catch (error) {
+    if (import.meta.env.DEV) console.error('vial_detection_ingest failed', error);
+  }
+}
 
 // === Change Log (single-unit, label-free) ===
 // The live detector flags deviations from a learned baseline with no labels —
@@ -1624,6 +1707,11 @@ async function ingestReading(values: number[]) {
       warming: result.warming_up,
       baselineProgress: result.baseline_progress ?? 0,
     };
+    // Each open Vial gets the same reading through its own detector. The base
+    // detector above is never reconfigured by a Vial.
+    for (const pack of openVialPacks()) {
+      if (pack.anomaly) void feedVialDetector(pack, values);
+    }
     const stateKey = `${result.warming_up ? 1 : 0}:${result.is_anomaly ? 1 : 0}:${result.alert_level}`;
     if (import.meta.env.DEV) {
       const now = Date.now();
@@ -3562,6 +3650,7 @@ function setChannelCount(n: number, names?: string[]) {
     if (pc) pc.textContent = 'auto';
     updateRailCoord();
     refreshCalibrationViews();
+    syncOpenVialDetectors();
     return;
   }
   const next = Math.max(1, Math.min(64, Math.floor(n) || 1));
@@ -3583,6 +3672,7 @@ function setChannelCount(n: number, names?: string[]) {
   if (pc) pc.textContent = String(next);
   updateRailCoord();
   refreshCalibrationViews();
+  syncOpenVialDetectors();
 }
 
 // Apply a channel count learned from the live device (Rust `serial-auto` /
@@ -4375,8 +4465,32 @@ function channelLimitsFor(): Record<string, VialHost.ChannelLimit> {
 }
 
 function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost.VialHostSnapshot {
-  const warming = lastAnomalyReading.warming;
-  const anomalyState = lastAnomalyReading.state;
+  // A Vial with a profile reads its own detector. Legacy Vials and the base
+  // app read the global fail-safe verdict.
+  // A per-Vial detector only has a live verdict. A recording or a captured
+  // buffer must not inherit the last live result as if it were current.
+  const vialResult = runtime && runtime.source === 'live' && connected
+    ? vialDetectorResults.get(runtime.pack.id)
+    : undefined;
+  // A v2 profile is compiled for the live array. On a recording or a captured
+  // buffer it has no verdict, so the base app's live state is not a substitute.
+  const profileOffLive = !!runtime?.pack.anomaly && (!connected || runtime.source !== 'live');
+  const warming = profileOffLive ? false : vialResult ? vialResult.warming_up : lastAnomalyReading.warming;
+  const anomalyState: VialHost.AnomalyState = profileOffLive
+    ? 'unknown'
+    : vialResult
+      ? (vialResult.warming_up
+          ? 'unknown'
+          : vialResult.is_anomaly
+            ? (vialResult.alert_level >= 2 ? 'critical' : 'warning')
+            : 'normal')
+      : lastAnomalyReading.state;
+  const anomalyScore = profileOffLive ? null : vialResult ? vialResult.raw_score : lastAnomalyReading.score;
+  const anomalyConfidence = profileOffLive ? null : vialResult ? vialResult.calibrated_confidence : lastAnomalyReading.confidence;
+  const anomalyLevel = profileOffLive ? 0 : vialResult ? vialResult.alert_level : lastAnomalyReading.alertLevel;
+  const anomalyTriggered = profileOffLive ? 0 : vialResult ? vialResult.triggered_channels.length : lastAnomalyReading.triggeredChannels;
+  const anomalyConsecutive = profileOffLive ? 0 : vialResult ? vialResult.consecutive_anomalies : lastAnomalyReading.consecutive;
+  const baselineProgress = profileOffLive ? 0 : vialResult ? vialResult.baseline_progress : lastAnomalyReading.baselineProgress;
   return {
     schema: VialHost.VIAL_HOST_SCHEMA,
     takenAt: Date.now(),
@@ -4397,17 +4511,19 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
     environment: lastEnv ? { temperature: lastEnv.temperature, humidity: lastEnv.humidity } : null,
     baseline: {
       state: warming ? 'warming' : anomalyState === 'unknown' ? 'none' : 'ready',
-      progress: lastAnomalyReading.baselineProgress,
+      progress: baselineProgress,
       // Age only when observed in this session; null is honest elsewhere.
-      ageSec: baselineReadyAt !== null ? Math.max(0, Math.round((Date.now() - baselineReadyAt) / 1000)) : null,
+      ageSec: !vialResult && baselineReadyAt !== null
+        ? Math.max(0, Math.round((Date.now() - baselineReadyAt) / 1000))
+        : null,
     },
     anomaly: {
       state: anomalyState,
-      score: lastAnomalyReading.score,
-      confidence: lastAnomalyReading.confidence,
-      alertLevel: lastAnomalyReading.alertLevel,
-      triggeredChannels: lastAnomalyReading.triggeredChannels,
-      consecutive: lastAnomalyReading.consecutive,
+      score: anomalyScore,
+      confidence: anomalyConfidence,
+      alertLevel: anomalyLevel,
+      triggeredChannels: anomalyTriggered,
+      consecutive: anomalyConsecutive,
     },
     classifier: liveSnapshot?.loaded
       ? {
@@ -4418,7 +4534,13 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
         }
       : { state: 'none', name: null, label: null, confidence: null },
     channelLimits: channelLimitsFor(),
-    detectionConfig: runtime?.detectionConfig || null,
+    detectionConfig: runtime?.pack.anomaly
+      ? {
+          enabled: runtime.pack.anomaly.detection.enabled,
+          alertThreshold: runtime.pack.anomaly.detection.alertThreshold,
+          perChannelLimits: runtime.pack.anomaly.detection.perChannelLimits,
+        }
+      : runtime?.detectionConfig || null,
     detection: null,
     transformsApplied: runtime?.transforms
       ? [runtime.transforms.baseline, ...runtime.transforms.conditioning, runtime.transforms.response]
@@ -7033,7 +7155,7 @@ function saveVialFromModal(publish: boolean): void {
     renderVials();
     openVialDetail(vial.id);
     if (!publish) showToast('Vial draft saved. Validate it before using it for a decision.');
-    else if (vial.status === 'gated') showToast('Saved as Gated. Every critical check passed on the stored evidence. This is a local status — not external review, and not "Sealed".');
+    else if (vial.status === 'gated') showToast('Saved as Gated. Every critical check passed on the stored evidence. This is a local evidence status; a registry listing or signature is separate.');
     else showToast('Vial saved as Open. Validation failed — inspect the gate before using it.');
   } catch (err) {
     setVialError(err instanceof Error ? err.message : 'Could not save this Vial.');
@@ -7218,7 +7340,7 @@ function domainWidgetHtml(w: Domain.DomainWidget, pack: Domain.DomainPack, state
           <h2>${escapeHtmlText(w.title)}</h2>
         <p>${escapeHtmlText(w.subtitle)}</p>
         <p>${escapeHtmlText(pack.summary)}</p>
-        <p><b>Scope:</b> ${escapeHtmlText(pack.whatItIs)}</p>
+        <p><b>Scope:</b> ${escapeHtmlText(pack.scope || pack.whatItIs || '')}</p>
         <div class="domain-hero-note">${escapeHtmlText(w.note)}</div>
       </div>
       <div>${domainArtSvg(w.art)}</div>
@@ -7363,16 +7485,28 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
 }
 
 function registryRemotePacks(): RegistryVialEntry[] {
-  const installedIds = new Set(Domain.loadInstalledIds());
-  return registryEntries.filter(entry => {
-    if (!entry.manifestUrl) return false;
-    if (installedIds.has(entry.id)) return false;
-    return !Domain.domainPackById(entry.id);
-  });
+  return registryEntries.filter(entry => !!entry.manifestUrl);
 }
 
 function registryUnpublishedCount(): number {
   return registryEntries.filter(entry => !entry.manifestUrl).length;
+}
+
+function versionTuple(version: string): [number, number, number] {
+  const parts = version.split('.').map(p => parseInt(p, 10) || 0);
+  return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+}
+
+function versionGreater(a: string, b: string): boolean {
+  const [a0, a1, a2] = versionTuple(a);
+  const [b0, b1, b2] = versionTuple(b);
+  return a0 > b0 || (a0 === b0 && (a1 > b1 || (a1 === b1 && a2 > b2)));
+}
+
+function registryEntryHasUpdate(entry: RegistryVialEntry): boolean {
+  if (!Domain.loadInstalledIds().includes(entry.id)) return false;
+  const installed = Domain.domainPackById(entry.id);
+  return !!installed && versionGreater(entry.version, installed.version);
 }
 
 /** sha256 hex of a text payload, via the platform WebCrypto (secure context). */
@@ -7385,15 +7519,27 @@ async function sha256Hex(text: string): Promise<string> {
 function registryCardHtml(entry: RegistryVialEntry): string {
   let host = 'author-hosted';
   try { host = new URL(entry.manifestUrl || '').hostname; } catch { /* keep fallback */ }
+  const installed = Domain.domainPackById(entry.id);
+  const update = registryEntryHasUpdate(entry);
+  const installedActive = !!installed && Domain.loadInstalledIds().includes(entry.id);
+  const label = update
+    ? `Update to v${entry.version}`
+    : installedActive
+      ? `Reinstall v${entry.version}`
+      : 'Install from source';
+  const assets = entry.assets ? ` data-registry-assets="${escapeHtmlText(JSON.stringify(entry.assets))}"` : '';
+  const version = ` data-registry-version="${escapeHtmlText(entry.version)}"`;
   return `<div class="domain-card remote">
     <div class="domain-card-head">
       <div style="min-width:0"><div class="domain-card-name">${escapeHtmlText(entry.name)}</div><div class="domain-card-sub">v${escapeHtmlText(entry.version)} · ${escapeHtmlText(entry.author)}</div></div>
-      <span class="domain-card-state source">${entry.hasUi ? 'sandboxed UI' : 'manifest'}</span>
+      <span class="domain-card-state source">${update
+      ? `update from v${escapeHtmlText(installed?.version || '')}`
+      : `${entry.schema === 'osmograph.domain-pack/2' ? 'v2' : 'legacy · Ungated'}${entry.hasUi ? ' · UI' : ''}`}</span>
     </div>
     <div class="domain-card-tagline">${escapeHtmlText(entry.tagline)}</div>
     <div class="domain-card-meta">${escapeHtmlText(entry.domain)} · ${escapeHtmlText(entry.license)}${entry.evidence ? ` · evidence ${escapeHtmlText(entry.evidence)}` : ''} · ${escapeHtmlText(host)}</div>
     <div class="domain-card-actions">
-      <button class="mini-btn primary" type="button" data-registry-install="${escapeHtmlText(entry.manifestUrl || '')}" data-registry-id="${escapeHtmlText(entry.id)}"${entry.hash ? ` data-registry-hash="${escapeHtmlText(entry.hash)}"` : ''}>Install from source</button>
+      <button class="mini-btn primary" type="button" data-registry-install="${escapeHtmlText(entry.manifestUrl || '')}" data-registry-id="${escapeHtmlText(entry.id)}"${entry.hash ? ` data-registry-hash="${escapeHtmlText(entry.hash)}"` : ''}${version}${assets}>${escapeHtmlText(label)}</button>
       <a class="text-link domain-source" href="${escapeHtmlText(entry.manifestUrl || '')}" target="_blank" rel="noopener noreferrer">Source ↗</a>
     </div>
   </div>`;
@@ -7421,7 +7567,9 @@ function renderDomainArea(): void {
   const installedIds = new Set(Domain.loadInstalledIds());
   const installed = all.filter(p => installedIds.has(p.id));
   const available = all.filter(p => !installedIds.has(p.id));
-  const remote = registryRemotePacks();
+  const remoteAll = registryRemotePacks();
+  const updates = remoteAll.filter(registryEntryHasUpdate);
+  const remote = remoteAll.filter(entry => !installedIds.has(entry.id));
   if (installedHost) {
     installedHost.innerHTML = installed.length
       ? `<div class="domain-grid">${installed.map(p => domainCardHtml(p, true)).join('')}</div>`
@@ -7442,6 +7590,8 @@ function renderDomainArea(): void {
       <div class="domain-grid">
         ${available.length ? available.map(p => domainCardHtml(p, false)).join('') : '<div class="domain-empty">No local manifests. Fetch an author-hosted <b>vial.json</b> by URL, import a file, or start from the template.</div>'}
       </div>
+      ${updates.length ? `<div class="vials-section-head" style="margin-top:14px"><span>Updates</span><span class="coord-tag">${updates.length} newer version${updates.length === 1 ? '' : 's'} pinned in the registry</span></div>
+      <div class="domain-grid">${updates.map(registryCardHtml).join('')}</div>` : ''}
       <div class="vials-section-head" style="margin-top:14px"><span>From the registry</span><span class="coord-tag">${registryNote}</span></div>
       ${remote.length ? `<div class="domain-grid">${remote.map(registryCardHtml).join('')}</div>` : ''}`;
   }
@@ -7565,17 +7715,37 @@ async function fetchDomainUiAsset(pack: Domain.DomainPack, manifestUrl: string, 
   }
 }
 
-async function cacheDomainUi(pack: Domain.DomainPack, manifestUrl: string): Promise<void> {
+async function cacheDomainUi(
+  pack: Domain.DomainPack,
+  manifestUrl: string,
+  expected?: Record<string, string>,
+): Promise<Record<string, string>> {
+  // Fetch and verify everything before writing anything. A second asset that
+  // fails must not leave a half-updated cache behind a working install.
+  const pending: Array<{ kind: 'workspace' | 'home'; html: string; source: string }> = [];
+  const hashes: Record<string, string> = {};
   for (const kind of ['workspace', 'home'] as const) {
     const spec = kind === 'home' ? pack.homeUi : pack.ui;
     if (!spec) continue;
-    try {
-      const html = await fetchDomainUiAsset(pack, manifestUrl, kind);
-      Domain.saveDomainUi(uiCacheKey(pack.id, kind), pack.version, html, domainUiAssetUrl(pack, manifestUrl, kind) || undefined);
-    } catch {
-      // The declarative fallback still works offline if one asset is unavailable.
+    const pinned = expected?.[spec.entry];
+    if (expected && !pinned) {
+      throw new Error(`The registry does not pin ${spec.entry}. Refusing to install a reviewed Vial with an unpinned UI asset.`);
     }
+    const html = await fetchDomainUiAsset(pack, manifestUrl, kind);
+    if (pack.anomaly && /\b(?:setDetection|setTransforms)\b/.test(html)) {
+      throw new Error(`${spec.entry} calls a legacy detector override. A v2 profile is compiled from the manifest; remove setDetection/setTransforms from the UI.`);
+    }
+    const actual = await sha256Hex(html);
+    if (pinned && actual !== pinned.toLowerCase()) {
+      throw new Error(`${spec.entry} does not match the sha256 pinned in the registry. Refusing to run it.`);
+    }
+    hashes[spec.entry] = actual;
+    pending.push({ kind, html, source: domainUiAssetUrl(pack, manifestUrl, kind) || '' });
   }
+  for (const item of pending) {
+    Domain.saveDomainUi(uiCacheKey(pack.id, item.kind), pack.version, item.html, item.source || undefined);
+  }
+  return hashes;
 }
 
 function runtimeSourceOptions(): VialRuntime.VialSourceOption[] {
@@ -7777,7 +7947,61 @@ async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntim
   }
   recordVialTrajectory(runtime);
   const snapshot = currentHostSnapshot(runtime);
-  if (runtime.detectionConfig && series?.response) {
+  const profile = runtime.pack.anomaly;
+  const liveV2 = !!profile && connected && runtime.source === 'live';
+  if (profile && !liveV2) {
+    snapshot.detection = {
+      active: false,
+      triggeredChannels: [],
+      admissible: false,
+      reason: connected
+        ? 'The profile detector runs on the live array, not a recording.'
+        : 'The profile detector needs a connected rig; this is a captured buffer.',
+    };
+  } else if (profile && !vialDetectorResults.get(runtime.pack.id)) {
+    // The engine has not produced its first verdict yet. Do not substitute the
+    // base app's detector or the per-channel bands: they are a different program.
+    snapshot.detection = null;
+  } else if (vialDetectorResults.get(runtime.pack.id)) {
+    const vialResult = vialDetectorResults.get(runtime.pack.id)!;
+    const bands = profile?.detection.perChannelLimits || {};
+    const bandChannels = Object.keys(bands);
+    let result: VialHost.VialDetectionResult;
+    if (bandChannels.length && runtime.detectionConfig && series?.response) {
+      // The profile declares both a multivariate level budget and absolute
+      // per-channel bands. A Vial alert requires both: the engine must see a
+      // sustained multivariate change, and at least minChannels channels must
+      // clear their declared band. Neither lever is decorative.
+      const band = evaluateVialDetection(runtime.detectionConfig, snapshot, series);
+      const minChannels = Math.max(1, profile?.detection.minChannels || 1);
+      result = {
+        active: vialResult.is_anomaly && band.triggeredChannels.length >= minChannels,
+        triggeredChannels: band.triggeredChannels,
+      };
+    } else {
+      result = {
+        active: vialResult.is_anomaly,
+        triggeredChannels: vialResult.triggered_channels.map(i => snapshot.channels[i]?.id || `ch${i}`),
+      };
+    }
+    const channelLive: Record<string, boolean> = {};
+    for (const channel of snapshot.channels) {
+      const limit = snapshot.channelLimits[channel.id];
+      channelLive[channel.id] = !!limit && !limit.dead;
+    }
+    const admissibility = profile
+      ? VialProfile.profileAdmissibility(profile, {
+          baselineState: snapshot.baseline.state,
+          channelLive,
+        })
+      : { admissible: true, reason: null };
+    snapshot.detection = {
+      ...result,
+      active: admissibility.admissible && result.active,
+      admissible: admissibility.admissible,
+      reason: admissibility.reason,
+    };
+  } else if (runtime.detectionConfig && series?.response) {
     snapshot.detection = evaluateVialDetection(runtime.detectionConfig, snapshot, series);
   }
   const state = activeDomainState && activeDomainState.packId === runtime.pack.id
@@ -7813,6 +8037,7 @@ function vialRuntimeShellHtml(pack: Domain.DomainPack): string {
       <span class="vial-runtime-stamp" id="vialRuntimeStamp">starting…</span>
       <span class="vial-runtime-lock" title="Unsigned sandboxed UI: no file, network, storage, or Tauri access">host-owned data · sandboxed UI · unsigned</span>
       ${sourceHost ? `<a class="text-link" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer">${escapeHtmlText(sourceHost)} ↗</a>` : ''}
+      <button class="mini-btn" type="button" id="vialReportBtn" title="Open a prefilled issue with this Vial's id, version, and hashes">Report a problem</button>
       <button class="mini-btn" type="button" id="vialRuntimeReload">Reload UI</button>
     </div>
     <iframe id="vialRuntimeFrame" class="vial-runtime-frame" sandbox="allow-scripts" referrerpolicy="no-referrer" title="${escapeHtmlText(pack.name)} sandboxed Vial UI"></iframe>
@@ -7828,12 +8053,34 @@ function destroyRuntime(runtime: ActiveVialRuntime | null, clearFrame = true): v
   if (homeVialRuntime === runtime) homeVialRuntime = null;
 }
 
+function resetVialDetector(id: string): Promise<unknown> {
+  vialDetectorResults.delete(id);
+  const reset = invoke('vial_detection_reset', { vialId: id }).catch((error) => {
+    if (import.meta.env.DEV) console.error('vial_detection_reset failed', error);
+  });
+  vialDetectorResets.set(id, reset);
+  void reset.finally(() => {
+    if (vialDetectorResets.get(id) === reset) vialDetectorResets.delete(id);
+  });
+  return reset;
+}
+
+function releaseVialDetector(id: string | null): void {
+  if (!id) return;
+  if (activeVialRuntime?.pack.id === id || homeVialRuntime?.pack.id === id) return;
+  void resetVialDetector(id);
+}
+
 function destroyVialRuntime(clearFrame = true): void {
+  const id = activeVialRuntime?.pack.id || null;
   destroyRuntime(activeVialRuntime, clearFrame);
+  releaseVialDetector(id);
 }
 
 function destroyHomeVialRuntime(clearFrame = true): void {
+  const id = homeVialRuntime?.pack.id || null;
   destroyRuntime(homeVialRuntime, clearFrame);
+  releaseVialDetector(id);
 }
 
 const VIAL_TRAJECTORY_KEY = 'osmograph.vial.trajectory.';
@@ -7902,15 +8149,33 @@ function loadVialTrajectorySpec(packId: string): { fields: string[]; intervalMs:
   }
 }
 
-function vialProgrammableState(packId: string): Pick<
+function vialProgrammableState(pack: Domain.DomainPack): Pick<
   ActiveVialRuntime,
   'transforms' | 'detectionConfig' | 'trajectoryFields' | 'trajectoryIntervalMs' | 'trajectory' | 'lastTrajectoryAt'
 > {
-  const trajectory = loadVialTrajectory(packId);
-  const spec = loadVialTrajectorySpec(packId);
+  const trajectory = loadVialTrajectory(pack.id);
+  const spec = loadVialTrajectorySpec(pack.id);
+  // A v2 profile is the program. Its transforms and detection settings are
+  // compiled from the manifest, so a stale localStorage override cannot
+  // silently change what the author declared.
+  const profileTransforms = pack.anomaly
+    ? {
+        baseline: pack.anomaly.baseline.protocol,
+        response: pack.anomaly.transforms.response,
+        conditioning: pack.anomaly.transforms.conditioning,
+        r0WindowS: pack.anomaly.baseline.r0WindowS,
+      }
+    : null;
+  const profileDetection = pack.anomaly
+    ? {
+        enabled: pack.anomaly.detection.enabled,
+        alertThreshold: pack.anomaly.detection.alertThreshold,
+        perChannelLimits: pack.anomaly.detection.perChannelLimits,
+      }
+    : null;
   return {
-    transforms: loadVialTransforms(packId),
-    detectionConfig: loadVialDetection(packId),
+    transforms: profileTransforms || loadVialTransforms(pack.id),
+    detectionConfig: profileDetection || loadVialDetection(pack.id),
     trajectoryFields: spec.fields,
     trajectoryIntervalMs: spec.intervalMs,
     trajectory,
@@ -7921,7 +8186,7 @@ function vialProgrammableState(packId: string): Pick<
 function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
   const iframe = document.getElementById('vialRuntimeFrame') as HTMLIFrameElement | null;
   if (!iframe) return;
-  destroyVialRuntime(false);
+  destroyRuntime(activeVialRuntime, false);
   const sources = runtimeSourceOptions();
   const saved = localStorage.getItem(VIAL_SOURCE_KEY + pack.id);
   const preferred = saved && sources.some(s => s.id === saved) ? saved : '';
@@ -7940,9 +8205,10 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
     mount: 'workspace',
     destroyed: false,
     uiHtml,
-    ...vialProgrammableState(pack.id),
+    ...vialProgrammableState(pack),
   };
   activeVialRuntime = runtime;
+  void syncVialDetector(pack);
   iframe.style.height = `${pack.ui?.height || 900}px`;
   iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
   iframe.addEventListener('load', () => {
@@ -7963,6 +8229,7 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
     runtime.iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
     showToast('Vial UI reloaded from the same sandbox.');
   });
+  document.getElementById('vialReportBtn')?.addEventListener('click', () => { void reportVialIssue(pack); });
 }
 
 // Home belongs to the instrument. A Vial with a home.html gets one compact
@@ -8110,7 +8377,7 @@ function renderHomeTakeover(pack: Domain.DomainPack, homeHtml: string): void {
 function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: string): void {
   const iframe = document.getElementById(frameId) as HTMLIFrameElement | null;
   if (!iframe) return;
-  destroyHomeVialRuntime(false);
+  destroyRuntime(homeVialRuntime, false);
   const sources = runtimeSourceOptions();
   const saved = localStorage.getItem(VIAL_SOURCE_KEY + pack.id);
   const preferred = saved && sources.some(s => s.id === saved) ? saved : '';
@@ -8127,9 +8394,10 @@ function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: 
     mount: 'home',
     destroyed: false,
     uiHtml,
-    ...vialProgrammableState(pack.id),
+    ...vialProgrammableState(pack),
   };
   homeVialRuntime = runtime;
+  void syncVialDetector(pack);
   iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
   iframe.addEventListener('load', () => {
     if (runtime.destroyed) return;
@@ -8247,6 +8515,10 @@ function handleVialAction(runtime: ActiveVialRuntime, action: VialRuntime.VialAc
       break;
     }
     case 'set-detection': {
+      if (runtime.pack.anomaly) {
+        showToast('This Vial’s detection profile is compiled from its manifest. Update the Vial to change it.');
+        return;
+      }
       const snapshot = currentHostSnapshot(runtime);
       if (snapshot.source !== 'live') {
         showToast('Detection is only configurable on a live rig.');
@@ -8281,6 +8553,10 @@ function handleVialAction(runtime: ActiveVialRuntime, action: VialRuntime.VialAc
       break;
     }
     case 'set-transforms': {
+      if (runtime.pack.anomaly) {
+        showToast('This Vial’s transforms are declared in its manifest. Update the Vial to change them.');
+        return;
+      }
       const baseline = action.baseline as VialRuntime.VialBaseline;
       const response = action.response as VialRuntime.VialResponse;
       if (!VialRuntime.VIAL_BASELINES.includes(baseline)
@@ -8608,7 +8884,7 @@ const COMMANDS: CommandAction[] = [
   { id: 'template', group: 'Vials', title: 'Download starter domain Vial', hint: 'authoring template', run: () => downloadDomainTemplate() },
   { id: 'guide-start', group: 'Guide', title: 'Field guide: Start here', hint: 'scope', run: () => openGuide('start') },
   { id: 'guide-check', group: 'Guide', title: 'Field guide: How Separability works', hint: 'method', run: () => openGuide('check') },
-  { id: 'guide-vials', group: 'Guide', title: 'Field guide: Vial validation', hint: 'seals + limits', run: () => openGuide('vials') },
+  { id: 'guide-vials', group: 'Guide', title: 'Field guide: Vial validation', hint: 'gate + limits', run: () => openGuide('vials') },
   { id: 'guide-domain', group: 'Guide', title: 'Field guide: Domain Vials', hint: 'policy + limits', run: () => openGuide('domain') },
   { id: 'guide-authoring', group: 'Guide', title: 'Field guide: Authoring a domain Vial', hint: 'schema + gate', run: () => openGuide('authoring') },
   { id: 'guide-data', group: 'Guide', title: 'Field guide: Data provenance', hint: 'licences', run: () => openGuide('data') },
@@ -8730,10 +9006,23 @@ document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   if (tabGo?.dataset.vialsTabGo) { setVialsTab(tabGo.dataset.vialsTabGo); return; }
   const registryInstall = target.closest<HTMLButtonElement>('[data-registry-install]');
   if (registryInstall?.dataset.registryInstall) {
+    let assets: Record<string, string> = {};
+    try {
+      const parsed = JSON.parse(registryInstall.dataset.registryAssets || '{}') as unknown;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        assets = Object.fromEntries(
+          Object.entries(parsed as Record<string, unknown>)
+            .filter(([, value]) => typeof value === 'string' && /^[a-f0-9]{64}$/i.test(value))
+            .map(([key, value]) => [key, value as string]),
+        );
+      }
+    } catch { /* no pinned assets */ }
     void installRegistryManifest(
       registryInstall.dataset.registryInstall,
       registryInstall.dataset.registryId || '',
       registryInstall.dataset.registryHash || '',
+      registryInstall.dataset.registryVersion || '',
+      assets,
       registryInstall,
     );
     return;
@@ -8898,6 +9187,7 @@ function syncVialsTabs(): void {
 function setVialsTab(tab: string): void {
   if (tab !== 'workspaces' && tab !== 'decisions' && tab !== 'aromatory') return;
   activeVialsTab = tab;
+  if (tab === 'aromatory') renderDomainArea();
   syncVialsTabs();
 }
 
@@ -9048,7 +9338,7 @@ function exportDomainPack(id: string): void {
 
 function starterDomainPack(): Domain.DomainPack {
   return {
-    schema: 'osmograph.domain-pack/1',
+    schema: 'osmograph.domain-pack/2',
     id: 'vial.my-workspace',
     name: 'My domain workspace',
     version: '0.1.0',
@@ -9057,9 +9347,18 @@ function starterDomainPack(): Domain.DomainPack {
     risk: 'medium',
     domain: 'custom',
     tagline: 'A short, honest line about the decision this workspace supports.',
-    summary: 'Explain the narrow, repeated decision this workspace is for, the context it records, and the evidence it refuses to claim.',
-    whatItIs: 'A protocol and a log for a narrow domain task. Replace this with the specific useful thing your workspace helps a person do.',
-    whatItIsNot: 'Validated on the array and protocol recorded above. Replace this with the operating envelope, including the conditions where the check refuses.',
+    summary: 'Explain the narrow, repeated decision this workspace is for, the context it records, and the evidence behind it.',
+    scope: 'A protocol, a detector profile, and a log for one repeated domain decision. Replace this with the specific decision your workspace supports.',
+    limits: ['Replace this with the conditions where the profile refuses to arm or where the user must stop.'],
+    anomaly: structuredClone(VialProfile.VIAL_PROFILE_DEFAULTS),
+    evidence: {
+      grade: 'D',
+      reportUrl: '',
+      measuredAt: '',
+      dataset: '',
+      metrics: {},
+      fixtures: [],
+    },
     citations: [
       'Replace with a real reference: author, year, title, venue. A citation is not decoration; it is the context for your claims.',
     ],
@@ -9069,15 +9368,15 @@ function starterDomainPack(): Domain.DomainPack {
       { type: 'metrics', title: 'What this workspace can claim', items: [
         { label: 'Signal', value: 'Change detection', hint: 'Same array, same sample preparation, against your own baseline.' },
         { label: 'Scope', value: 'Closed set', hint: 'State the array, protocol, and operating envelope.' },
-        { label: 'Primary record', value: 'Context + log', hint: 'The sensor is one column, not the verdict.' },
+        { label: 'Primary record', value: 'Context + log', hint: 'The sensor is one column; the primary measurement decides.' },
       ] },
-      { type: 'detector', title: 'Detector contract', intro: 'If this workspace uses the live anomaly engine, copy this panel and replace the domain-specific actions. Do not invent a second detector.', baseline: 'A fresh clean-air window on this exact array. Verify a quiet baseline before you arm it.', levels: [
+      { type: 'detector', title: 'Detector contract', intro: 'If this workspace uses the live anomaly engine, copy this panel and replace the domain-specific actions. Use the host detector and declare the profile in the manifest.', baseline: 'A fresh clean-air window on this exact array. Verify a quiet baseline before you arm it.', levels: [
         { level: 0, label: 'Warming up', meaning: 'The baseline is still forming; no alarm is possible.', action: 'Keep the baseline window stable. Do not arm yet.' },
         { level: 1, label: 'Warning', meaning: 'A sustained change from the baseline.', action: 'Stop and inspect. Verify with the primary measurement.' },
-        { level: 2, label: 'Critical', meaning: 'The change persisted past the critical duration.', action: 'Follow the domain stop rule. Do not treat the alert as an identification.' },
+        { level: 2, label: 'Critical', meaning: 'The change persisted past the critical duration.', action: 'Follow the domain stop rule. Confirm the cause with the primary measurement.' },
       ], limits: [
-        'The detector is same-device and same-array only. A baseline from another rig does not transfer.',
-        'A change is not an identity, a concentration, or a safety verdict.',
+        'Scope the profile to this device and this array; a baseline from another rig needs its own calibration.',
+        'A change is evidence for the person to interpret; identity, concentration, and safety decisions need their own primary measurements.',
       ], evidence: 'State the evidence behind the detector mapping, or remove this panel if the workspace does not use the live anomaly engine.' },
       { type: 'tracking', title: 'Workspace log', description: 'Replace these fields with the ones a practitioner would actually keep.', fields: [
         { id: 'batch', label: 'Batch / subject', type: 'text', placeholder: 'Batch 01' },
@@ -9162,9 +9461,17 @@ interface FetchedDomainManifest {
   finalUrl: URL;
   /** The manifest bytes as fetched, for hash verification. */
   text: string;
+  /** sha256 of the manifest bytes. */
+  manifestHash: string;
+  /** sha256 of each UI asset that was fetched and cached. */
+  assetHashes: Record<string, string>;
 }
 
-async function fetchDomainManifest(raw: string, timeoutMs = 20000): Promise<FetchedDomainManifest> {
+async function fetchDomainManifest(
+  raw: string,
+  timeoutMs = 20000,
+  expected?: { hash?: string; assets?: Record<string, string> },
+): Promise<FetchedDomainManifest> {
   const url = new URL(raw.trim());
   if (!domainUrlAllowed(url)) {
     throw new Error('Use https:// for a remote manifest. http://localhost is allowed for development only.');
@@ -9186,9 +9493,21 @@ async function fetchDomainManifest(raw: string, timeoutMs = 20000): Promise<Fetc
     if (text.length > 1_500_000) {
       throw new Error('That manifest is larger than 1.5 MB. Refusing to install it.');
     }
-    const result = Domain.importDomainPackJson(text, finalUrl.toString());
-    if (result.pack.ui || result.pack.homeUi) await cacheDomainUi(result.pack, finalUrl.toString());
-    return { result, finalUrl, text };
+    // Parse and gate *before* writing anything. A registry install must verify
+    // the fetched bytes against the pinned hashes before the pack can replace a
+    // working one on disk.
+    const result = Domain.parseDomainPackJson(text, finalUrl.toString());
+    const manifestHash = await sha256Hex(text);
+    const wantManifest = expected?.hash?.toLowerCase();
+    if (wantManifest && manifestHash !== wantManifest) {
+      throw new Error('The manifest on disk does not match the sha256 recorded in the registry — it changed upstream. Refusing to install; check the source repo.');
+    }
+    result.pack.manifestHash = manifestHash;
+    const assetHashes = (result.pack.ui || result.pack.homeUi)
+      ? await cacheDomainUi(result.pack, finalUrl.toString(), expected?.assets)
+      : {};
+    result.pack.assetHashes = assetHashes;
+    return { result, finalUrl, text, manifestHash, assetHashes };
   } catch (err) {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error(`The download timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
@@ -9229,6 +9548,9 @@ async function installDomainFromUrl(raw: string): Promise<void> {
   try {
     const fetched = await fetchDomainManifest(url.toString());
     setDomainUrlStatus('Fetched. Running the local policy gate…', 'busy');
+    // The pack is written only after the gate passes and, when the source is
+    // the registry, after the pinned manifest and UI hashes verify.
+    Domain.saveCustomPack(fetched.result.pack);
     Domain.installDomainPack(fetched.result.pack.id);
     hideDomainUrlBar();
     if (input) input.value = '';
@@ -9247,29 +9569,35 @@ async function installDomainFromUrl(raw: string): Promise<void> {
   }
 }
 
-async function installRegistryManifest(url: string, id: string, expectedHash: string, button: HTMLButtonElement): Promise<void> {
+async function installRegistryManifest(
+  url: string,
+  id: string,
+  expectedHash: string,
+  expectedVersion: string,
+  expectedAssets: Record<string, string>,
+  button: HTMLButtonElement,
+): Promise<void> {
   if (!url) return;
   const previous = button.textContent || 'Install from source';
   button.disabled = true;
   button.textContent = 'Fetching…';
+  const wasInstalled = Domain.loadInstalledIds().includes(id);
   try {
-    const fetched = await fetchDomainManifest(url);
+    const fetched = await fetchDomainManifest(url, 20000, { hash: expectedHash, assets: expectedAssets });
     if (fetched.result.pack.id !== id) {
       throw new Error('The manifest id does not match its registry entry. Refusing to install it.');
     }
-    if (expectedHash) {
-      const actual = await sha256Hex(fetched.text);
-      if (actual !== expectedHash.toLowerCase()) {
-        throw new Error('The manifest on disk does not match the sha256 recorded in the registry — it changed upstream. Refusing to install; check the source repo.');
-      }
+    if (expectedVersion && fetched.result.pack.version !== expectedVersion) {
+      throw new Error(`The manifest version ${fetched.result.pack.version} does not match the registry entry ${expectedVersion}. Refusing to install it.`);
     }
+    Domain.saveCustomPack(fetched.result.pack);
     Domain.installDomainPack(fetched.result.pack.id);
     renderVials();
     renderVialHome();
     openDomainWorkspace(fetched.result.pack.id);
     const passed = fetched.result.validation.checks.filter(c => c.passed).length;
     const hashNote = expectedHash ? ' sha256 verified.' : '';
-    showToast(`Installed ${fetched.result.pack.name} from ${fetched.finalUrl.hostname}. ${passed}/${fetched.result.validation.checks.length} policy checks passed.${hashNote}`);
+    showToast(`${wasInstalled ? 'Updated' : 'Installed'} ${fetched.result.pack.name} to v${fetched.result.pack.version} from ${fetched.finalUrl.hostname}. ${passed}/${fetched.result.validation.checks.length} policy checks passed.${hashNote}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Could not install that manifest.';
     showToast(message);
@@ -9410,7 +9738,7 @@ function importVialFile(file: File): void {
     const text = String(reader.result || '');
     try {
       const parsed = JSON.parse(text) as { schema?: unknown };
-      if (parsed?.schema === 'osmograph.domain-pack/1') {
+      if (parsed?.schema === 'osmograph.domain-pack/1' || parsed?.schema === 'osmograph.domain-pack/2') {
         importDomainPackText(text);
         return;
       }
@@ -9420,7 +9748,7 @@ function importVialFile(file: File): void {
       renderVials();
       openVialDetail(checked.id);
       showToast(checked.status === 'gated'
-        ? 'Vial imported, local gate passed. This is a local status — not external review, and not a "Sealed" signature.'
+        ? 'Vial imported, local gate passed. This is a local evidence status; a registry listing or signature is separate.'
         : 'Vial imported ungated. Its evidence does not pass the local gate.');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Could not import this Vial.');
@@ -13212,6 +13540,7 @@ function adoptLiveLink(): void {
   devTap('link', { connected: true, adopted: true, mode: activeMode });
   lastDataAt = Date.now();
   resetLiveBaseline();
+  syncOpenVialDetectors(true);
   const btn = document.getElementById('connectBtn');
   if (btn) btn.textContent = 'Disconnect';
   const dot = document.getElementById('statusDot');
@@ -15081,6 +15410,74 @@ async function reportIssue(): Promise<void> {
   }
 }
 document.getElementById('reportIssueBtn')?.addEventListener('click', () => { void reportIssue(); });
+
+/** A Vial report carries the identity of the Vial that failed, not just the
+ *  host. If the Vial names a GitHub source, the author's tracker is the
+ *  destination; otherwise the report lands in the Osmograph issue queue with
+ *  the id, version, hashes, and profile so it can be reproduced. */
+async function reportVialIssue(pack: Domain.DomainPack): Promise<void> {
+  const version = await getVersion().catch(() => 'dev');
+  const linkText = document.getElementById('plotLinkState')?.textContent?.trim() || 'unknown';
+  const rig = connected
+    ? `${activeMode || 'serial'} · ${activePort || '—'} @ ${activeBaud || '—'} · ${channelCount || 'auto'} channels · ${liveRateHz.toFixed(1)} Hz`
+    : `not connected · last mode ${activeMode || 'none'}`;
+  const source = pack.sourceUrl || '';
+  const github = source.match(/^https:\/\/github\.com\/([^/]+)\/([^/?#]+)/i);
+  const endpoint = github
+    ? `https://github.com/${github[1]}/${github[2]}/issues/new`
+    : 'https://github.com/OpenSmell/osmograph-desktop/issues/new';
+  const assetHashes = pack.assetHashes && Object.keys(pack.assetHashes).length
+    ? Object.entries(pack.assetHashes).map(([name, hash]) => `  ${name}: ${hash}`).join('\n')
+    : '  none verified';
+  const body = [
+    '## What happened',
+    '',
+    '',
+    '## What you expected',
+    '',
+    '',
+    '## Steps to reproduce',
+    '1. ',
+    '',
+    '<details><summary>Vial identity</summary>',
+    '',
+    '```',
+    `Vial: ${pack.id} v${pack.version} — ${pack.name}`,
+    `Author: ${pack.author}`,
+    `Manifest sha256: ${pack.manifestHash || 'unknown (installed before hash pinning)'}`,
+    `Source: ${source || 'no source URL recorded'}`,
+    `Profile: ${pack.anomaly ? VialProfile.profileSummary(pack.anomaly) : 'legacy manifest (no programmable profile)'}`,
+    `Assets:`,
+    assetHashes,
+    '```',
+    '',
+    '</details>',
+    '',
+    '<details><summary>Diagnostics (no recordings)</summary>',
+    '',
+    '```',
+    `Osmograph ${version}`,
+    `Platform: ${navigator.platform}`,
+    `UA: ${navigator.userAgent}`,
+    `Rig: ${rig}`,
+    `Link: ${linkText} · ${sampleCount} samples this session`,
+    `Vials: ${Vial.loadVials().length} decisions · ${Domain.allDomainPacks().length} domain packs`,
+    recentFailures.length ? `Recent failures:\n${recentFailures.join('\n')}` : 'Recent failures: none captured',
+    '```',
+    '',
+    '</details>',
+  ].join('\n');
+  const title = `${github ? '[Vial]' : '[Vial report]'} ${pack.id} v${pack.version} — `;
+  const url = `${endpoint}?${new URLSearchParams({ title, body })}`;
+  try {
+    await invoke('open_https_url', { url });
+    showToast(github
+      ? `Opened a prefilled issue on ${github[1]}/${github[2]}. Edit it there, then Submit.`
+      : 'Opened a prefilled Osmograph issue with this Vial’s identity. Edit it there, then Submit.');
+  } catch (e) {
+    showToast(`Could not open the browser: ${e}`);
+  }
+}
 
 // Restore persisted policy onto the radios.
 (function initUpdatePolicy() {

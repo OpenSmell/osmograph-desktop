@@ -82,6 +82,11 @@ export interface TrajectoryPoint {
 export interface VialDetectionResult {
   active: boolean;
   triggeredChannels: string[];
+  /** False when the profile's admissibility gate refuses to arm (baseline
+   *  not ready, or channel coverage below the declared minimum). */
+  admissible?: boolean;
+  /** Why the profile is not admissible, or null. */
+  reason?: string | null;
 }
 
 /** The only live state a Vial is allowed to depend on. */

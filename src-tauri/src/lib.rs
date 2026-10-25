@@ -16,6 +16,7 @@ use data::osmell::{
 };
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -59,6 +60,12 @@ pub struct AppState {
     pub oled_config: Arc<Mutex<OledConfig>>,
     pub buzzer_config: Arc<Mutex<BuzzerConfig>>,
     pub detection_config: Arc<Mutex<opensmell::DetectionConfig>>,
+    /// One host-owned detector per open Vial. A Vial's manifest profile is
+    /// applied here, so two Vials can watch the same array with different
+    /// persistence, hysteresis, and escalation without changing each other.
+    pub vial_detectors: Arc<Mutex<HashMap<String, FailSafeSystem>>>,
+    /// Per-Vial wall-clock gates for the dt-aware detector path.
+    pub vial_sample_times: Arc<Mutex<HashMap<String, Option<f64>>>>,
     pub last_alert_level: Arc<Mutex<u8>>,
     /// Wall-clock (epoch seconds) of the last reading fed to the detectors, so
     /// the dt-aware fail-safe path scores with the *real* inter-sample gap
@@ -99,6 +106,8 @@ impl Default for AppState {
             oled_config: Arc::new(Mutex::new(OledConfig::default())),
             buzzer_config: Arc::new(Mutex::new(BuzzerConfig::default())),
             detection_config: Arc::new(Mutex::new(opensmell::DetectionConfig::default())),
+            vial_detectors: Arc::new(Mutex::new(HashMap::new())),
+            vial_sample_times: Arc::new(Mutex::new(HashMap::new())),
             last_alert_level: Arc::new(Mutex::new(0)),
             last_sample_time: Arc::new(Mutex::new(None)),
             fleet: Arc::new(Mutex::new(Vec::new())),
@@ -3382,6 +3391,69 @@ fn detection_set_config(
     Ok(config)
 }
 
+/// Apply a Vial's declared anomaly profile to that Vial's own detector.
+/// The detector is created on first use and kept for the session; the base
+/// app's detector is untouched.
+#[tauri::command]
+fn vial_detection_set_config(
+    state: State<AppState>,
+    vial_id: String,
+    channels: usize,
+    config: opensmell::DetectionConfig,
+) -> Result<(), String> {
+    let n = channels.max(1);
+    let mut detectors = state.vial_detectors.lock().map_err(|e| e.to_string())?;
+    let detector = detectors
+        .entry(vial_id.clone())
+        .or_insert_with(|| FailSafeSystem::new(n));
+    // Channel count is fixed at construction. A layout change (a different rig
+    // or a replay with a different width) starts a fresh detector rather than
+    // scoring a 6-channel profile against a 2-channel array.
+    if detector.n_channels != n {
+        *detector = FailSafeSystem::new(n);
+    }
+    detector.set_config(config);
+    state
+        .vial_sample_times
+        .lock()
+        .map_err(|e| e.to_string())?
+        .insert(vial_id, None);
+    Ok(())
+}
+
+/// Feed one live reading to a Vial's detector and return its own verdict.
+#[tauri::command]
+fn vial_detection_ingest(
+    state: State<AppState>,
+    vial_id: String,
+    reading: Vec<f64>,
+) -> Result<FailSafeResult, String> {
+    let mut detectors = state.vial_detectors.lock().map_err(|e| e.to_string())?;
+    let detector = detectors
+        .get_mut(&vial_id)
+        .ok_or_else(|| "This Vial has no detector; open its workspace first.".to_string())?;
+    let mut times = state.vial_sample_times.lock().map_err(|e| e.to_string())?;
+    let last = times.entry(vial_id).or_insert(None);
+    let dt_s = advance_sample_gate(last, detector.sample_period_s());
+    detector.detect_with_dt(&reading, dt_s).map_err(|e| e.to_string())
+}
+
+/// Drop a Vial's detector when its workspace closes.
+#[tauri::command]
+fn vial_detection_reset(state: State<AppState>, vial_id: String) -> Result<(), String> {
+    state
+        .vial_detectors
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&vial_id);
+    state
+        .vial_sample_times
+        .lock()
+        .map_err(|e| e.to_string())?
+        .remove(&vial_id);
+    Ok(())
+}
+
 // === Data Commons ===
 
 #[tauri::command]
@@ -3800,6 +3872,9 @@ pub fn run() {    env_logger::init();
             buzzer_set_config,
             detection_get_config,
             detection_set_config,
+            vial_detection_set_config,
+            vial_detection_ingest,
+            vial_detection_reset,
             commons_submit,
             export_and_submit_commons,
             get_data_dir,

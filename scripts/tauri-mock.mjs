@@ -114,6 +114,24 @@ export const MOCK = String.raw`
       }
       case 'detection_get_config': return ok({ smoothing_alpha: 0.6, drift_alpha: 0.002, sensitivity: 1.0 });
       case 'detection_set_config': return ok(null);
+      case 'vial_detection_set_config': return ok(null);
+      case 'vial_detection_reset': return ok(null);
+      case 'vial_detection_ingest': {
+        self.vialDetN = (self.vialDetN || 0) + 1;
+        const warming = self.vialDetN <= 40;
+        const isAnom = !warming && self.vialDetN > 90;
+        return ok({
+          is_anomaly: isAnom, anomaly_votes: isAnom ? 3 : 0,
+          max_confidence: isAnom ? 0.84 : 0.12,
+          raw_score: isAnom ? 3.4 : 0.5,
+          calibrated_confidence: isAnom ? 0.84 : 0.12,
+          triggered_channels: isAnom ? [1, 2, 3] : [],
+          max_delta: isAnom ? 0.12 : 0.01, alert_level: isAnom ? 1 : 0,
+          alert_name: isAnom ? 'warning' : 'normal', consecutive_anomalies: isAnom ? 4 : 0,
+          anomalous_seconds: isAnom ? 1.2 : 0, sensor_failures: [], degraded_sensors: [],
+          warming_up: warming, baseline_progress: Math.min(1, self.vialDetN / 40), smoothed: CH,
+        });
+      }
       case 'compute_phenotype': return ok({
         has_data: self.detN > 20, n_channels: 6, reference_geometry: true,
         per_channel: CH.map((_, i) => ({ channel: i, direction: i < 4 ? 'reducing' : 'oxidizing', delta: 0.12 + i * 0.02, cv: 0.01 + i * 0.002 })),
