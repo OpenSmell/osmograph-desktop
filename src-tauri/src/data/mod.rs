@@ -17,6 +17,7 @@ pub mod export;
 pub mod hub;
 pub mod dataset_io;
 pub mod journal;
+pub mod collections;
 
 use std::fs;
 use std::io::Write;
@@ -385,6 +386,18 @@ pub struct SessionRecord {
     /// replaced by the full QualityReportPanel subscores in the quality-parity phase.
     #[serde(default)]
     pub quality: f64,
+    /// Collection/corpus this recording belongs to. Filled at import time from
+    /// the folder structure, so the library no longer has to guess from a path.
+    #[serde(default)]
+    pub collection_id: String,
+    #[serde(default)]
+    pub collection_name: String,
+    /// Source split (`Training`, `Testing`, `test_seen`, …) when the corpus has one.
+    #[serde(default)]
+    pub split: String,
+    /// Per-record condition inside the split (`run 5`, `day 3`, `ingestion balanced`).
+    #[serde(default)]
+    pub condition: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,10 +407,13 @@ pub struct SessionIndex {
     pub records: Vec<SessionRecord>,
 }
 
+/// Bumped when the index gains derived fields that older builds cannot fill.
+pub const INDEX_VERSION: u32 = 2;
+
 impl Default for SessionIndex {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: INDEX_VERSION,
             updated: now_secs(),
             records: Vec::new(),
         }
@@ -414,11 +430,99 @@ impl SessionIndex {
     pub fn load(dir: &Path) -> Self {
         let path = dir.join(".session_index.json");
         if let Ok(text) = fs::read_to_string(&path) {
-            if let Ok(idx) = serde_json::from_str::<SessionIndex>(&text) {
+            if let Ok(mut idx) = serde_json::from_str::<SessionIndex>(&text) {
+                if idx.migrate(dir) {
+                    let _ = idx.save(dir);
+                }
                 return idx;
             }
         }
         Self::default()
+    }
+
+    /// Repair indexes written by the filename-only importer. Idempotent: once
+    /// `version` is current and the records carry collection fields, this only
+    /// normalises a missing field.
+    fn migrate(&mut self, dir: &Path) -> bool {
+        let mut changed = false;
+        if self.version < INDEX_VERSION {
+            self.version = INDEX_VERSION;
+            changed = true;
+        }
+        let mut out: Vec<SessionRecord> = Vec::with_capacity(self.records.len());
+        let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for mut r in std::mem::take(&mut self.records) {
+            let path_norm = r.csv_path.replace('\\', "/");
+            let c = self::collections::classify(Path::new(&r.csv_path), dir);
+            // Folder structure, not the old label, decides what is an import.
+            // Legacy indexes mislabelled some root recordings as "Imported".
+            let imported = path_norm.contains("/datasets/")
+                || path_norm.contains("/legacy/")
+                || path_norm.contains("/derived/")
+                || (!c.collection_id.is_empty() && c.collection_id != "own");
+            if imported {
+                let id = self::collections::stable_import_id(&path_norm);
+                if r.file_id != id {
+                    r.file_id = id;
+                    changed = true;
+                }
+                let label = self::collections::display_label(&c);
+                if !c.substance.is_empty() && r.substance != c.substance {
+                    r.substance = c.substance.clone();
+                    changed = true;
+                }
+                if (r.label.is_empty() || r.label == "Imported") && r.label != label {
+                    r.label = label;
+                    changed = true;
+                }
+            } else {
+                if r.substance.trim().is_empty() && !c.substance.is_empty() {
+                    r.substance = c.substance.clone();
+                    changed = true;
+                }
+                if (r.label.is_empty() || r.label == "Imported") && r.label != "Recorded" {
+                    r.label = "Recorded".to_string();
+                    changed = true;
+                }
+            }
+            if r.collection_id != c.collection_id {
+                r.collection_id = c.collection_id;
+                changed = true;
+            }
+            if r.collection_name != c.collection_name {
+                r.collection_name = c.collection_name;
+                changed = true;
+            }
+            if r.split != c.split {
+                r.split = c.split;
+                changed = true;
+            }
+            if r.condition != c.condition {
+                r.condition = c.condition;
+                changed = true;
+            }
+            if !paths.insert(r.csv_path.clone()) {
+                changed = true;
+                continue;
+            }
+            if !ids.insert(r.file_id.clone()) {
+                let base = r.file_id.clone();
+                let mut n = 2;
+                loop {
+                    let candidate = format!("{base}-{n}");
+                    if ids.insert(candidate.clone()) {
+                        r.file_id = candidate;
+                        changed = true;
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+            out.push(r);
+        }
+        self.records = out;
+        changed
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), String> {
@@ -429,9 +533,11 @@ impl SessionIndex {
         fs::write(dir.join(".session_index.json"), json).map_err(|e| e.to_string())
     }
 
-    /// Add a record, deduping by `file_id` (Python: dedupes legacy duplicates).
+    /// Add a record, deduping by `file_id` and by path (Python dedupes legacy
+    /// duplicates; path dedupe also survives an id repair).
     pub fn upsert(&mut self, record: SessionRecord) {
-        self.records.retain(|r| r.file_id != record.file_id);
+        self.records
+            .retain(|r| r.file_id != record.file_id && r.csv_path != record.csv_path);
         self.records.push(record);
     }
 
@@ -608,6 +714,10 @@ mod tests {
             opensmell_result: None,
             quality_report: None,
             quality: 0.0,
+            collection_id: "own".into(),
+            collection_name: "Own rig".into(),
+            split: String::new(),
+            condition: String::new(),
         });
         idx.save(&dir).unwrap();
         let loaded = SessionIndex::load(&dir);
@@ -622,5 +732,118 @@ mod tests {
     fn sanitize_keeps_alnum_space_dash() {
         assert_eq!(sanitize_label("Coffee #1!"), "Coffee _1_");
         assert_eq!(sanitize_label("room air"), "room air");
+    }
+
+    fn legacy_record(
+        dir: &Path,
+        file_id: &str,
+        label: &str,
+        substance: &str,
+        rel: &str,
+    ) -> SessionRecord {
+        SessionRecord {
+            file_id: file_id.into(),
+            substance: substance.into(),
+            label: label.into(),
+            csv_path: dir.join(rel).to_string_lossy().to_string(),
+            timestamp: 1.0,
+            duration_sec: 60.0,
+            sensor_count: 6,
+            preset_name: "6-sensor-full".into(),
+            notes: String::new(),
+            opensmell_result: None,
+            quality_report: None,
+            quality: 0.0,
+            collection_id: String::new(),
+            collection_name: String::new(),
+            split: String::new(),
+            condition: String::new(),
+        }
+    }
+
+    #[test]
+    fn session_index_migrates_legacy_imports() {
+        let dir = std::env::temp_dir().join(format!("osm_test_migration_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let walnuts = "datasets/SmellNet-single/base_data/training/walnuts";
+        let mixture = "datasets/SmellNet-mixtures/mixture_data/test_seen/\
+                       Almond20_Orange80.4v30t9nt.ingestion-balanced.csv";
+        let legacy = SessionIndex {
+            version: 1,
+            updated: 0.0,
+            records: vec![
+                legacy_record(
+                    &dir,
+                    "20260101_120000_000001",
+                    "Recorded",
+                    "banana",
+                    "20260101_120000_banana.csv",
+                ),
+                legacy_record(&dir, "walnuts_5_000000", "Imported", "", &format!("{walnuts}/walnuts_5.csv")),
+                legacy_record(&dir, "walnuts_6_000000", "Imported", "", &format!("{walnuts}/walnuts_6.csv")),
+                // Same path as the first walnut: the migration must drop it.
+                legacy_record(&dir, "walnuts_5_000000", "Imported", "", &format!("{walnuts}/walnuts_5.csv")),
+                legacy_record(&dir, "mixture_000000", "Imported", "", mixture),
+            ],
+        };
+        fs::write(
+            dir.join(".session_index.json"),
+            serde_json::to_string_pretty(&legacy).unwrap(),
+        )
+        .unwrap();
+
+        let idx = SessionIndex::load(&dir);
+        assert_eq!(idx.version, INDEX_VERSION);
+        assert_eq!(idx.records.len(), 4);
+
+        let own = idx.records.iter().find(|r| r.label == "Recorded").unwrap();
+        assert_eq!(own.substance, "banana");
+        assert_eq!(own.collection_id, "own");
+        assert_eq!(own.file_id, "20260101_120000_000001");
+
+        let walnuts: Vec<_> = idx.records.iter().filter(|r| r.substance == "walnuts").collect();
+        assert_eq!(walnuts.len(), 2);
+        assert!(walnuts.iter().all(|r| r.collection_id == "smellnet"));
+        assert!(walnuts.iter().all(|r| r.split == "Training"));
+        assert!(walnuts.iter().all(|r| r.label != "Imported"));
+        assert_ne!(walnuts[0].file_id, walnuts[1].file_id);
+
+        let mix = idx
+            .records
+            .iter()
+            .find(|r| r.collection_id == "smellnet-mixtures")
+            .unwrap();
+        assert_eq!(mix.substance, "Almond 20 + Orange 80");
+        assert_eq!(mix.condition, "ingestion balanced");
+
+        // A second load is a no-op (the migration is idempotent).
+        let again = SessionIndex::load(&dir);
+        assert_eq!(again.records.len(), 4);
+        assert_eq!(again.version, INDEX_VERSION);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Explicit maintenance hook: migrate the real index in place. Run with
+    /// `OSMO_MIGRATE_DIR=~/Osmograph_Recordings cargo test --lib \
+    ///  migrate_real_index_by_env -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mutates the index at OSMO_MIGRATE_DIR; run explicitly"]
+    fn migrate_real_index_by_env() {
+        let Ok(dir) = std::env::var("OSMO_MIGRATE_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let idx = SessionIndex::load(&dir);
+        let empty = idx.records.iter().filter(|r| r.substance.trim().is_empty()).count();
+        let imported = idx.records.iter().filter(|r| r.label == "Imported").count();
+        println!(
+            "migrated {} records: {} empty substances, {} still labelled Imported",
+            idx.records.len(),
+            empty,
+            imported
+        );
+        assert_eq!(empty, 0, "every record still needs a substance");
+        assert_eq!(imported, 0, "every import still needs a real label");
     }
 }

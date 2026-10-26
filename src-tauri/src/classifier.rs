@@ -369,6 +369,10 @@ mod tests {
                 opensmell_result: None,
                 quality_report: None,
                 quality: 100.0,
+                collection_id: "own".to_string(),
+                collection_name: "Own rig".to_string(),
+                split: String::new(),
+                condition: String::new(),
             });
         }
 

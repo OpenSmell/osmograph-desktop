@@ -470,6 +470,10 @@ interface SessionRecord {
   path?: string;
   file_id?: string;
   quality_report?: QualityReport | null;
+  collection_id?: string;
+  collection_name?: string;
+  split?: string;
+  condition?: string;
 }
 
 interface HubEntry {
@@ -7451,6 +7455,9 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
   const sourceHref = domainSourceHref(pack);
   const sourceHost = domainSourceHost(sourceHref);
   const gate = Domain.validateDomainPack(pack, true);
+  const gateStatus = pack.schema === 'osmograph.domain-pack/2'
+    ? (gate.gated ? ' · Gated' : ' · Ungated · add a fixture')
+    : ' · legacy · Ungated';
   const state = installed ? 'installed' : 'source';
   const cockpit = pack.ui ? ' · sandboxed UI' : '';
   const actions = installed
@@ -7479,7 +7486,7 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
       <span class="domain-card-state ${state}">${state}</span>
     </div>
     <div class="domain-card-tagline">${escapeHtmlText(pack.tagline)}</div>
-    <div class="domain-card-meta">${escapeHtmlText(pack.domain)} · ${escapeHtmlText(pack.license)} · ${gate.checks.filter(c => c.passed).length}/${gate.checks.length} gate${cockpit}${sourceHost ? ` · ${escapeHtmlText(sourceHost)}` : ''}</div>
+    <div class="domain-card-meta">${escapeHtmlText(pack.domain)} · ${escapeHtmlText(pack.license)} · ${gate.checks.filter(c => c.passed).length}/${gate.checks.length} gate${cockpit}${gateStatus}${sourceHost ? ` · ${escapeHtmlText(sourceHost)}` : ''}</div>
     <div class="domain-card-actions">${actions}</div>
   </div>`;
 }
@@ -8605,7 +8612,13 @@ function renderDomainWorkspace(pack: Domain.DomainPack): void {
   const state = activeDomainState || Domain.loadDomainState(pack.id);
   activeDomainState = state;
   const origin = pack.sourceUrl ? 'Author-hosted' : 'Local';
-  if (meta) meta.innerHTML = `${escapeHtmlText(origin)} · v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.license)}${escapeHtmlText(domainSourceLabel(pack))} · log local-only <button class="text-link" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export manifest</button> <button class="text-link" type="button" data-guide-open="domain">Policy gate</button>`;
+  if (meta) {
+    const gate = Domain.validateDomainPack(pack, true);
+    const gateStatus = pack.schema === 'osmograph.domain-pack/2'
+      ? (gate.gated ? 'Gated' : 'Ungated · add a fixture')
+      : 'legacy · Ungated';
+    meta.innerHTML = `${escapeHtmlText(origin)} · v${escapeHtmlText(pack.version)} · ${escapeHtmlText(pack.license)} · ${gateStatus}${escapeHtmlText(domainSourceLabel(pack))} · log local-only <button class="text-link" type="button" data-domain-export="${escapeHtmlText(pack.id)}">Export manifest</button> <button class="text-link" type="button" data-guide-open="domain">Policy gate</button>`;
+  }
   const uiHtml = resolveDomainUiHtml(pack);
   if (pack.ui && !uiHtml && meta) {
     meta.innerHTML += ' · <span class="domain-ui-missing">UI asset unavailable · declarative fallback</span>';
@@ -10732,6 +10745,7 @@ interface RawSessionRecord {
   file_id: string; substance: string; label: string; timestamp: number;
   duration_sec: number; sensor_count: number; quality: number; csv_path: string;
   quality_report: string | null;
+  collection_id?: string; collection_name?: string; split?: string; condition?: string;
 }
 
 function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
@@ -10747,7 +10761,7 @@ function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
     return {
       id: `s-${r.file_id}`,
       time: fmtLibTime(r.timestamp),
-      substance: r.substance === 'unknown' ? 'Unknown' : r.substance,
+      substance: r.substance && r.substance !== 'unknown' ? r.substance : 'Unknown',
       label: r.label,
       format: 'CSV',
       duration: `${Math.round(r.duration_sec)}s`,
@@ -10756,6 +10770,10 @@ function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
       path: r.csv_path,
       file_id: r.file_id,
       quality_report: report,
+      collection_id: r.collection_id,
+      collection_name: r.collection_name,
+      split: r.split,
+      condition: r.condition,
     };
   });
 }
@@ -12055,67 +12073,90 @@ function pathHas(path: string | undefined, re: RegExp): boolean {
   return !!path && re.test(path.replace(/\\/g, '/'));
 }
 
+const COLLECTION_SOURCES: Record<string, RecordingSource> = {
+  'smellnet': {
+    id: 'smellnet',
+    name: 'SmellNet',
+    label: 'SmellNet',
+    license: 'MIT',
+    credit: 'Feng et al. · MIT-MI (2026)',
+    citation: 'Feng, Dai, Li, Pernigo, Wen & Liang (2026). SmellNet. MIT-MI. https://huggingface.co/datasets/DeweiFeng/SmellNet',
+    url: 'https://huggingface.co/datasets/DeweiFeng/SmellNet',
+    datasetId: 'smellnet',
+  },
+  'smellnet-mixtures': {
+    id: 'smellnet-mixtures',
+    name: 'SmellNet mixtures',
+    label: 'SmellNet mixture',
+    license: 'MIT',
+    credit: 'Feng et al. · MIT-MI (2026)',
+    citation: 'Feng, Dai, Li, Pernigo, Wen & Liang (2026). SmellNet. MIT-MI. https://huggingface.co/datasets/DeweiFeng/SmellNet',
+    url: 'https://huggingface.co/datasets/DeweiFeng/SmellNet',
+    datasetId: 'smellnet-mixtures',
+  },
+  'tadi-2019': {
+    id: 'tadi-2019',
+    name: 'TADI',
+    label: 'TADI methane release',
+    license: 'CC BY 4.0',
+    credit: 'Gladston et al. · Zenodo (2023)',
+    citation: 'Gladston, A. et al. (2023). Dataset for using metal oxide gas sensors for the estimate of methane controlled releases. Zenodo. https://doi.org/10.5281/zenodo.8399829',
+    url: 'https://zenodo.org/records/8399829',
+    datasetId: 'tadi-2019',
+  },
+  'food-freshness': {
+    id: 'food-freshness',
+    name: 'Food Freshness',
+    label: 'Food Freshness E-Nose',
+    license: 'CC BY 4.0',
+    credit: 'Mahdian · Zenodo (2025)',
+    citation: 'Mahdian, M. (2025). Food Freshness E-Nose Dataset. Zenodo. https://zenodo.org/records/17285312',
+    url: 'https://zenodo.org/records/17285312',
+    datasetId: 'food-freshness',
+  },
+  'legacy': { id: 'legacy', name: 'Legacy', label: 'Legacy import' },
+  'derived': { id: 'derived', name: 'Derived', label: 'Derived locally' },
+  'own': { id: 'own', name: 'Own rig', label: 'Recorded on this rig' },
+  'commons': { id: 'commons', name: 'Data Commons', label: 'Community contribution' },
+  'imported': { id: 'imported', name: 'Imported', label: 'Imported file' },
+};
+
 /** Provenance for one recording. Short in the table, complete in the inspector. */
 function recordingSource(s: SessionRecord): RecordingSource {
+  if (s.collection_id && COLLECTION_SOURCES[s.collection_id]) {
+    return COLLECTION_SOURCES[s.collection_id];
+  }
+  if (s.collection_id && s.collection_id !== 'imported') {
+    return {
+      id: s.collection_id,
+      name: s.collection_name || s.collection_id,
+      label: s.collection_name || 'Imported file',
+    };
+  }
+  // Legacy fallback for indexes written before collection metadata existed.
   const p = (s.path || '').replace(/\\/g, '/');
   if (pathHas(p, /\/Derived\//i)) {
-    return { id: 'derived', name: 'Derived', label: 'Derived locally' };
+    return COLLECTION_SOURCES.derived;
   }
   if (pathHas(p, /SmellNet-mixtures/i)) {
-    return {
-      id: 'smellnet-mixtures',
-      name: 'SmellNet mixtures',
-      label: 'SmellNet mixture',
-      license: 'MIT',
-      credit: 'Feng et al. · MIT-MI (2026)',
-      citation: 'Feng, Dai, Li, Pernigo, Wen & Liang (2026). SmellNet. MIT-MI. https://huggingface.co/datasets/DeweiFeng/SmellNet',
-      url: 'https://huggingface.co/datasets/DeweiFeng/SmellNet',
-      datasetId: 'smellnet-mixtures',
-    };
+    return COLLECTION_SOURCES['smellnet-mixtures'];
   }
   if (pathHas(p, /SmellNet/i)) {
-    return {
-      id: 'smellnet',
-      name: 'SmellNet',
-      label: 'SmellNet',
-      license: 'MIT',
-      credit: 'Feng et al. · MIT-MI (2026)',
-      citation: 'Feng, Dai, Li, Pernigo, Wen & Liang (2026). SmellNet. MIT-MI. https://huggingface.co/datasets/DeweiFeng/SmellNet',
-      url: 'https://huggingface.co/datasets/DeweiFeng/SmellNet',
-      datasetId: 'smellnet',
-    };
+    return COLLECTION_SOURCES.smellnet;
   }
   if (pathHas(p, /TADI-2019/i)) {
-    return {
-      id: 'tadi-2019',
-      name: 'TADI',
-      label: 'TADI methane release',
-      license: 'CC BY 4.0',
-      credit: 'Gladston et al. · Zenodo (2023)',
-      citation: 'Gladston, A. et al. (2023). Dataset for using metal oxide gas sensors for the estimate of methane controlled releases. Zenodo. https://doi.org/10.5281/zenodo.8399829',
-      url: 'https://zenodo.org/records/8399829',
-      datasetId: 'tadi-2019',
-    };
+    return COLLECTION_SOURCES['tadi-2019'];
   }
   if (pathHas(p, /AllSmaples-Report|Food[- ]Freshness|datasets\/extracted/i)) {
-    return {
-      id: 'food-freshness',
-      name: 'Food Freshness',
-      label: 'Food Freshness E-Nose',
-      license: 'CC BY 4.0',
-      credit: 'Mahdian · Zenodo (2025)',
-      citation: 'Mahdian, M. (2025). Food Freshness E-Nose Dataset. Zenodo. https://zenodo.org/records/17285312',
-      url: 'https://zenodo.org/records/17285312',
-      datasetId: 'food-freshness',
-    };
+    return COLLECTION_SOURCES['food-freshness'];
   }
   if (pathHas(p, /\/legacy\//i)) {
-    return { id: 'legacy', name: 'Legacy', label: 'Legacy import' };
+    return COLLECTION_SOURCES.legacy;
   }
   if (pathHas(p, /Osmograph_Recordings/i) || s.label === 'Recorded') {
-    return { id: 'own', name: 'Own rig', label: 'Recorded on this rig' };
+    return COLLECTION_SOURCES.own;
   }
-  return { id: 'imported', name: 'Imported', label: s.label === 'Imported' ? 'Imported file' : (s.label || 'Imported file') };
+  return COLLECTION_SOURCES.imported;
 }
 
 type SourceBucket = { source: RecordingSource; records: SessionRecord[]; smells: Set<string> };
@@ -12256,37 +12297,98 @@ function renderDatasetCatalog() {
   }).join('');
 }
 
+let refSelectedId = '';
+
+function refAccess(d: DatasetEntry): { key: string; label: string } {
+  if (d.commercial === 'yes') return { key: 'source', label: 'Source only' };
+  if (d.commercial === 'api') return { key: 'api', label: 'API terms' };
+  if (d.commercial === 'no') return { key: 'link', label: 'Link only' };
+  return { key: 'research', label: 'Research only' };
+}
+
 function renderReferenceCatalog(query = ''): void {
   const host = document.getElementById('referenceCatalog');
   if (!host) return;
-  const rows = REFERENCE_CATALOG.filter((d) =>
+  const all = REFERENCE_CATALOG;
+  const rows = all.filter((d) =>
     !query || `${d.name} ${d.what} ${d.sensors} ${d.size} ${d.license} ${d.credit} ${d.note}`.toLowerCase().includes(query));
+  const count = document.getElementById('dsRefCount');
+  if (count) count.textContent = `${all.length}`;
   const stamp = document.getElementById('dsRefStamp');
-  if (stamp) stamp.textContent = `${rows.length} reference`;
+  if (stamp) stamp.textContent = `${rows.length} shown`;
+
+  const legend = document.getElementById('dsRefLegend');
+  if (legend) {
+    const tiers = new Map<string, number>();
+    for (const d of all) {
+      const key = refAccess(d).key;
+      tiers.set(key, (tiers.get(key) || 0) + 1);
+    }
+    legend.innerHTML = [...tiers.entries()].map(([key, n]) => {
+      const label = key === 'research' ? 'Research only'
+        : key === 'source' ? 'Source only'
+        : key === 'api' ? 'API terms'
+        : 'Link only';
+      return `<span class="ds-ref-key tier-${key}"><i></i>${label} <b>${n}</b></span>`;
+    }).join('');
+  }
+
   if (!rows.length) {
-    host.innerHTML = '<div class="hint" style="padding:8px 2px">No reference datasets match.</div>';
+    host.innerHTML = '<div class="ds-ref-empty">No reference datasets match this search.</div>';
     return;
   }
-  host.innerHTML = rows.map((d) => {
-    const badge = d.commercial === 'yes' ? 'source only'
-      : d.commercial === 'api' ? 'API terms'
-      : d.commercial === 'no' ? 'link only'
-      : 'research-only';
-    return `<details class="ds-ref-row">
-      <summary>
+  if (!rows.some((d) => d.id === refSelectedId)) refSelectedId = rows[0].id;
+
+  const tiles = rows.map((d) => {
+    const access = refAccess(d);
+    const index = `R·${String(all.indexOf(d) + 1).padStart(2, '0')}`;
+    const active = d.id === refSelectedId;
+    return `<button class="ds-ref-tile${active ? ' is-active' : ''}" type="button" data-ref-id="${esc(d.id)}" aria-pressed="${active}">
+      <span class="ds-ref-index">${index}</span>
+      <span class="ds-ref-tile-main">
         <span class="ds-ref-name">${esc(d.name)}</span>
         <span class="ds-ref-meta">${esc(d.sensors)} · ${esc(d.size)}</span>
-        <span class="ds-ref-badge">${badge}</span>
-      </summary>
-      <div class="ds-ref-body">
-        <p>${esc(d.what)} ${esc(d.note)}</p>
-        <div class="ds-ref-actions">
-          <a class="text-link" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Open source ↗</a>
-          ${d.licenseUrl ? `<a class="text-link" href="${esc(d.licenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(d.license)}</a>` : `<span class="ds-ref-meta">${esc(d.license)}</span>`}
-        </div>
-      </div>
-    </details>`;
+      </span>
+      <span class="ds-ref-tier tier-${access.key}">${access.label}</span>
+    </button>`;
   }).join('');
+
+  const d = rows.find((r) => r.id === refSelectedId) || rows[0];
+  const access = refAccess(d);
+  const index = `R·${String(all.indexOf(d) + 1).padStart(2, '0')}`;
+  const license = d.licenseUrl
+    ? `<a class="text-link" href="${esc(d.licenseUrl)}" target="_blank" rel="noopener noreferrer">${esc(d.license)}</a>`
+    : `<span>${esc(d.license)}</span>`;
+  host.innerHTML = `<div class="ds-ref-grid">${tiles}</div>
+    <aside class="ds-ref-inspector" aria-label="Reference details">
+      <div class="ds-ref-inspector-head">
+        <span class="ds-ref-inspector-index">${index}</span>
+        <span class="ds-ref-inspector-flag">${access.label} · no import</span>
+      </div>
+      <div class="ds-ref-inspector-name">${esc(d.name)}</div>
+      <p class="ds-ref-inspector-what">${esc(d.what)}</p>
+      <div class="ds-ref-inspector-note"><span>Watch out</span>${esc(d.note)}</div>
+      <dl class="ds-ref-spec">
+        <dt>Sensors</dt><dd>${esc(d.sensors)}</dd>
+        <dt>Size</dt><dd>${esc(d.size)}</dd>
+        <dt>Licence</dt><dd>${license}</dd>
+        <dt>Credit</dt><dd>${esc(d.credit)}</dd>
+      </dl>
+      <div class="ds-ref-inspector-actions">
+        <a class="text-link" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Open source ↗</a>
+        <span class="ds-ref-meta">Read-only · not bundled</span>
+      </div>
+    </aside>`;
+
+  host.querySelectorAll<HTMLButtonElement>('[data-ref-id]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.refId || '';
+      if (id === refSelectedId) return;
+      refSelectedId = id;
+      renderReferenceCatalog(query);
+      host.querySelector<HTMLButtonElement>(`[data-ref-id="${id}"]`)?.focus({ preventScroll: true });
+    });
+  });
 }
 
 // === Global download dock ===
@@ -13868,10 +13970,116 @@ function populateReplaySelect() {
   sel.value = cur || (withFid[0]?.file_id ?? '');
 }
 
+const REPLAY_HEIGHT_KEY = 'osmograph.replayHeight';
+
+function replayParentHeight(panel: HTMLElement): number {
+  const parent = panel.parentElement;
+  return parent ? parent.getBoundingClientRect().height : window.innerHeight;
+}
+
+function defaultReplayHeight(panel: HTMLElement): number {
+  return Math.max(260, Math.min(380, replayParentHeight(panel) - 300));
+}
+
+function redrawReplayDock(): void {
+  drawReplayFingerprint(true);
+  drawReplay();
+}
+
+/** `undefined` returns the dock to its compact default; a number pins it. */
+function applyReplayHeight(panel: HTMLElement, next?: number): void {
+  const max = Math.max(280, replayParentHeight(panel) - 230);
+  const desired = next == null ? defaultReplayHeight(panel) : next;
+  const h = Math.max(230, Math.min(desired, max));
+  panel.style.height = `${Math.round(h)}px`;
+  panel.style.flex = '0 0 auto';
+}
+
+function replayHeightIsExpanded(panel: HTMLElement): boolean {
+  return panel.getBoundingClientRect().height > replayParentHeight(panel) * 0.55;
+}
+
+function toggleReplayHeight(): void {
+  const panel = document.getElementById('replayPanel') as HTMLElement | null;
+  if (!panel) return;
+  if (replayHeightIsExpanded(panel)) {
+    applyReplayHeight(panel);
+    localStorage.removeItem(REPLAY_HEIGHT_KEY);
+  } else {
+    applyReplayHeight(panel, Math.max(320, replayParentHeight(panel) - 190));
+    localStorage.setItem(REPLAY_HEIGHT_KEY, String(Math.round(panel.getBoundingClientRect().height)));
+  }
+  redrawReplayDock();
+}
+
+function restoreReplayHeight(): void {
+  const panel = document.getElementById('replayPanel') as HTMLElement | null;
+  if (!panel) return;
+  const raw = localStorage.getItem(REPLAY_HEIGHT_KEY);
+  const saved = raw ? Number(raw) : NaN;
+  if (Number.isFinite(saved) && saved >= 230) applyReplayHeight(panel, saved);
+  else applyReplayHeight(panel, defaultReplayHeight(panel));
+}
+
+function initReplayResize(): void {
+  const panel = document.getElementById('replayPanel') as HTMLElement | null;
+  const grip = document.getElementById('replayGrip') as HTMLElement | null;
+  if (!panel || !grip) return;
+  let dragging = false;
+  let startY = 0;
+  let startH = 0;
+  const onMove = (ev: PointerEvent) => {
+    if (!dragging) return;
+    applyReplayHeight(panel, startH - (ev.clientY - startY));
+  };
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', stop);
+    window.removeEventListener('pointercancel', stop);
+    const h = Math.round(panel.getBoundingClientRect().height);
+    if (h > 0) localStorage.setItem(REPLAY_HEIGHT_KEY, String(h));
+    redrawReplayDock();
+  };
+  grip.addEventListener('pointerdown', (ev) => {
+    dragging = true;
+    startY = ev.clientY;
+    startH = panel.getBoundingClientRect().height;
+    ev.preventDefault();
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+  });
+  grip.addEventListener('dblclick', toggleReplayHeight);
+  grip.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
+      ev.preventDefault();
+      const delta = ev.key === 'ArrowUp' ? 24 : -24;
+      applyReplayHeight(panel, panel.getBoundingClientRect().height + delta);
+      localStorage.setItem(REPLAY_HEIGHT_KEY, String(Math.round(panel.getBoundingClientRect().height)));
+      redrawReplayDock();
+    } else if (ev.key === 'Home') {
+      ev.preventDefault();
+      applyReplayHeight(panel);
+      localStorage.removeItem(REPLAY_HEIGHT_KEY);
+      redrawReplayDock();
+    }
+  });
+  document.getElementById('replayExpand')?.addEventListener('click', toggleReplayHeight);
+  window.addEventListener('resize', () => {
+    if (!panel.style.height) return;
+    applyReplayHeight(panel, parseFloat(panel.style.height));
+    redrawReplayDock();
+  });
+}
+
 function openReplayPanel() {
   populateReplaySelect();
   document.getElementById('replayPanel')!.style.display = '';
+  restoreReplayHeight();
   refreshFpSource();
+  redrawReplayDock();
 }
 
 function closeReplayPanel() {
@@ -14094,6 +14302,7 @@ document.getElementById('replayStepBack')!.addEventListener('click', () => stepR
 document.getElementById('replayFastForward')!.addEventListener('click', skipReplayForward);
 document.getElementById('replayClose')!.addEventListener('click', closeReplayPanel);
 document.getElementById('replaySpeed')!.addEventListener('change', () => { replayLastTs = null; });
+initReplayResize();
 
 (document.getElementById('inspReplay') as HTMLButtonElement)?.addEventListener('click', async () => {
   const s = sessions[selectedSession ?? -1];
@@ -14249,13 +14458,185 @@ document.getElementById('dashConnect')?.addEventListener('click', () => {
 (document.getElementById('liveZoomIn') as HTMLButtonElement | null)?.addEventListener('click', () => setLiveWindow(liveWindowSamples * 0.6));
 (document.getElementById('liveZoomOut') as HTMLButtonElement | null)?.addEventListener('click', () => setLiveWindow(liveWindowSamples * 1.6));
 (document.getElementById('liveZoomReset') as HTMLButtonElement | null)?.addEventListener('click', () => { setLiveWindow(LIVE_WINDOW_DEFAULT); goLive(); });
+const DASH_RAIL_KEY = 'osmograph.railWidth';
+const DASH_DOCK_KEY = 'osmograph.dockHeight';
+
+function clampPx(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(n, hi));
+}
+
+function applyRailWidth(dash: HTMLElement, width?: number): void {
+  if (width == null || !Number.isFinite(width)) {
+    dash.style.removeProperty('--rail-w');
+    return;
+  }
+  const max = Math.max(220, dash.clientWidth - 430);
+  dash.style.setProperty('--rail-w', `${Math.round(clampPx(width, 220, max))}px`);
+}
+
+function applyDockHeight(dock: HTMLElement, height?: number): void {
+  if (height == null || !Number.isFinite(height)) {
+    dock.style.height = '';
+    return;
+  }
+  const parentH = dock.parentElement?.clientHeight || 420;
+  // Leave room for the trace header, tag row, and the canvas minimum, so a
+  // tall dock never pushes the live trace out of the column.
+  const reserve = window.innerHeight <= 700 ? 300 : 380;
+  const max = Math.max(160, parentH - reserve);
+  dock.style.height = `${Math.round(clampPx(height, 120, max))}px`;
+}
+
+function restoreDashboardLayout(): void {
+  const dash = document.querySelector('.dashboard') as HTMLElement | null;
+  const dock = document.getElementById('underDock');
+  const rail = localStorage.getItem(DASH_RAIL_KEY);
+  const dockH = localStorage.getItem(DASH_DOCK_KEY);
+  if (dash && rail) applyRailWidth(dash, Number(rail));
+  if (dock && dockH) applyDockHeight(dock, Number(dockH));
+}
+
+function initDashboardResize(): void {
+  const dash = document.querySelector('.dashboard') as HTMLElement | null;
+  const rail = document.getElementById('railGrip') as HTMLElement | null;
+  const dock = document.getElementById('underDock') as HTMLElement | null;
+  const dockGrip = document.getElementById('dockGrip') as HTMLElement | null;
+  restoreDashboardLayout();
+
+  if (dash && rail) {
+    const sidebar = dash.querySelector('.sidebar') as HTMLElement | null;
+    let dragging = false;
+    let startX = 0;
+    let startW = 0;
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging) return;
+      applyRailWidth(dash, startW - (ev.clientX - startX));
+    };
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      const w = sidebar?.getBoundingClientRect().width || 0;
+      if (w > 0) localStorage.setItem(DASH_RAIL_KEY, String(Math.round(w)));
+      resizeTraces();
+    };
+    rail.addEventListener('pointerdown', (ev) => {
+      dragging = true;
+      startX = ev.clientX;
+      startW = sidebar?.getBoundingClientRect().width || 300;
+      ev.preventDefault();
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('pointercancel', stop);
+    });
+    rail.addEventListener('dblclick', () => {
+      applyRailWidth(dash);
+      localStorage.removeItem(DASH_RAIL_KEY);
+      resizeTraces();
+    });
+    rail.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight' && ev.key !== 'Home') return;
+      ev.preventDefault();
+      if (ev.key === 'Home') {
+        applyRailWidth(dash);
+        localStorage.removeItem(DASH_RAIL_KEY);
+      } else {
+        const delta = ev.key === 'ArrowLeft' ? 16 : -16;
+        const w = (sidebar?.getBoundingClientRect().width || 300) + delta;
+        applyRailWidth(dash, w);
+        const max = Math.max(220, dash.clientWidth - 430);
+        localStorage.setItem(DASH_RAIL_KEY, String(Math.round(clampPx(w, 220, max))));
+      }
+      resizeTraces();
+    });
+  }
+
+  if (dock && dockGrip) {
+    const toggle = document.getElementById('dockToggle');
+    const syncToggle = () => {
+      if (toggle) toggle.textContent = dock.classList.contains('collapsed') ? '▦' : '—';
+    };
+    let dragging = false;
+    let startY = 0;
+    let startH = 0;
+    const onMove = (ev: PointerEvent) => {
+      if (!dragging) return;
+      applyDockHeight(dock, startH - (ev.clientY - startY));
+    };
+    const stop = () => {
+      if (!dragging) return;
+      dragging = false;
+      dock.style.transition = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+      const h = dock.getBoundingClientRect().height;
+      if (h > 0) localStorage.setItem(DASH_DOCK_KEY, String(Math.round(h)));
+    };
+    dockGrip.addEventListener('pointerdown', (ev) => {
+      dragging = true;
+      dock.classList.remove('collapsed');
+      syncToggle();
+      dock.style.transition = 'none';
+      startY = ev.clientY;
+      startH = dock.getBoundingClientRect().height;
+      ev.preventDefault();
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', stop);
+      window.addEventListener('pointercancel', stop);
+    });
+    dockGrip.addEventListener('dblclick', () => {
+      dock.classList.toggle('collapsed');
+      if (dock.classList.contains('collapsed')) {
+        dock.style.height = '';
+      } else {
+        const saved = localStorage.getItem(DASH_DOCK_KEY);
+        if (saved) applyDockHeight(dock, Number(saved));
+      }
+      syncToggle();
+    });
+    dockGrip.addEventListener('keydown', (ev) => {
+      if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown' && ev.key !== 'Home') return;
+      ev.preventDefault();
+      dock.classList.remove('collapsed');
+      syncToggle();
+      if (ev.key === 'Home') {
+        applyDockHeight(dock);
+        localStorage.removeItem(DASH_DOCK_KEY);
+      } else {
+        const delta = ev.key === 'ArrowUp' ? 24 : -24;
+        applyDockHeight(dock, dock.getBoundingClientRect().height + delta);
+        localStorage.setItem(DASH_DOCK_KEY, String(Math.round(dock.getBoundingClientRect().height)));
+      }
+    });
+  }
+
+  window.addEventListener('resize', () => {
+    if (dash) {
+      const w = dash.style.getPropertyValue('--rail-w');
+      if (w) applyRailWidth(dash, parseFloat(w));
+    }
+    if (dock && dock.style.height) applyDockHeight(dock, parseFloat(dock.style.height));
+    resizeTraces();
+  });
+}
+
 (document.getElementById('dockToggle') as HTMLButtonElement | null)?.addEventListener('click', () => {
   const dock = document.getElementById('underDock');
   if (!dock) return;
-  dock.classList.toggle('collapsed');
+  const collapsed = dock.classList.toggle('collapsed');
+  if (collapsed) {
+    dock.style.height = '';
+  } else {
+    const saved = localStorage.getItem(DASH_DOCK_KEY);
+    if (saved) applyDockHeight(dock, Number(saved));
+  }
   const btn = document.getElementById('dockToggle');
-  if (btn) btn.textContent = dock.classList.contains('collapsed') ? '▦' : '—';
+  if (btn) btn.textContent = collapsed ? '▦' : '—';
 });
+initDashboardResize();
 (document.getElementById('liveScrub') as HTMLInputElement | null)?.addEventListener('input', (e) => {
   const pct = (parseInt((e.target as HTMLInputElement).value, 10) || 0) / 1000;
   const total = liveTotalHistory();

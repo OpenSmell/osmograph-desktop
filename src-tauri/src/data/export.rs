@@ -384,6 +384,10 @@ mod tests {
             quality_report: None,
             preset_name: String::new(),
             notes: String::new(),
+            collection_id: "own".to_string(),
+            collection_name: "Own rig".to_string(),
+            split: String::new(),
+            condition: String::new(),
         });
 
         let out = dir.join("out/session_a_export.csv");
@@ -416,6 +420,10 @@ mod tests {
             quality_report: None,
             preset_name: String::new(),
             notes: String::new(),
+            collection_id: "own".to_string(),
+            collection_name: "Own rig".to_string(),
+            split: String::new(),
+            condition: String::new(),
         });
 
         let out = dir.join("out/session_a.osmell");
@@ -452,6 +460,10 @@ mod tests {
             quality_report: None,
             preset_name: String::new(),
             notes: String::new(),
+            collection_id: "own".to_string(),
+            collection_name: "Own rig".to_string(),
+            split: String::new(),
+            condition: String::new(),
         });
 
         let out = dir.join("out/session_a.osmell");
@@ -494,6 +506,10 @@ mod tests {
             quality_report: None,
             preset_name: String::new(),
             notes: String::new(),
+            collection_id: "own".to_string(),
+            collection_name: "Own rig".to_string(),
+            split: String::new(),
+            condition: String::new(),
         });
 
         let run = crate::recipe::RecipeRun {

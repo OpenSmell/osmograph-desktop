@@ -1262,6 +1262,10 @@ fn stop_session(state: State<'_, AppState>) -> Result<SessionSummary, String> {
                 opensmell_result: None,
                 quality_report: None,
                 quality: quality_score,
+                collection_id: "own".to_string(),
+                collection_name: "Own rig".to_string(),
+                split: String::new(),
+                condition: String::new(),
             };
             let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
             {
@@ -1426,6 +1430,10 @@ fn stop_phase_recording(state: State<AppState>) -> Result<PhaseRecordingSummary,
                 opensmell_result: None,
                 quality_report: None,
                 quality: quality_score,
+                collection_id: "own".to_string(),
+                collection_name: "Own rig".to_string(),
+                split: String::new(),
+                condition: String::new(),
             };
             let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
             let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
@@ -1499,6 +1507,10 @@ fn recover_phase_session(
         opensmell_result: None,
         quality_report: None,
         quality,
+        collection_id: "own".to_string(),
+        collection_name: "Own rig".to_string(),
+        split: String::new(),
+        condition: String::new(),
     };
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
     index.upsert(record);
@@ -1917,6 +1929,11 @@ pub struct RecordingFile {
     pub path: String,
     pub name: String,
     pub substance: String,
+    pub label: String,
+    pub collection_id: String,
+    pub collection_name: String,
+    pub split: String,
+    pub condition: String,
     pub duration_sec: f64,
     pub sensor_count: usize,
     pub rows: usize,
@@ -1974,28 +1991,9 @@ fn scan_recordings(
     let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().map(|x| x == "csv").unwrap_or(false) {
-            if let Some(meta) = std::fs::metadata(&path).ok() {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let (rows, sensor_count, duration_sec) = parse_csv_summary_cached(&path, cache);
-                out.push(RecordingFile {
-                    path: path.to_string_lossy().to_string(),
-                    name: name.clone(),
-                    substance: substance_from_filename(&name),
-                    duration_sec,
-                    sensor_count,
-                    rows,
-                    file_id: file_id_from_filename(&name),
-                    mtime: meta
-                        .modified()
-                        .ok()
-                        .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs_f64())
-                        .unwrap_or(0.0),
-                });
+        if matches_file_ext(&path) {
+            if let Some(rf) = recording_from_path(&path, cache, dir) {
+                out.push(rf);
             }
         }
     }
@@ -2163,7 +2161,16 @@ fn import_recordings(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
     let files = {
         let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
-        scan_recordings(&dir, &mut cache)?
+        let mut files = scan_recordings(&dir, &mut cache)?;
+        // Downloaded corpora live under <recordings>/datasets/. Scan them too so
+        // a finished download is in the library without a second manual import,
+        // and so files dropped by a partial import are picked up.
+        let datasets = data::dataset_io::datasets_dir(&dir);
+        if datasets.is_dir() {
+            collect_recordings_in_tree(&datasets, &mut files, &mut cache, &dir);
+        }
+        files.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap());
+        files
     };
     let mut imported = Vec::new();
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
@@ -2190,7 +2197,7 @@ fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
     SessionRecord {
         file_id: f.file_id.clone(),
         substance: f.substance.clone(),
-        label: "Imported".to_string(),
+        label: f.label.clone(),
         csv_path: f.path.clone(),
         timestamp: f.mtime,
         duration_sec: f.duration_sec,
@@ -2200,6 +2207,10 @@ fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
         opensmell_result: None,
         quality_report: None,
         quality: SessionIndex::provision_quality(f.duration_sec, f.rows),
+        collection_id: f.collection_id.clone(),
+        collection_name: f.collection_name.clone(),
+        split: f.split.clone(),
+        condition: f.condition.clone(),
     }
 }
 
@@ -2208,24 +2219,25 @@ fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
 /// is scanned for them. Deduplicates against the existing index.
 #[tauri::command]
 fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<SessionRecord>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
     let mut files: Vec<RecordingFile> = Vec::new();
-    for p in paths {
-        let path = std::path::PathBuf::from(&p);
-        let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {}", p, e))?;
-        if meta.is_dir() {
-            let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
-            collect_recordings_in_tree(&path, &mut files, &mut cache);
-        } else if matches_file_ext(&path) {
-            let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
-            if let Some(rf) = recording_from_path(&path, &mut cache) {
-                files.push(rf);
+    {
+        let mut cache = state.csv_summaries.lock().map_err(|e| e.to_string())?;
+        for p in paths {
+            let path = std::path::PathBuf::from(&p);
+            let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {}", p, e))?;
+            if meta.is_dir() {
+                collect_recordings_in_tree(&path, &mut files, &mut cache, &dir);
+            } else if matches_file_ext(&path) {
+                if let Some(rf) = recording_from_path(&path, &mut cache, &dir) {
+                    files.push(rf);
+                }
             }
         }
     }
     // Keep newest-first, dedupe by absolute path.
     files.sort_by(|a, b| b.mtime.partial_cmp(&a.mtime).unwrap());
 
-    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
     let mut imported = Vec::new();
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
     let mut seen: std::collections::HashSet<String> = index
@@ -2234,11 +2246,10 @@ fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<Sessio
         .map(|r| r.csv_path.clone())
         .collect();
     for f in files {
-        if seen.contains(&f.path) {
+        if !seen.insert(f.path.clone()) {
             continue;
         }
         let record = build_record_from_file(&f);
-        seen.insert(record.csv_path.clone());
         index.upsert(record.clone());
         imported.push(record);
     }
@@ -2257,21 +2268,48 @@ fn matches_file_ext(path: &std::path::Path) -> bool {
 fn recording_from_path(
     path: &std::path::Path,
     cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+    recordings_dir: &std::path::Path,
 ) -> Option<RecordingFile> {
     let meta = std::fs::metadata(path).ok()?;
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
+    let path_str = path.to_string_lossy().to_string();
+    let c = data::collections::classify(path, recordings_dir);
     let (rows, sensor_count, duration_sec) = parse_csv_summary_cached(path, cache);
+    // Own timestamped files keep the historical id shape; everything imported
+    // gets a path hash so two labels sharing a prefix cannot collide.
+    let own_timestamped = c.collection_id == "own"
+        && data::collections::has_timestamp_prefix(&name);
+    let file_id = if own_timestamped {
+        file_id_from_filename(&name)
+    } else {
+        data::collections::stable_import_id(&path_str)
+    };
+    let substance = if c.substance.trim().is_empty() {
+        substance_from_filename(&name)
+    } else {
+        c.substance.clone()
+    };
+    let label = if own_timestamped {
+        "Recorded".to_string()
+    } else {
+        data::collections::display_label(&c)
+    };
     Some(RecordingFile {
-        path: path.to_string_lossy().to_string(),
-        name: name.clone(),
-        substance: substance_from_filename(&name),
+        path: path_str,
+        name,
+        substance,
+        label,
+        collection_id: c.collection_id,
+        collection_name: c.collection_name,
+        split: c.split,
+        condition: c.condition,
         duration_sec,
         sensor_count,
         rows,
-        file_id: file_id_from_filename(&name),
+        file_id,
         mtime: meta
             .modified()
             .ok()
@@ -2286,6 +2324,7 @@ fn collect_recordings_in_tree(
     dir: &std::path::Path,
     out: &mut Vec<RecordingFile>,
     cache: &mut std::collections::HashMap<std::path::PathBuf, CsvSummarySnapshot>,
+    recordings_dir: &std::path::Path,
 ) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -2298,9 +2337,14 @@ fn collect_recordings_in_tree(
             Err(_) => continue,
         };
         if meta.is_dir() {
-            collect_recordings_in_tree(&path, out, cache);
+            collect_recordings_in_tree(&path, out, cache, recordings_dir);
         } else if matches_file_ext(&path) {
-            if let Some(rf) = recording_from_path(&path, cache) {
+            let lower = path.to_string_lossy().to_ascii_lowercase();
+            // Split indexes and GC-MS tables are not e-nose recordings.
+            if lower.contains("/gcms_") || lower.contains("_index_") || lower.contains("test_index") {
+                continue;
+            }
+            if let Some(rf) = recording_from_path(&path, cache, recordings_dir) {
                 out.push(rf);
             }
         }
@@ -2340,7 +2384,7 @@ fn install_playground_into(
         std::fs::write(&path, PLAYGROUND_SAMPLE_CSV)
             .map_err(|e| format!("cannot write the playground recording: {e}"))?;
     }
-    let file = recording_from_path(&path, cache)
+    let file = recording_from_path(&path, cache, dir)
         .ok_or_else(|| "the bundled playground recording could not be read".to_string())?;
     let mut record = build_record_from_file(&file);
     record.label = "SmellNet apple · playground".to_string();
@@ -3982,12 +4026,95 @@ mod tests {
             opensmell_result: None,
             quality_report: None,
             quality: 0.0,
+            collection_id: "own".to_string(),
+            collection_name: "Own rig".to_string(),
+            split: String::new(),
+            condition: String::new(),
         });
         let removed = clear_recordings_files(&tmp, &mut index);
         assert_eq!(removed, 1, "one indexed recording should be removed");
         assert!(index.records.is_empty(), "index must be emptied");
         assert!(!csv.exists(), "on-disk CSV must be deleted");
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Explicit maintenance hook: prove the recursive dataset scan finds every
+    /// valid recording and gives it a unique id. Run with
+    /// `OSMO_SCAN_DATASETS=~/Osmograph_Recordings cargo test --lib \
+    ///  scans_every_dataset_csv_with_a_unique_id -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "scans OSMO_SCAN_DATASETS; run explicitly"]
+    fn scans_every_dataset_csv_with_a_unique_id() {
+        let Ok(dir) = std::env::var("OSMO_SCAN_DATASETS") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let datasets = dir.join("datasets");
+        let mut cache = std::collections::HashMap::new();
+        let mut files = Vec::new();
+        super::collect_recordings_in_tree(&datasets, &mut files, &mut cache, &dir);
+        let mut ids = std::collections::HashSet::new();
+        let mut problems = Vec::new();
+        for f in &files {
+            if !ids.insert(f.file_id.clone()) {
+                problems.push(format!("duplicate id {} ({})", f.file_id, f.path));
+            }
+            if f.substance.trim().is_empty() {
+                problems.push(format!("empty substance ({})", f.path));
+            }
+        }
+        println!(
+            "scanned {} dataset recordings, {} unique ids",
+            files.len(),
+            ids.len()
+        );
+        assert!(problems.is_empty(), "{problems:#?}");
+    }
+
+    /// Explicit maintenance hook: add any dataset recordings the old importer
+    /// dropped, using the same scan/build/upsert path as `import_recordings`.
+    /// Run with `OSMO_MIGRATE_DIR=~/Osmograph_Recordings cargo test --lib \
+    ///  import_real_datasets_by_env -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "mutates the index at OSMO_MIGRATE_DIR; run explicitly"]
+    fn import_real_datasets_by_env() {
+        let Ok(dir) = std::env::var("OSMO_MIGRATE_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let mut index = SessionIndex::load(&dir);
+        let datasets = dir.join("datasets");
+        let mut cache = std::collections::HashMap::new();
+        let mut files = Vec::new();
+        super::collect_recordings_in_tree(&datasets, &mut files, &mut cache, &dir);
+        let mut added = 0;
+        for f in files {
+            if index
+                .records
+                .iter()
+                .any(|r| r.csv_path == f.path || r.file_id == f.file_id)
+            {
+                continue;
+            }
+            index.upsert(super::build_record_from_file(&f));
+            added += 1;
+        }
+        if added > 0 {
+            index.save(&dir).unwrap();
+        }
+        let unique: std::collections::HashSet<_> =
+            index.records.iter().map(|r| r.file_id.as_str()).collect();
+        println!(
+            "imported {} new dataset recordings; total {} ({} unique ids)",
+            added,
+            index.records.len(),
+            unique.len()
+        );
+        assert_eq!(unique.len(), index.records.len(), "ids must stay unique");
+        assert!(
+            index.records.iter().all(|r| !r.substance.trim().is_empty()),
+            "every record needs a substance"
+        );
     }
 
     #[test]

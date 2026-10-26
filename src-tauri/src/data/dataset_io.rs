@@ -253,7 +253,14 @@ pub fn extract_csvs(zip_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>, St
         if !name.to_ascii_lowercase().ends_with(".csv") {
             continue;
         }
-        let target = dest_dir.join(safe_filename(&name)?);
+        // Preserve the archive's own folders (e.g. `AllSmaples-Report/`).
+        // Flattening every CSV into one directory destroys the only label a
+        // corpus gives us, and makes two same-named files overwrite each other.
+        let rel = safe_relative(&name)?;
+        let target = dest_dir.join(&rel);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
         let mut w = fs::File::create(&target).map_err(|e| e.to_string())?;
         std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
         out.push(target);

@@ -339,6 +339,10 @@ pub fn import_external_csv(
         opensmell_result: None,
         quality_report: None,
         quality: SessionIndex::provision_quality(duration_sec, rows),
+        collection_id: "commons".to_string(),
+        collection_name: "Data Commons".to_string(),
+        split: String::new(),
+        condition: String::new(),
     };
     index.upsert(record.clone());
     let _ = index.save(recordings_dir);

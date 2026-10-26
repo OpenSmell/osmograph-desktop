@@ -517,14 +517,33 @@
     }
     .dashboard {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 300px;
+      grid-template-columns: minmax(0, 1fr) 10px var(--rail-w, 300px);
       grid-template-rows: minmax(0, 1fr);
       height: 100%;
-      gap: 10px;
+      gap: 10px 0;
       padding: 10px;
     }
     .dashboard > .traces-area,
     .dashboard > .sidebar { min-width: 0; min-height: 0; }
+    .rail-grip {
+      width: 10px;
+      cursor: col-resize;
+      position: relative;
+      align-self: stretch;
+    }
+    .rail-grip::before {
+      content: '';
+      position: absolute;
+      left: 4px;
+      top: 0;
+      bottom: 0;
+      width: 1px;
+      background: var(--border);
+      transition: background 0.12s ease;
+    }
+    .rail-grip:hover::before,
+    .rail-grip:focus-visible::before { background: var(--cyan); }
+    .rail-grip:focus-visible { outline: 1px solid var(--cyan); outline-offset: -1px; }
     .traces-area {
       display: flex;
       flex-direction: column;
@@ -785,6 +804,28 @@
       overflow: hidden;
       transition: height 0.15s ease;
     }
+    .dock-grip {
+      flex: none;
+      height: 6px;
+      cursor: ns-resize;
+      position: relative;
+      background: color-mix(in srgb, var(--bg-2) 55%, transparent);
+      border-bottom: 1px solid var(--border);
+    }
+    .dock-grip::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 1.5px;
+      width: 36px;
+      height: 2px;
+      transform: translateX(-50%);
+      background: var(--border);
+      transition: background 0.12s ease;
+    }
+    .dock-grip:hover::before,
+    .dock-grip:focus-visible::before { background: var(--cyan); }
+    .dock-grip:focus-visible { outline: 1px solid var(--cyan); outline-offset: -1px; }
     .dock-head {
       display: flex;
       align-items: center;
@@ -823,7 +864,7 @@
       color: var(--text-3);
       text-align: center;
     }
-    .dock.collapsed { height: 26px; }
+    .dock.collapsed { height: 32px; }
     .dock.collapsed .dock-body { display: none; }
     /* Measured phenotype strip — A1 redox / A3 response-type / A2 protocol /
        boundaries, computed in Rust over the live readings ring. */
@@ -1272,7 +1313,7 @@
       grid-template-columns: minmax(0, 1fr) 380px;
       grid-template-rows: minmax(0, 1fr);
       flex: 1;
-      min-height: 0;
+      min-height: min(260px, 42vh);
     }
     .library-main,
     .library-inspector {
@@ -2377,23 +2418,148 @@
     .ds-details-links { display: flex; align-items: center; gap: 10px; margin-top: 1px; }
     .ds-details-links .text-link { font-size: 9px; }
     .ds-details-links .ds-remove { margin-left: auto; }
-    .ds-ref-section { margin-top: 14px; }
-    .ds-ref-list { display: flex; flex-direction: column; border-top: 1px solid var(--border); }
-    .ds-ref-row { border-bottom: 1px solid var(--border); }
-    .ds-ref-row > summary {
-      display: flex; align-items: baseline; gap: 8px; padding: 6px 2px; cursor: pointer;
-      list-style: none;
+    /* === Reference archive — read-only corpora as a compact HUD deck === */
+    .ds-ref-section {
+      position: relative;
+      margin-top: 16px;
+      padding: 9px 10px 10px;
+      border: 1px solid var(--border);
+      background-color: var(--bg-1);
+      background-image:
+        linear-gradient(color-mix(in srgb, var(--border) 36%, transparent) 1px, transparent 1px),
+        linear-gradient(90deg, color-mix(in srgb, var(--border) 36%, transparent) 1px, transparent 1px);
+      background-size: 16px 16px;
     }
-    .ds-ref-row > summary::-webkit-details-marker { display: none; }
-    .ds-ref-row > summary:hover .ds-ref-name { color: var(--cyan); }
-    .ds-ref-name { font-size: 11.5px; font-weight: 650; color: var(--text-0); white-space: nowrap; }
-    .ds-ref-meta { font-family: var(--font-mono); font-size: 8.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .ds-ref-badge { margin-left: auto; font-family: var(--font-mono); font-size: 8px; color: var(--text-3); border: 1px solid var(--border); border-radius: 7px; padding: 1px 5px; white-space: nowrap; }
-    .ds-ref-row > summary::after { content: '+'; font-size: 11px; color: var(--text-3); margin-left: 4px; }
-    .ds-ref-row[open] > summary::after { content: '−'; }
-    .ds-ref-body { display: flex; flex-direction: column; gap: 4px; padding: 0 2px 8px 10px; }
-    .ds-ref-body p { margin: 0; font-size: 10.5px; line-height: 1.5; color: var(--text-2); }
-    .ds-ref-body .ds-ref-actions { display: flex; align-items: center; gap: 10px; }
+    .ds-ref-section::before,
+    .ds-ref-section::after {
+      content: ''; position: absolute; width: 9px; height: 9px; pointer-events: none;
+      border: 0 solid var(--text-0);
+    }
+    .ds-ref-section::before { top: -1px; left: -1px; border-top-width: 1px; border-left-width: 1px; }
+    .ds-ref-section::after { right: -1px; bottom: -1px; border-right-width: 1px; border-bottom-width: 1px; }
+    .ds-ref-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+    .ds-ref-head-main { min-width: 0; }
+    .ds-ref-kicker {
+      display: block; font-family: var(--font-mono); font-size: 7.5px; font-weight: 600;
+      letter-spacing: .24em; text-transform: uppercase; color: var(--text-3);
+    }
+    .ds-ref-title {
+      display: flex; align-items: center; gap: 8px; margin-top: 4px;
+      font-family: var(--font-mono); font-size: 13px; font-weight: 800;
+      letter-spacing: .16em; text-transform: uppercase; color: var(--text-0);
+    }
+    .ds-ref-title::before { content: ''; width: 16px; height: 2px; background: var(--text-0); flex: none; }
+    .ds-ref-note { display: block; margin-top: 4px; font-size: 10px; color: var(--text-3); }
+    .ds-ref-readout { display: flex; align-items: stretch; border: 1px solid var(--border); background: var(--bg-0); }
+    .ds-ref-stat {
+      display: flex; flex-direction: column; justify-content: center; gap: 2px;
+      padding: 5px 11px; border-left: 1px solid var(--border);
+    }
+    .ds-ref-stat:first-child { border-left: 0; }
+    .ds-ref-stat b {
+      font-family: var(--font-mono); font-size: 13px; line-height: 1; font-weight: 700;
+      color: var(--text-0); font-variant-numeric: tabular-nums; white-space: nowrap;
+    }
+    .ds-ref-stat span {
+      font-family: var(--font-mono); font-size: 7px; letter-spacing: .14em;
+      text-transform: uppercase; color: var(--text-3); white-space: nowrap;
+    }
+    .ds-ref-flag {
+      display: flex; align-items: center; padding: 0 10px; border-left: 1px solid var(--border);
+      font-family: var(--font-mono); font-size: 7.5px; font-weight: 600; letter-spacing: .16em;
+      text-transform: uppercase; color: var(--yellow);
+      background: repeating-linear-gradient(-45deg, transparent 0 3px, var(--yellow-dim) 3px 6px);
+    }
+    .ds-ref-legend {
+      display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px;
+      margin-top: 7px; padding-top: 5px; border-top: 1px solid var(--border);
+    }
+    .ds-ref-key {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-family: var(--font-mono); font-size: 7.5px; letter-spacing: .12em;
+      text-transform: uppercase; color: var(--text-3);
+    }
+    .ds-ref-key i { width: 5px; height: 5px; background: var(--text-3); flex: none; }
+    .ds-ref-key.tier-research i { background: var(--yellow); }
+    .ds-ref-key b { font-weight: 700; letter-spacing: 0; color: var(--text-1); }
+    .ds-ref-deck {
+      display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, 1fr);
+      gap: 10px; margin-top: 7px; align-items: start;
+    }
+    .ds-ref-grid {
+      display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1px; background: var(--border); border: 1px solid var(--border);
+    }
+    .ds-ref-empty {
+      grid-column: 1 / -1; padding: 18px 10px; text-align: center;
+      font-size: 10.5px; color: var(--text-3); background: var(--bg-0);
+      border: 1px solid var(--border);
+    }
+    .ds-ref-tile {
+      display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center;
+      gap: 8px; min-height: 40px; padding: 4px 8px; border: 0; background: var(--bg-0);
+      font: inherit; text-align: left; color: inherit; cursor: pointer;
+    }
+    .ds-ref-tile:hover { background: var(--bg-2); }
+    .ds-ref-tile.is-active { background: var(--bg-2); box-shadow: inset 2px 0 0 var(--text-0); }
+    .ds-ref-tile:focus-visible { outline: 1px solid var(--text-0); outline-offset: -1px; }
+    .ds-ref-index {
+      font-family: var(--font-mono); font-size: 7.5px; font-weight: 700; letter-spacing: .04em;
+      color: var(--text-3); padding: 1px 4px; border: 1px solid var(--border);
+      align-self: start; margin-top: 1px;
+    }
+    .ds-ref-tile.is-active .ds-ref-index { color: var(--text-0); border-color: var(--text-0); }
+    .ds-ref-tile-main { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    .ds-ref-name {
+      font-size: 10.5px; font-weight: 650; line-height: 1.25; color: var(--text-0);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+    }
+    .ds-ref-meta { font-family: var(--font-mono); font-size: 7.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .ds-ref-tier {
+      font-family: var(--font-mono); font-size: 6.5px; font-weight: 600; letter-spacing: .08em;
+      text-transform: uppercase; color: var(--text-3); border: 1px solid var(--border);
+      padding: 1px 4px; white-space: nowrap;
+    }
+    .ds-ref-tier.tier-research { color: var(--yellow); border-color: color-mix(in srgb, var(--yellow) 40%, var(--border)); }
+    .ds-ref-inspector {
+      display: flex; flex-direction: column; min-height: 100%; padding: 10px 11px 11px;
+      border: 1px solid var(--border); background: var(--bg-0); position: relative;
+    }
+    .ds-ref-inspector::after {
+      content: ''; position: absolute; right: -1px; bottom: -1px; width: 9px; height: 9px;
+      border: 0 solid var(--text-0); border-right-width: 1px; border-bottom-width: 1px;
+    }
+    .ds-ref-inspector-head { display: flex; align-items: center; gap: 8px; }
+    .ds-ref-inspector-index {
+      font-family: var(--font-mono); font-size: 19px; font-weight: 800;
+      letter-spacing: .06em; line-height: 1; color: var(--text-0);
+    }
+    .ds-ref-inspector-flag {
+      margin-left: auto; font-family: var(--font-mono); font-size: 7px; letter-spacing: .16em;
+      text-transform: uppercase; color: var(--text-3); border: 1px solid var(--border); padding: 2px 5px;
+    }
+    .ds-ref-inspector-name { margin-top: 7px; font-size: 13.5px; font-weight: 700; line-height: 1.25; color: var(--text-0); }
+    .ds-ref-inspector-what { margin-top: 5px; font-size: 10.5px; line-height: 1.5; color: var(--text-1); }
+    .ds-ref-inspector-note {
+      margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--border);
+      font-size: 10px; line-height: 1.45; color: var(--text-2);
+    }
+    .ds-ref-inspector-note span {
+      display: block; margin-bottom: 2px; font-family: var(--font-mono); font-size: 7px;
+      letter-spacing: .16em; text-transform: uppercase; color: var(--yellow);
+    }
+    .ds-ref-spec {
+      display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 3px 8px; margin-top: 8px;
+      font-family: var(--font-mono); font-size: 8.5px; line-height: 1.4; color: var(--text-2);
+    }
+    .ds-ref-spec dt { font-size: 7px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); padding-top: 1px; }
+    .ds-ref-spec dd { margin: 0; overflow-wrap: anywhere; }
+    .ds-ref-inspector-actions { display: flex; align-items: center; gap: 12px; margin-top: auto; padding-top: 10px; }
+    .ds-ref-inspector-actions .text-link { font-size: 9px; }
+    @media (max-width: 1100px) {
+      .ds-ref-deck { grid-template-columns: 1fr; }
+      .ds-ref-inspector { min-height: 0; }
+    }
     .ds-commons {
       display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
       margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border);
@@ -2642,8 +2808,9 @@
       color: var(--text-3); margin-top: 2px;
     }
     .replay-fp {
-      margin-top: 8px; border: 1px solid var(--border); background: var(--bg-1);
+      margin-top: 8px; border: 1px solid var(--border); background: var(--bg-0);
       padding: 7px 9px 6px;
+      display: flex; flex-direction: column; min-height: 0;
     }
     .replay-fp-head {
       display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
@@ -2652,6 +2819,147 @@
     }
     .replay-fp-sub { color: var(--text-3); letter-spacing: 0; text-transform: none; margin-left: 5px; }
     #replayFingerprint { width: 100%; height: 156px; display: block; margin-top: 3px; }
+    /* Session Replay — a contained dock. Its controls get their own surface so
+       they never read as a second row of the recordings toolbar behind it. The
+       body is a two-column deck: trace on the left, fingerprint on the right. */
+    #replayPanel {
+      display: flex;
+      flex-direction: column;
+      flex: 0 0 auto;
+      min-height: 0;
+      max-height: 72vh;
+      margin: 10px 8px 8px;
+      background: var(--bg-1);
+      border: 1px solid var(--border);
+      box-shadow: 0 -10px 24px rgba(26, 26, 23, 0.06);
+    }
+    .replay-grip {
+      flex: none;
+      height: 7px;
+      cursor: ns-resize;
+      background: var(--bg-2);
+      border-bottom: 1px solid var(--border);
+      position: relative;
+    }
+    .replay-grip::before {
+      content: '';
+      position: absolute;
+      left: 50%;
+      top: 2px;
+      width: 34px;
+      height: 2px;
+      transform: translateX(-50%);
+      background: var(--border);
+      transition: background 0.12s ease;
+    }
+    .replay-grip:hover::before,
+    .replay-grip:focus-visible::before { background: var(--cyan); }
+    .replay-grip:focus-visible { outline: 1px solid var(--cyan); outline-offset: -1px; }
+    .replay-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      flex: none;
+      padding: 8px 10px;
+      background: var(--bg-2);
+      border-bottom: 1px solid var(--border);
+    }
+    .replay-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin: 0;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+      color: var(--text-0);
+      white-space: nowrap;
+    }
+    .replay-tag {
+      font-family: var(--font-mono);
+      font-size: 7px;
+      font-weight: 600;
+      letter-spacing: .16em;
+      color: var(--text-3);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+    }
+    .replay-controls {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+      gap: 5px;
+      min-width: 0;
+    }
+    .replay-controls select { flex: none; }
+    .replay-controls button { padding: 4px 9px; }
+    .replay-controls #replayExpand { padding: 4px 7px; color: var(--text-2); }
+    .replay-controls #replayClose { margin-left: 2px; border-color: var(--border-strong); color: var(--text-1); }
+    .replay-body {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 8px 10px;
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(280px, 0.9fr);
+      grid-template-rows: auto minmax(140px, 1fr) auto;
+      gap: 6px 12px;
+      align-items: stretch;
+    }
+    .replay-inline-controls {
+      grid-column: 1;
+      grid-row: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      padding: 0;
+    }
+    .replay-canvas {
+      grid-column: 1;
+      grid-row: 2;
+      min-height: 140px;
+      height: auto;
+      margin-top: 0;
+    }
+    .replay-fp {
+      grid-column: 2;
+      grid-row: 1 / span 2;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      margin-top: 0;
+    }
+    .replay-body #replayFingerprint {
+      flex: 1 1 auto;
+      min-height: 100px;
+      height: auto;
+    }
+    .replay-note {
+      grid-column: 1 / -1;
+      grid-row: 3;
+      margin-top: 0;
+      font-size: 9px;
+      line-height: 1.45;
+      color: var(--text-3);
+    }
+    @media (max-width: 860px) {
+      .replay-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(160px, 1fr) auto auto; }
+      .replay-fp { grid-column: 1; grid-row: 3; }
+      .replay-note { grid-row: 4; }
+    }
+    @media (max-height: 700px) {
+      .library { min-height: 200px; }
+      #panel-dashboard .traces-area > .canvas-wrap { min-height: 190px; }
+    }
+    @media (max-width: 760px) {
+      .replay-head { align-items: flex-start; flex-direction: column; }
+      .replay-controls { justify-content: flex-start; }
+    }
 
     /* === Train Tab === */
     .train { display: flex; flex-direction: column; height: 100%; }
@@ -3802,6 +4110,7 @@
               <div id="vialHomeBody"></div>
             </div>
             <div class="dock" id="underDock">
+              <div class="dock-grip" id="dockGrip" role="separator" aria-orientation="horizontal" aria-label="Resize the measured response strip" tabindex="0" title="Drag to resize · double-click to collapse"></div>
               <div class="dock-head">
                 <span>SYS.PHENO</span>
                 <span>measured response</span>
@@ -3843,6 +4152,7 @@
               </div>
             </div>
           </div>
+          <div class="rail-grip" id="railGrip" role="separator" aria-orientation="vertical" aria-label="Resize the telemetry rail" tabindex="0" title="Drag to resize · double-click to reset"></div>
           <aside class="sidebar">
             <div class="rail-head">
               <span class="section-label">Live Telemetry</span>
@@ -4158,9 +4468,10 @@
         </div>
 
         <!-- Session Replay -->
-        <div class="replay" id="replayPanel" style="margin-top:14px;display:none">
+        <div class="replay" id="replayPanel" style="display:none">
+          <div class="replay-grip" id="replayGrip" role="separator" aria-orientation="horizontal" aria-label="Resize replay panel" tabindex="0" title="Drag to resize · double-click to expand"></div>
           <div class="replay-head">
-            <h2 style="font-size:13px;letter-spacing:1px">Session Replay
+            <h2 class="replay-title">Session Replay
               <span class="replay-tag">REPLAY</span>
             </h2>
             <div class="replay-controls">
@@ -4179,25 +4490,28 @@
                 <option value="4">4×</option>
                 <option value="8">8×</option>
               </select>
+              <button id="replayExpand" title="Expand or compact the replay dock" aria-label="Expand replay">⤢</button>
               <button id="replayClose" title="Close replay">✕</button>
             </div>
           </div>
-          <div class="replay-inline-controls">
-            <input type="range" id="replayScrub" min="0" max="1000" value="0" style="flex:1" />
-            <span id="replayTime" style="font-size:10px;color:var(--text-3);min-width:110px;text-align:right">00:00 / 00:00</span>
-          </div>
-          <div class="canvas-wrap" style="height:160px;margin-top:8px">
-            <canvas id="replayCanvas"></canvas>
-          </div>
-          <div class="replay-fp" id="replayFpPanel">
-            <div class="replay-fp-head">
-              <span>Fingerprint evolution <span class="replay-fp-sub">signed response · rows = channels</span></span>
-              <span class="coord-tag" id="replayFpStamp">load a session</span>
+          <div class="replay-body">
+            <div class="replay-inline-controls">
+              <input type="range" id="replayScrub" min="0" max="1000" value="0" style="flex:1" />
+              <span id="replayTime" style="font-size:10px;color:var(--text-3);min-width:110px;text-align:right">00:00 / 00:00</span>
             </div>
-            <canvas id="replayFingerprint"></canvas>
-          </div>
-          <div style="font-size:10px;color:var(--text-3);margin-top:6px" id="replayNote">
-            Replays a recorded session offline. Intended for inspection only — it does not feed the live detector or classifier.
+            <div class="canvas-wrap replay-canvas">
+              <canvas id="replayCanvas"></canvas>
+            </div>
+            <div class="replay-fp" id="replayFpPanel">
+              <div class="replay-fp-head">
+                <span>Fingerprint evolution <span class="replay-fp-sub">signed response · rows = channels</span></span>
+                <span class="coord-tag" id="replayFpStamp">load a session</span>
+              </div>
+              <canvas id="replayFingerprint"></canvas>
+            </div>
+            <div class="replay-note" id="replayNote">
+              Replays a recorded session offline. Intended for inspection only — it does not feed the live detector or classifier.
+            </div>
           </div>
         </div>
           </div><!-- /src-sessions -->
@@ -4239,14 +4553,20 @@
               <div id="datasetCatalog" class="dataset-catalog">Loading…</div>
 
               <div class="ds-ref-section">
-                <div class="ds-shelf-head">
-                  <div>
-                    <span class="ds-shelf-title">Reference only</span>
-                    <span class="ds-shelf-note">Licence or format does not allow a one-click import.</span>
+                <div class="ds-ref-head">
+                  <div class="ds-ref-head-main">
+                    <span class="ds-ref-kicker">Archive · read-only</span>
+                    <span class="ds-ref-title">Reference only</span>
+                    <span class="ds-ref-note">Licence or format does not allow a one-click import.</span>
                   </div>
-                  <span class="coord-tag" id="dsRefStamp">0 reference</span>
+                  <div class="ds-ref-readout">
+                    <span class="ds-ref-stat"><b id="dsRefCount">0</b><span>in catalogue</span></span>
+                    <span class="ds-ref-stat"><b id="dsRefStamp">0 shown</b><span>visible</span></span>
+                    <span class="ds-ref-flag">Import disabled</span>
+                  </div>
                 </div>
-                <div id="referenceCatalog" class="ds-ref-list"></div>
+                <div class="ds-ref-legend" id="dsRefLegend"></div>
+                <div id="referenceCatalog" class="ds-ref-deck"></div>
               </div>
 
               <div class="ds-commons">
