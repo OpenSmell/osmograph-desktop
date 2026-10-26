@@ -135,7 +135,10 @@ export interface DomainValidationCheck {
 }
 
 export interface DomainValidation {
+  /** The install gate: every critical check passed. */
   passed: boolean;
+  /** The listing gate: v2, installable, and backed by at least one fixture. */
+  gated: boolean;
   imported: boolean;
   checks: DomainValidationCheck[];
   errors: string[];
@@ -832,7 +835,11 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
 
   const errors = checks.filter(c => c.critical && !c.passed).map(c => c.detail);
   const warnings = checks.filter(c => !c.critical && !c.passed).map(c => c.detail);
-  return { passed: errors.length === 0, imported, checks, errors, warnings };
+  const fixtures = checks.find(c => c.id === 'evidence-fixtures');
+  const gated = errors.length === 0
+    && pack.schema === 'osmograph.domain-pack/2'
+    && !!fixtures?.passed;
+  return { passed: errors.length === 0, gated, imported, checks, errors, warnings };
 }
 
 export function domainPackToJson(pack: DomainPack): string {

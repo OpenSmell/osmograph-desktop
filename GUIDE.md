@@ -141,7 +141,7 @@ Replay plays a recorded session at 0.5×–8× with a scrub bar. The live finger
 
 A v2 Vial declares an anomaly profile in the manifest: the baseline protocol and window, the response transforms, per-channel limits, min-channel corroboration, persistence, hysteresis, escalation, admissibility, and a false-alarm target. The host compiles that profile into a detector owned by the Vial. Two Vials can watch the same array at once with different profiles; neither can change the other or raise the base alert level. The UI reads the host verdict and adds domain interpretation; it cannot override the detector.
 
-The local gate checks the schema, the profile ranges, the evidence, the citations, the sandbox, and the placeholder policy. **Open** means the local gate failed and the UI labels the Vial **Ungated**. **Gated** means every critical check passed. A registry listing adds a human review of the claim and its evidence, and pins the manifest sha256, every UI asset sha256, and every declared fixture sha256. A signature is external and is never minted locally.
+The local gate checks the schema, the profile ranges, the evidence, the citations, the sandbox, and the placeholder policy. **Open** means the local gate failed, or the v2 profile has no fixture, and the UI labels the Vial **Ungated**. **Gated** means every critical check passed and at least one declarative fixture is present. A registry listing adds a human review of the claim and its evidence, and pins the manifest sha256, every UI asset sha256, and every declared fixture sha256. A signature is external and is never minted locally.
 
 - The profile is the program. A screen without a profile is a description, not a Vial.
 - A v2 UI cannot call `setDetection` or `setTransforms`; those are legacy-only.

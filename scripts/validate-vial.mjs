@@ -134,7 +134,8 @@ for (const [label, spec] of [['ui-asset', pack.ui], ['home-ui-asset', pack.homeU
 }
 
 const ok = validation.passed && !uiError;
-console.log(`${ok ? 'PASS' : 'FAIL'} ${pack.id}@${pack.version} — ${passed}/${total} policy checks`);
+const label = ok ? (validation.gated ? 'PASS' : 'PASS (Ungated)') : 'FAIL';
+console.log(`${label} ${pack.id}@${pack.version} — ${passed}/${total} policy checks`);
 const printed = new Set();
 for (const check of validation.checks) {
   if (!check.passed) {
@@ -146,4 +147,7 @@ for (const warning of validation.warnings) {
   if (!printed.has(warning)) console.log(`  warn  ${warning}`);
 }
 if (uiError) console.log(`  ERROR ${uiError}`);
+if (ok && !validation.gated && pack.schema === 'osmograph.domain-pack/2') {
+  console.log('  note  Gated requires at least one declarative fixture. Add one under fixtures/ and run noses test.');
+}
 process.exit(ok ? 0 : 1);

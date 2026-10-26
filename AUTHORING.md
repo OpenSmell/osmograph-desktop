@@ -61,7 +61,7 @@ the two disagree, the host wins.
 | `vial.json` | yes | `osmograph.domain-pack/2`. The profile, the UI contract, and the evidence. |
 | `ui.html` | optional | The workspace body fragment. Referenced by `ui.entry`. |
 | `home.html` | optional | The compact Home fragment. Referenced by `homeUi.entry` and paired with a `home` block. |
-| `fixtures/*.json` | for a listing | Declarative cases for `noses test`. Pinned at review. |
+| `fixtures/*.json` | for Gated | Declarative cases for `noses test`; a v2 without one is Ungated. Pinned at review. |
 | `EVIDENCE.md` | for a listing | The held-out report at `evidence.reportUrl`. |
 | `README.md` | yes | What the Vial does, how to install it, and the evidence path. |
 
