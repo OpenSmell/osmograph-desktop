@@ -197,8 +197,13 @@ fn download_attempt(
         }
     }
 
+    // No global timeout: a slow corpus file may legitimately take a long time.
+    // Connect and header waits are still bounded, so a dead host fails instead
+    // of pinning the download worker forever.
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(None)
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(60)))
         .build()
         .into();
     let mut request = agent
@@ -207,9 +212,17 @@ fn download_attempt(
     if resume > 0 {
         request = request.header("Range", &format!("bytes={resume}-"));
     }
-    let resp = request
-        .call()
-        .map_err(|e| format!("Download failed: {e}"))?;
+    let resp = match request.call() {
+        Ok(resp) => resp,
+        // A complete-looking `.part` can come from a crash just before rename.
+        // Without an expected size we cannot prove it is complete, so discard
+        // it and retry from byte zero instead of leaving the job stuck on 416.
+        Err(ureq::Error::StatusCode(416)) if resume > 0 => {
+            let _ = fs::remove_file(&part);
+            return Err("Download could not resume; restarting from the start.".to_string());
+        }
+        Err(e) => return Err(format!("Download failed: {e}")),
+    };
 
     // A server that ignores Range replies with 200 and the whole file. In that
     // case the old partial is discarded rather than appended twice.
@@ -516,6 +529,55 @@ mod tests {
 
         assert_eq!(out.bytes, 8);
         assert_eq!(fs::read(&dest).unwrap(), b"complete");
+        assert!(!part_path(&dest).exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restarts_when_a_complete_looking_part_is_rejected() {
+        let dir = temp_dir("rejected-resume");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                if attempt == 0 {
+                    assert!(request.contains("range: bytes=5-"));
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        )
+                        .unwrap();
+                } else {
+                    assert!(!request.contains("range:"));
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nfresh",
+                        )
+                        .unwrap();
+                }
+            }
+        });
+
+        let dest = dir.join("note.txt");
+        fs::write(part_path(&dest), b"stale").unwrap();
+        let control = DownloadControl::default();
+        let out = download_url(
+            &dir,
+            &format!("http://{addr}/note.txt"),
+            "note.txt",
+            None,
+            &control,
+            |_, _, _| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(out.bytes, 5);
+        assert_eq!(fs::read(&dest).unwrap(), b"fresh");
         assert!(!part_path(&dest).exists());
         let _ = fs::remove_dir_all(dir);
     }
