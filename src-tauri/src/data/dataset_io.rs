@@ -14,6 +14,10 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+/// One retry is not enough for a 500-file corpus on a flaky connection; three
+/// attempts cover a transient reset without hammering the source.
+const DOWNLOAD_ATTEMPTS: usize = 3;
+
 /// Shared, thread-safe controls for one in-flight download.
 #[derive(Default)]
 pub struct DownloadControl {
@@ -59,12 +63,56 @@ fn safe_filename(name: &str) -> Result<String, String> {
     Ok(name.to_string())
 }
 
+/// Downloads stream into a hidden `.part` beside the final file. A crash or a
+/// killed network must never leave a short file at the final path, because the
+/// next launch would mistake it for a complete download and import it.
+fn part_path(dest: &Path) -> PathBuf {
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download");
+    dest.with_file_name(format!(".{name}.part"))
+}
+
+fn cached_file(dest: &Path, expected_size: Option<u64>) -> Option<u64> {
+    let m = fs::metadata(dest).ok()?;
+    if !m.is_file() || m.len() == 0 {
+        return None;
+    }
+    match expected_size {
+        Some(want) if want != m.len() => None,
+        _ => Some(m.len()),
+    }
+}
+
+fn retryable(err: &str) -> bool {
+    // A 4xx is not a transient network problem; retrying it would only delay
+    // the honest failure the user needs to see.
+    !err.contains("http status: 4")
+}
+
+fn cancelled_outcome(dest: &Path, filename: String, bytes: u64) -> DownloadOutcome {
+    let _ = fs::remove_file(part_path(dest));
+    DownloadOutcome {
+        path: dest.to_string_lossy().into_owned(),
+        filename,
+        bytes,
+        cancelled: true,
+        cached: false,
+    }
+}
+
 /// Stream `url` into `dest_dir/filename`, honouring `control` for pause/cancel and
 /// calling `on_progress(received, total, paused)` as bytes land.
+///
+/// A partial `.part` is resumed with a Range request when the source supports
+/// it, or restarted from byte zero when it does not. A finished download is
+/// renamed atomically, so the visible path is always a complete file.
 pub fn download_url(
     dest_dir: &Path,
     url: &str,
     filename: &str,
+    expected_size: Option<u64>,
     control: &DownloadControl,
     mut on_progress: impl FnMut(u64, Option<u64>, bool),
 ) -> Result<DownloadOutcome, String> {
@@ -74,15 +122,78 @@ pub fn download_url(
 
     // Already fetched? Hand it straight back — pressing Play twice must never
     // re-download. (Extraction/import downstream are idempotent.)
-    if let Ok(m) = fs::metadata(&dest) {
-        if m.is_file() && m.len() > 0 {
+    if let Some(bytes) = cached_file(&dest, expected_size) {
+        return Ok(DownloadOutcome {
+            path: dest.to_string_lossy().into_owned(),
+            filename,
+            bytes,
+            cancelled: false,
+            cached: true,
+        });
+    }
+    // A final path with the wrong size is a broken earlier attempt, not a
+    // cache hit. Remove it so the next attempt can land cleanly.
+    if dest.exists() {
+        let _ = fs::remove_file(&dest);
+    }
+
+    let mut last_err = String::new();
+    for attempt in 0..DOWNLOAD_ATTEMPTS {
+        if control.cancelled() {
+            return Ok(cancelled_outcome(&dest, filename, 0));
+        }
+        match download_attempt(
+            &dest,
+            url,
+            expected_size,
+            control,
+            &mut on_progress,
+        ) {
+            Ok(out) => return Ok(out),
+            Err(err) => {
+                if control.cancelled() {
+                    return Ok(cancelled_outcome(&dest, filename, 0));
+                }
+                last_err = err;
+                if attempt + 1 < DOWNLOAD_ATTEMPTS && retryable(&last_err) {
+                    std::thread::sleep(Duration::from_millis(600 * (attempt as u64 + 1)));
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err)
+}
+
+fn download_attempt(
+    dest: &Path,
+    url: &str,
+    expected_size: Option<u64>,
+    control: &DownloadControl,
+    on_progress: &mut impl FnMut(u64, Option<u64>, bool),
+) -> Result<DownloadOutcome, String> {
+    let filename = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download")
+        .to_string();
+    let part = part_path(dest);
+    let mut resume = fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
+    if let Some(want) = expected_size {
+        if resume == want {
+            fs::rename(&part, dest).map_err(|e| e.to_string())?;
             return Ok(DownloadOutcome {
                 path: dest.to_string_lossy().into_owned(),
                 filename,
-                bytes: m.len(),
+                bytes: want,
                 cancelled: false,
-                cached: true,
+                cached: false,
             });
+        }
+        if resume > want {
+            let _ = fs::remove_file(&part);
+            resume = 0;
         }
     }
 
@@ -90,21 +201,43 @@ pub fn download_url(
         .timeout_global(None)
         .build()
         .into();
-
-    let resp = agent
+    let mut request = agent
         .get(url)
+        .header("User-Agent", "Osmograph/0.1 dataset-import");
+    if resume > 0 {
+        request = request.header("Range", &format!("bytes={resume}-"));
+    }
+    let resp = request
         .call()
         .map_err(|e| format!("Download failed: {e}"))?;
+
+    // A server that ignores Range replies with 200 and the whole file. In that
+    // case the old partial is discarded rather than appended twice.
+    let resumed = resume > 0 && resp.status().as_u16() == 206;
+    let base = if resumed { resume } else { 0 };
     let total = resp
         .headers()
         .get("content-length")
         .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.parse::<u64>().ok());
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|n| n + base);
 
+    let mut file = if resumed {
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&part)
+            .map_err(|e| e.to_string())?
+    } else {
+        fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&part)
+            .map_err(|e| e.to_string())?
+    };
     let mut reader = resp.into_body().into_reader();
-    let mut file = fs::File::create(&dest).map_err(|e| e.to_string())?;
     let mut buf = [0u8; 64 * 1024];
-    let mut received: u64 = 0;
+    let mut received: u64 = base;
 
     loop {
         if control.paused() {
@@ -131,16 +264,28 @@ pub fn download_url(
 
     if control.cancelled() {
         drop(file);
-        let _ = fs::remove_file(&dest);
-        return Ok(DownloadOutcome {
-            path: dest.to_string_lossy().into_owned(),
-            filename,
-            bytes: received,
-            cancelled: true,
-            cached: false,
-        });
+        return Ok(cancelled_outcome(dest, filename, received));
     }
 
+    file.flush().map_err(|e| e.to_string())?;
+    drop(file);
+
+    if let Some(total) = total {
+        if received != total {
+            return Err(format!(
+                "Download ended early: received {received} of {total} bytes. Retry to resume."
+            ));
+        }
+    }
+    if let Some(want) = expected_size {
+        if received != want {
+            return Err(format!(
+                "Download size mismatch: received {received}, source lists {want} bytes."
+            ));
+        }
+    }
+
+    fs::rename(&part, dest).map_err(|e| e.to_string())?;
     Ok(DownloadOutcome {
         path: dest.to_string_lossy().into_owned(),
         filename,
@@ -155,6 +300,9 @@ pub fn download_url(
 pub struct BatchFile {
     pub url: String,
     pub path: String,
+    /// The source's advertised size, when it lists one. Used to reject a short
+    /// cached file instead of importing a truncated CSV.
+    pub expected_size: Option<u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -165,7 +313,7 @@ pub struct BatchOutcome {
     pub cancelled: bool,
 }
 
-fn safe_relative(path: &str) -> Result<PathBuf, String> {
+pub(crate) fn safe_relative(path: &str) -> Result<PathBuf, String> {
     let rel = Path::new(path);
     if rel.is_absolute() {
         return Err(format!("Unsafe dataset path: {path}"));
@@ -193,7 +341,10 @@ pub fn download_batch(
     mut on_progress: impl FnMut(usize, usize, u64, Option<u64>, bool),
 ) -> Result<BatchOutcome, String> {
     fs::create_dir_all(dest_root).map_err(|e| e.to_string())?;
-    let total_bytes: Option<u64> = None;
+    let total_bytes = files
+        .iter()
+        .map(|f| f.expected_size)
+        .try_fold(0u64, |sum, size| size.map(|n| sum + n));
     let mut received_total: u64 = 0;
     let mut saved: Vec<String> = Vec::new();
 
@@ -209,9 +360,16 @@ pub fn download_batch(
         let rel = safe_relative(&file.path)?;
         let parent = dest_root.join(rel.parent().unwrap_or_else(|| Path::new("")));
         let name = rel.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-        let outcome = download_url(&parent, &file.url, name, control, |received, _total, paused| {
-            on_progress(index, files.len(), received_total + received, total_bytes, paused);
-        })?;
+        let outcome = download_url(
+            &parent,
+            &file.url,
+            name,
+            file.expected_size,
+            control,
+            |received, _total, paused| {
+                on_progress(index, files.len(), received_total + received, total_bytes, paused);
+            },
+        )?;
         if outcome.cancelled {
             return Ok(BatchOutcome {
                 root: dest_root.to_string_lossy().into_owned(),
@@ -266,4 +424,106 @@ pub fn extract_csvs(zip_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>, St
         out.push(target);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "osmograph-dataset-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn serve_once(
+        listener: TcpListener,
+        assert_request: impl Fn(&str) + Send + 'static,
+        response: Vec<u8>,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..n]);
+            assert_request(&request);
+            stream.write_all(&response).unwrap();
+        })
+    }
+
+    #[test]
+    fn resumes_a_partial_file_with_range() {
+        let dir = temp_dir("resume");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_once(
+            listener,
+            |request| assert!(request.to_ascii_lowercase().contains("range: bytes=6-")),
+            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 5\r\nContent-Range: bytes 6-10/11\r\nConnection: close\r\n\r\nworld".to_vec(),
+        );
+
+        let dest = dir.join("note.txt");
+        fs::write(part_path(&dest), b"hello ").unwrap();
+        let control = DownloadControl::default();
+        let out = download_url(
+            &dir,
+            &format!("http://{addr}/note.txt"),
+            "note.txt",
+            Some(11),
+            &control,
+            |_, _, _| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(out.bytes, 11);
+        assert_eq!(fs::read(&dest).unwrap(), b"hello world");
+        assert!(!part_path(&dest).exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn restarts_when_the_source_ignores_range() {
+        let dir = temp_dir("restart");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = serve_once(
+            listener,
+            |request| assert!(request.to_ascii_lowercase().contains("range: bytes=4-")),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\ncomplete".to_vec(),
+        );
+
+        let dest = dir.join("note.txt");
+        fs::write(part_path(&dest), b"junk").unwrap();
+        let control = DownloadControl::default();
+        let out = download_url(
+            &dir,
+            &format!("http://{addr}/note.txt"),
+            "note.txt",
+            Some(8),
+            &control,
+            |_, _, _| {},
+        )
+        .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(out.bytes, 8);
+        assert_eq!(fs::read(&dest).unwrap(), b"complete");
+        assert!(!part_path(&dest).exists());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn rejects_parent_components() {
+        assert!(safe_relative("corpus/../../etc/passwd").is_err());
+        assert!(safe_relative("/absolute/path").is_err());
+        assert!(safe_relative("corpus/base_data/apple.csv").is_ok());
+    }
 }

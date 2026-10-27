@@ -1532,7 +1532,8 @@
     }
     .sep-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 8px; }
     .sep-title { font-size: 12px; font-weight: 600; color: var(--text-0); }
-    .sep-head .coord-tag { margin-left: auto; }
+    .sep-head-actions { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; }
+    .sep-head-actions .coord-tag { margin-left: 0; }
     .sep-pairs {
       display: grid; gap: 8px;
       grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
@@ -4223,7 +4224,7 @@
                   <span class="smells-selection" id="smellSelectionBar" hidden>
                     <span class="coord-tag" id="smellSelStamp">0 selected</span>
                     <button class="mini-btn" id="smellCompare" disabled>Compare</button>
-                    <button class="mini-btn" id="smellClearSel">Clear</button>
+                    <button class="mini-btn" id="smellClearSel" type="button">Deselect all</button>
                   </span>
                 </div>
               </div>
@@ -4335,34 +4336,21 @@
                 <div class="vials-head">
                   <div>
                     <h2>Vials</h2>
-                    <p class="hint">Domain workspaces and closed-set decisions. Install more from the Aromatory.</p>
+                    <p class="hint">Domain workspaces with a profile, a log, and explicit limits. Install more from the Aromatory.</p>
                   </div>
                   <div class="vials-actions">
-                    <span class="coord-tag" id="vialsSummary">0 domain · 0 decisions · 0 gated</span>
+                    <span class="coord-tag" id="vialsSummary">0 workspaces · 0 available</span>
                     <button class="text-link" type="button" data-guide-open="vials">Validation gate →</button>
-                    <input type="file" id="vialImportFile" accept=".json,application/json" hidden />
                     <input type="file" id="domainImportFile" accept=".json,application/json" hidden />
                   </div>
                 </div>
                 <div class="vials-switch" role="tablist" aria-label="Vial categories">
                   <button class="vials-switch-btn active" type="button" data-vials-tab="workspaces">Workspaces <span id="vialsWorkspacesCount">0</span></button>
-                  <button class="vials-switch-btn" type="button" data-vials-tab="decisions">Decisions <span id="vialsDecisionsCount">0</span></button>
                   <button class="vials-switch-btn" type="button" data-vials-tab="aromatory">Aromatory <span id="vialsAromatoryCount">0</span></button>
                 </div>
                 <div id="vialsWorkspacesPane" class="vials-pane-section">
                   <div class="vials-note"><b>Workspaces.</b> Open a protocol, keep its log, follow its stop rules.</div>
                   <div id="domainInstalledList" class="domain-area"></div>
-                </div>
-                <div id="vialsDecisionsPane" class="vials-pane-section" style="display:none">
-                  <div class="vials-note"><b>Decisions.</b> Closed-set evidence. Gated when the local gate passes. "Sealed" is reserved for reviewed, signed Vials — it is never minted locally.</div>
-                  <div class="vials-section-head">
-                    <span>Your decision Vials <span class="coord-tag" id="vialsDecisionCount">0</span></span>
-                    <span class="vials-inline-actions">
-                      <button class="mini-btn" id="vialImportBtn" type="button">Import .vial.json</button>
-                      <button class="mini-btn primary" id="vialNewBtn" type="button">New Vial</button>
-                    </span>
-                  </div>
-                  <div id="vialsList" class="vials-list"></div>
                 </div>
                 <div id="vialsAromatoryPane" class="vials-pane-section" style="display:none">
                   <div class="vials-note"><b>Aromatory.</b> Author-hosted Vials, one local policy gate, and an optional sandboxed UI.</div>
@@ -5633,80 +5621,6 @@ Confidence: 97.3%</div>
         <button id="sdCompare" class="mini-btn" type="button">Compare replicates</button>
         <button id="sdCard" class="mini-btn primary" type="button">Save card</button>
       </div>
-    </div>
-  </div>
-
-  <!-- Create a Vial from a saved check. -->
-  <div id="vialCreateModal" class="modal" style="display:none">
-    <div class="modal-box vial-modal-box">
-      <div class="smell-detail-head">
-        <div>
-          <h3 style="margin:0">New Vial</h3>
-          <div class="hint" style="margin-top:2px">Package a saved check as a reusable, inspectable decision. Validation is local and evidence-based.</div>
-        </div>
-        <button id="vialCreateClose" class="mini-btn" type="button">Close</button>
-      </div>
-      <div class="vial-create-grid">
-        <div class="vial-form">
-          <label for="vialSourceCheck">Evidence source</label>
-          <select id="vialSourceCheck"></select>
-          <div id="vialEvidencePreview" class="vial-preview">Pick a saved check.</div>
-          <label for="vialName">Name</label>
-          <input id="vialName" type="text" maxlength="80" autocomplete="off" placeholder="Coffee roast match" />
-          <div class="vial-two">
-            <div><label for="vialAuthor">Author</label><input id="vialAuthor" type="text" maxlength="60" placeholder="@yourhandle" /></div>
-            <div><label for="vialVersion">Version</label><input id="vialVersion" type="text" maxlength="20" value="0.1.0" /></div>
-          </div>
-          <div class="vial-two">
-            <div><label for="vialDomain">Domain</label><input id="vialDomain" type="text" maxlength="60" placeholder="coffee" /></div>
-            <div><label for="vialLicense">License</label><input id="vialLicense" type="text" maxlength="40" value="CC-BY-4.0" /></div>
-          </div>
-          <label for="vialQuestion">Question</label>
-          <input id="vialQuestion" type="text" maxlength="160" placeholder="Can this array tell Banana from Apple apart?" />
-          <label for="vialDescription">Description</label>
-          <textarea id="vialDescription" maxlength="500" placeholder="What decision does this Vial support, and on what evidence?"></textarea>
-          <label for="vialLimits">Limits — one per line</label>
-          <textarea id="vialLimits" maxlength="800" placeholder="Closed-set comparison on this array.&#10;Scope, evidence, and the conditions this check refuses."></textarea>
-        </div>
-        <div class="vial-validation">
-          <h4>Validation gate</h4>
-          <p class="hint" style="margin:0">A Vial is gated only if every critical check passes. Otherwise it is saved as Ungated and labelled unusable for decisions. "Sealed" means external review plus a signature — a future state, never granted locally.</p>
-          <div id="vialValidationPreview"></div>
-          <div id="vialValidationChecks"></div>
-        </div>
-      </div>
-      <div id="vialCreateError" class="hint" style="display:none;color:var(--red)"></div>
-      <div class="modal-actions">
-        <button id="vialCreateDraft" class="mini-btn" type="button">Save draft</button>
-        <button id="vialCreateValidate" class="mini-btn primary" type="button">Validate &amp; publish</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- Inspect a Vial's claim, evidence, and validation history. -->
-  <div id="vialDetailModal" class="modal" style="display:none">
-    <div class="modal-box vial-detail-box">
-      <div class="smell-detail-head">
-        <div><h3 id="vialDetailTitle" style="margin:0">Vial</h3><div id="vialDetailMeta" class="hint" style="margin-top:2px"></div></div>
-        <button id="vialDetailClose" class="mini-btn" type="button">Close</button>
-      </div>
-      <div id="vialDetailBody"></div>
-    </div>
-  </div>
-
-  <!-- Use a Vial on a smell from the local library. -->
-  <div id="vialUseModal" class="modal" style="display:none">
-    <div class="modal-box vial-use-box">
-      <div class="smell-detail-head">
-        <div><h3 style="margin:0">Use Vial</h3><div id="vialUseIntro" class="hint" style="margin-top:2px"></div></div>
-        <button id="vialUseClose" class="mini-btn" type="button">Close</button>
-      </div>
-      <label for="vialUseSample" style="font-size:10px;color:var(--text-3);text-transform:uppercase;letter-spacing:.08em">Sample smell</label>
-      <select id="vialUseSample"></select>
-      <div class="modal-actions">
-        <button id="vialUseRun" class="mini-btn primary" type="button">Run check</button>
-      </div>
-      <div id="vialUseResult" class="vial-use-result"></div>
     </div>
   </div>
 

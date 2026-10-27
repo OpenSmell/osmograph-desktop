@@ -178,8 +178,9 @@ review of the claim and its evidence; the host still owns every refusal on insta
 - `osmograph.domain-pack/1` remains installable as a legacy manifest. It displays
   as **Ungated**. New listings require v2; a legacy entry remains visible until it is
   re-authored.
-- `osmograph.vial/1` is a saved Separability decision record in the local Decisions
-  tab. It stays local; a programmable DOMAIN Vial is a separate install.
+- `osmograph.vial/1` is retired. Pairwise results stay in the local Saved checks
+  store. Existing stored records are left untouched, but the desktop no longer
+  creates or surfaces them as Vials.
 
 Use `noses` for new work. The desktop's old scaffold script has been removed so
 there is one authoring path.

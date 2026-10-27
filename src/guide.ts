@@ -26,7 +26,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     bullets: [
       'No hardware? Download a real public corpus from Explore → Datasets, then use Gallery and Compare.',
       'Have a rig? Capture a baseline and a sample on the same channels, then use Separability.',
-      'Want a reusable decision? Package a saved Separability result as a Vial, or install a Domain Vial for a field protocol.',
+      'Want a repeatable protocol? Install a Domain Vial with its own profile, log, and stop rules. A pairwise result stays as a saved check in Analyse → Separability.',
     ],
   },
   {
@@ -107,7 +107,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     bullets: [
       'Gated is a local evidence status. A registry listing records human review; neither is a signature.',
       'Cross-rig generalisation needs its own calibration evidence.',
-      'The separate Decisions tab keeps a saved Separability result as a local decision record. A domain Vial is a programmable app with its own profile, UI, and evidence.',
+      'Saved checks keep the evidence for one pairwise result. A Domain Vial is a programmable workspace with its own profile, UI, evidence, and limits.',
     ],
   },
   {
@@ -168,9 +168,9 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     id: 'privacy',
     group: 'Data',
     title: 'Privacy, storage, and control',
-    summary: 'Recordings and decisions are local. You should be able to inspect, export, and delete them.',
+    summary: 'Recordings, checks, and Vial logs are local. You should be able to inspect, export, and delete them.',
     paragraphs: [
-      'Sessions live on disk in the app data directory. Saved checks use localStorage key osmograph.checks.v1; Vials use osmograph.vials.v1; domain-pack installs use osmograph.domain.installed.v1 and their logs use osmograph.domain.state.v1. These are local to this installation.',
+      'Sessions live on disk in the app data directory. Saved checks use localStorage key osmograph.checks.v1; domain-pack installs use osmograph.domain.installed.v1 and their logs use osmograph.domain.state.v1. These are local to this installation.',
       'The desktop app does not ship product analytics. Network access happens for explicit actions such as checking for a release, downloading a public dataset, or fetching from a configured source. Those actions are visible in the UI.',
       'Before sharing a Vial or a session, inspect it. A Vial can contain smell names, dates, usage counts, and provenance. Export is explicit; there is no silent upload.',
     ],
@@ -187,7 +187,7 @@ export const GUIDE_SECTIONS: GuideSection[] = [
     summary: 'Three short loops that produce something useful without pretending to have a lab.',
     paragraphs: [
       'Tutorial A — read a fingerprint. Download SmellNet in Explore → Datasets. Open Explore → Gallery, pick Banana, and read the per-channel curves, the replicate spread, the channel count, and rig health. Then tick Banana and Apple, press Compare, and read the same-array guard, the per-channel overlay, and the verdict. You have just inspected a real, labelled comparison.',
-      'Tutorial B — save a Separability result. In Analyse → Separability, read the class matrix, then choose a reference and a sample from the same array. Run the pair. Read the lower bound and the p-value, not just the badge. Save the result. Now open Vials → Decisions to keep the record. Read the validation gate before you rely on the result.',
+      'Tutorial B — save a Separability result. In Analyse → Separability, read the class matrix, then choose a reference and a sample from the same array. Run the pair. Read the lower bound and the p-value, not just the badge. Save the result. Reopen it from Saved checks whenever you want to compare it against the current library.',
       'Tutorial C — install a Domain Vial. Open Vials → Aromatory, install Fermentation Lab, and read its scope and stop rules before the log. Add one reading with a pH, temperature, and visual note. The point is the record, not the sensor trace. Then open Plant Respiration and read its “no ethylene channel” limit.',
     ],
   },

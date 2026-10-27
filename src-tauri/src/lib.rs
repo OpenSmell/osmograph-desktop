@@ -2941,12 +2941,19 @@ async fn dataset_download(
     let app2 = app.clone();
     let ctl = control.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        data::dataset_io::download_url(&dest_dir, &url, &tname, &ctl, |received, total, paused| {
-            let _ = app2.emit(
-                "dataset-download-progress",
-                DatasetProgress { filename: tname.clone(), received, total, paused },
-            );
-        })
+        data::dataset_io::download_url(
+            &dest_dir,
+            &url,
+            &tname,
+            None,
+            &ctl,
+            |received, total, paused| {
+                let _ = app2.emit(
+                    "dataset-download-progress",
+                    DatasetProgress { filename: tname.clone(), received, total, paused },
+                );
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -2967,7 +2974,8 @@ async fn dataset_download_batch(
     files: Vec<BatchSpec>,
 ) -> Result<data::dataset_io::BatchOutcome, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    let dest = data::dataset_io::datasets_dir(&dir).join(&dest_name);
+    let safe_dest = data::dataset_io::safe_relative(&dest_name)?;
+    let dest = data::dataset_io::datasets_dir(&dir).join(safe_dest);
     let control = Arc::new(data::dataset_io::DownloadControl::default());
     {
         let mut map = state.dataset_downloads.lock().map_err(|e| e.to_string())?;
@@ -2978,7 +2986,11 @@ async fn dataset_download_batch(
     let ctl = control.clone();
     let files: Vec<data::dataset_io::BatchFile> = files
         .into_iter()
-        .map(|f| data::dataset_io::BatchFile { url: f.url, path: f.filename })
+        .map(|f| data::dataset_io::BatchFile {
+            url: f.url,
+            path: f.filename,
+            expected_size: None,
+        })
         .collect();
     let result = tauri::async_runtime::spawn_blocking(move || {
         data::dataset_io::download_batch(&dest, &files, &ctl, |done, total, received, total_bytes, paused| {
@@ -3016,7 +3028,8 @@ async fn dataset_download_tree(
     dest_name: String,
 ) -> Result<data::dataset_io::BatchOutcome, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    let dest = data::dataset_io::datasets_dir(&dir).join(&dest_name);
+    let safe_dest = data::dataset_io::safe_relative(&dest_name)?;
+    let dest = data::dataset_io::datasets_dir(&dir).join(safe_dest);
     let control = Arc::new(data::dataset_io::DownloadControl::default());
     {
         let mut map = state.dataset_downloads.lock().map_err(|e| e.to_string())?;
@@ -3061,6 +3074,7 @@ async fn dataset_download_tree(
             files.push(data::dataset_io::BatchFile {
                 url: format!("https://huggingface.co/datasets/{}/resolve/main/{}", repo, encoded),
                 path: path.to_string(),
+                expected_size: item.get("size").and_then(|v| v.as_u64()),
             });
         }
         if files.is_empty() {

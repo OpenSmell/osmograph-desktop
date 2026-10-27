@@ -443,7 +443,7 @@ if (await openBtn.isVisible().catch(() => false)) {
   console.log('vials state:', JSON.stringify(await page.evaluate(() => ({
     ws: document.body.dataset.workspace,
     vialsTabs: [...document.querySelectorAll('[data-vials-tab]')].map(b => ({ t: b.dataset.vialsTab, active: b.classList.contains('active') })),
-    panes: ['vialsWorkspacesPane', 'vialsAromatoryPane', 'vialsDecisionsPane'].map(id => ({ id, visible: !!document.getElementById(id)?.offsetHeight })),
+    panes: ['vialsWorkspacesPane', 'vialsAromatoryPane'].map(id => ({ id, visible: !!document.getElementById(id)?.offsetHeight })),
     openBtns: [...document.querySelectorAll('[data-domain-open]')].map(b => ({ id: b.dataset.domainOpen, visible: !!(b.offsetWidth || b.offsetHeight) })),
     workspaceEl: !!document.querySelector('.domain-workspace, #domainWorkspace'),
   }))));

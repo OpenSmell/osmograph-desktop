@@ -2,7 +2,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { getVersion } from '@tauri-apps/api/app';
 import { DATASET_CATALOG, REFERENCE_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
-import * as Vial from './vials';
 import * as Domain from './domainPacks';
 import * as VialHost from './vialHost';
 import * as VialRuntime from './vialRuntime';
@@ -5499,8 +5498,12 @@ async function renderSmellSeparation(): Promise<void> {
       return `${titleCase(c.substance)} (${uniq.length ? uniq.join('/') : '?'} ch)`;
     });
     panel.innerHTML = `<div class="sep-head"><span class="sep-title">Would these separate on a new session?</span>
-        <span class="coord-tag">incomparable arrays</span></div>
+        <span class="sep-head-actions">
+          <button class="mini-btn" id="sepClearSel" type="button">Deselect all</button>
+          <span class="coord-tag">incomparable arrays</span>
+        </span></div>
       <div class="sep-lever">No channel-for-channel comparison: ${widths.join(' vs ')}. Separation is only meaningful between recordings from the same array width — re-record the missing smell on the same rig to compare them.</div>`;
+    panel.querySelector<HTMLButtonElement>('#sepClearSel')?.addEventListener('click', clearSmellSelection);
     return;
   }
 
@@ -5541,7 +5544,10 @@ async function renderSmellSeparation(): Promise<void> {
   panel.innerHTML = `
     <div class="sep-head">
       <span class="sep-title">Would these separate on a new session?</span>
-      <span class="coord-tag">${chosen.length} smells · ${pairs.length} pair${pairs.length === 1 ? '' : 's'} · worst first</span>
+      <span class="sep-head-actions">
+        <button class="mini-btn" id="sepClearSel" type="button">Deselect all</button>
+        <span class="coord-tag">${chosen.length} smells · ${pairs.length} pair${pairs.length === 1 ? '' : 's'} · worst first</span>
+      </span>
     </div>
     ${diffHtml}
     <div class="sep-pairs">
@@ -5550,6 +5556,7 @@ async function renderSmellSeparation(): Promise<void> {
     ${rest > 0 ? `<div class="sep-more">${rest} more pair${rest === 1 ? '' : 's'} better separated.</div>` : ''}
     <div class="sep-foot">σ = between-smell gap ÷ pooled replicate scatter. Level and shape are scored separately: level uses the steady response, shape uses amplitude-normalised timing (peak time, rise, retention, late slope). Each is a leave-one-recording-out nearest-centroid preview; the badge takes the best view, applies a 95% lower bound (8/10 ≠ 80%) and a label-shuffle p-value whose feature choice is repeated inside every shuffle. Absolute sensor levels are deliberately removed so the verdict reflects what survives a new session — a model trained on one dataset can score higher on it. Shuffling labels assumes the runs are exchangeable; if every replicate of one smell was collected together, a session or day confound can pass this test.</div>`;
 
+  panel.querySelector<HTMLButtonElement>('#sepClearSel')?.addEventListener('click', clearSmellSelection);
   const diffCanvas = document.getElementById('sepDiffPrint') as HTMLCanvasElement | null;
   if (diffCanvas) {
     if (diffValues) drawCheckDifference(diffCanvas, diffValues, diffChannels);
@@ -5703,6 +5710,14 @@ function updateSmellSelection(): void {
   if (stamp) stamp.textContent = `${smellSel.size} selected`;
   if (bar) bar.hidden = smellSel.size === 0;
   if (btn) btn.disabled = smellSel.size < 2;
+}
+
+/** One way out of a working set, from both the gallery bar and the comparison
+ *  brief. Reselecting is then just ticking cards again. */
+function clearSmellSelection(): void {
+  if (!smellSel.size) return;
+  smellSel.clear();
+  void renderSmellGallery();
 }
 
 function buildSmellCards(): void {
@@ -6332,7 +6347,6 @@ async function runCheck(): Promise<void> {
       ${sepPairHtml(pair)}
       <div class="check-actions">
         <button class="mini-btn primary" type="button" data-check-action="save">Save check</button>
-        <button class="mini-btn" type="button" data-check-action="vial">Package as Vial</button>
         <button class="mini-btn" type="button" data-check-action="card">Save card</button>
         <button class="mini-btn" type="button" data-check-action="copy">Copy summary</button>
       </div>`;
@@ -6867,7 +6881,6 @@ document.getElementById('checkResult')?.addEventListener('click', (ev) => {
   if (!target) return;
   const action = target.dataset.checkAction;
   if (action === 'save') openSaveCheckDialog();
-  else if (action === 'vial') openVialCreate('current');
   else if (action === 'card') void exportCurrentCheckCard();
   else if (action === 'copy') void copyCurrentCheck();
 });
@@ -6881,290 +6894,6 @@ document.getElementById('checkSavedList')?.addEventListener('click', (ev) => {
   const del = target.closest<HTMLButtonElement>('[data-check-del]');
   if (del?.dataset.checkDel) armOrDeleteSavedCheck(del.dataset.checkDel, del);
 });
-
-// === Vials — package a check into a reusable, validated decision ===
-// A Vial is the shareable object the rest of the platform was missing: a
-// closed-set claim plus the evidence, array, limits, and method that make it
-// inspectable. Creation is deliberately downstream of a saved check. A check
-// answers "can this array tell these two apart?"; a Vial says "here is that
-// answer as a decision someone else can try, validate, or refuse."
-const VIAL_AUTHOR_KEY = 'osmograph.vial.author.v1';
-const VIAL_CHECK_RECIPE: Vial.VialRecipeRef = {
-  id: 'check.baseline-relative.v1',
-  name: 'Baseline-relative fingerprint check',
-  version: '1.0.0',
-  steps: 3,
-};
-
-let vialCreateEvidence: Vial.VialEvidence | null = null;
-let vialDetailId: string | null = null;
-let vialUseId: string | null = null;
-let vialDeleteArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
-
-function vialStatusOf(v: Vial.VialManifest): Vial.VialStatus {
-  if (!v.validation) return 'draft';
-  return v.validation.passed ? 'gated' : 'open';
-}
-
-function vialStatusLabel(status: Vial.VialStatus): string {
-  return status === 'gated' ? 'Gated' : status === 'open' ? 'Ungated' : 'Draft';
-}
-
-function vialCorrect(c: Vial.VialClaim): string {
-  if (!Number.isFinite(c.accuracy) || c.nEval <= 0) return '—';
-  return `${Math.round(c.accuracy * c.nEval)}/${c.nEval}`;
-}
-
-function vialLower(c: Vial.VialClaim): string {
-  return Number.isFinite(c.lowerBound) ? `${Math.round(c.lowerBound * 100)}%` : '—';
-}
-
-function vialP(c: Vial.VialClaim): string {
-  return Number.isFinite(c.pValue)
-    ? `p ${c.pValue < 0.001 ? '< 0.001' : `= ${c.pValue.toFixed(3)}`}`
-    : 'p n/a';
-}
-
-function vialEvidenceFromCurrentCheck(): Vial.VialEvidence | null {
-  const c = checkCurrent;
-  if (!c?.pair) return null;
-  return {
-    question: `Can this array tell ${titleCase(c.a.substance)} from ${titleCase(c.b.substance)} apart?`,
-    referenceKey: c.a.key,
-    sampleKey: c.b.key,
-    reference: titleCase(c.a.substance),
-    sample: titleCase(c.b.substance),
-    verdict: c.pair.verdict,
-    accuracy: c.pair.acc,
-    nEval: c.pair.nEval,
-    nRef: c.pair.nA,
-    nSample: c.pair.nB,
-    pValue: c.pair.pValue,
-    channels: c.pair.channels.map(ch => ch.channel),
-    source: smellSource(c.a),
-  };
-}
-
-function vialEvidenceFromSavedCheck(ch: SavedCheck): Vial.VialEvidence | null {
-  const a = smellCards.find(c => c.key === ch.ref);
-  const b = smellCards.find(c => c.key === ch.sample);
-  if (!a || !b) return null;
-  return {
-    checkId: ch.id,
-    question: `Can this array tell ${titleCase(a.substance)} from ${titleCase(b.substance)} apart?`,
-    referenceKey: a.key,
-    sampleKey: b.key,
-    reference: titleCase(a.substance),
-    sample: titleCase(b.substance),
-    verdict: ch.verdict,
-    accuracy: ch.acc,
-    nEval: ch.nEval,
-    nRef: ch.nA,
-    nSample: ch.nB,
-    pValue: ch.pValue,
-    channels: ch.array.split(/\s*·\s*/).filter(Boolean),
-    source: smellSource(a),
-  };
-}
-
-function vialEvidenceForSource(value: string): Vial.VialEvidence | null {
-  if (value === 'current') return vialEvidenceFromCurrentCheck();
-  const saved = loadSavedChecks().find(ch => ch.id === value);
-  return saved ? vialEvidenceFromSavedCheck(saved) : null;
-}
-
-function vialSourceOptions(): Array<{ value: string; label: string }> {
-  const out: Array<{ value: string; label: string }> = [];
-  const current = vialEvidenceFromCurrentCheck();
-  if (current) {
-    out.push({
-      value: 'current',
-      label: `Current check — ${current.reference} ↔ ${current.sample} · ${SEP_VERDICT_LABEL[current.verdict]}`,
-    });
-  }
-  for (const ch of loadSavedChecks()) {
-    out.push({
-      value: ch.id,
-      label: `${ch.name} · ${SEP_VERDICT_LABEL[ch.verdict] || ch.verdict} · ${ch.nA} vs ${ch.nB}`,
-    });
-  }
-  return out;
-}
-
-function vialChecksHtml(v: Vial.VialValidation): string {
-  return v.checks.map(c => `<div class="vial-check-row ${c.passed ? 'pass' : 'fail'}">
-    <div class="vial-check-mark">${c.passed ? '✓' : '×'}</div>
-    <div>
-      <div class="vial-check-label">${escapeHtmlText(c.label)}${c.critical ? '' : ' · advisory'}</div>
-      <div class="vial-check-detail">${escapeHtmlText(c.detail)}</div>
-    </div>
-  </div>`).join('');
-}
-
-function vialValidationSummary(v: Vial.VialValidation): string {
-  const critical = v.checks.filter(c => c.critical);
-  const criticalPass = critical.filter(c => c.passed).length;
-  const totalPass = v.checks.filter(c => c.passed).length;
-  return `<div class="vial-validation-summary ${v.passed ? 'pass' : 'fail'}">
-    ${escapeHtmlText(v.summary)}<br>
-    <b>${criticalPass}/${critical.length} critical checks · ${totalPass}/${v.checks.length} total</b>
-  </div>`;
-}
-
-function vialInput(): Vial.VialInput {
-  const val = (id: string): string => (document.getElementById(id) as HTMLInputElement | null)?.value.trim() || '';
-  const limits = (document.getElementById('vialLimits') as HTMLTextAreaElement | null)?.value
-    .split('\n').map(l => l.trim()).filter(Boolean) || [];
-  return {
-    name: val('vialName'),
-    author: val('vialAuthor'),
-    version: val('vialVersion') || '0.1.0',
-    license: val('vialLicense') || 'CC-BY-4.0',
-    domain: val('vialDomain') || 'general',
-    description: val('vialDescription'),
-    limits,
-    recipe: VIAL_CHECK_RECIPE,
-  };
-}
-
-function vialDraftManifest(): Vial.VialManifest | null {
-  if (!vialCreateEvidence) return null;
-  return Vial.createManifest(vialInput(), vialCreateEvidence);
-}
-
-function updateVialValidationPreview(): void {
-  const wrap = document.getElementById('vialValidationPreview');
-  const list = document.getElementById('vialValidationChecks');
-  const publish = document.getElementById('vialCreateValidate') as HTMLButtonElement | null;
-  if (!wrap || !list) return;
-  const manifest = vialDraftManifest();
-  if (!manifest) {
-    wrap.innerHTML = '<p class="hint" style="margin:0">Pick a saved check. The gate needs real replicates, not a written claim.</p>';
-    list.innerHTML = '';
-    if (publish) publish.disabled = true;
-    return;
-  }
-  const validation = Vial.validateVial(manifest);
-  wrap.innerHTML = vialValidationSummary(validation);
-  list.innerHTML = vialChecksHtml(validation);
-  if (publish) publish.disabled = false;
-}
-
-function syncVialFormFromEvidence(): void {
-  const ev = vialCreateEvidence;
-  const preview = document.getElementById('vialEvidencePreview');
-  if (!ev) {
-    if (preview) preview.textContent = 'This check no longer has both smells in the library. Import or re-record them before packaging.';
-    updateVialValidationPreview();
-    return;
-  }
-  const val = (id: string): HTMLInputElement | null => document.getElementById(id) as HTMLInputElement | null;
-  const name = val('vialName');
-  const question = val('vialQuestion');
-  const description = document.getElementById('vialDescription') as HTMLTextAreaElement | null;
-  const limits = document.getElementById('vialLimits') as HTMLTextAreaElement | null;
-  const author = val('vialAuthor');
-  const version = val('vialVersion');
-  const domain = val('vialDomain');
-  const license = val('vialLicense');
-
-  if (name) name.value = `${ev.reference} ↔ ${ev.sample}`;
-  if (question) question.value = ev.question;
-  if (description) {
-    description.value = `A closed-set comparison on this ${ev.channels.length}-channel array: ${ev.reference} and ${ev.sample} are distinguishable in the saved replicates. This is not an open-world identification.`;
-  }
-  if (limits) {
-    limits.value = [
-      'Closed-set comparison only; not open-world identification.',
-      `Validated on this ${ev.channels.length}-channel array from ${ev.source}; not a cross-rig claim.`,
-    ].join('\n');
-  }
-  if (author) author.value = localStorage.getItem(VIAL_AUTHOR_KEY) || '@you';
-  if (version) version.value = '0.1.0';
-  if (domain) domain.value = 'general';
-  if (license) license.value = 'CC-BY-4.0';
-  if (preview) {
-    preview.textContent = [
-      `Reference: ${ev.reference}`,
-      `Sample:    ${ev.sample}`,
-      `Verdict:   ${SEP_VERDICT_LABEL[ev.verdict] || ev.verdict}`,
-      `Left out:  ${Number.isFinite(ev.accuracy) ? `${Math.round(ev.accuracy * ev.nEval)}/${ev.nEval}` : 'n/a'}`,
-      `Array:     ${ev.channels.length ? ev.channels.join(' · ') : 'not recorded'}`,
-      `Source:    ${ev.source}`,
-    ].join('\n');
-  }
-  updateVialValidationPreview();
-}
-
-function setVialError(msg: string): void {
-  const el = document.getElementById('vialCreateError');
-  if (!el) return;
-  el.textContent = msg;
-  el.style.display = msg ? '' : 'none';
-}
-
-function openVialCreate(preferred?: string): void {
-  const options = vialSourceOptions();
-  if (!options.length) {
-    showToast('Run a pair first, then package it as a Vial.');
-    return;
-  }
-  const select = document.getElementById('vialSourceCheck') as HTMLSelectElement | null;
-  const modal = document.getElementById('vialCreateModal');
-  if (!select || !modal) return;
-  select.innerHTML = options.map(o => `<option value="${escapeHtmlText(o.value)}">${escapeHtmlText(o.label)}</option>`).join('');
-  const initial = preferred && options.some(o => o.value === preferred) ? preferred : options[0].value;
-  select.value = initial;
-  vialCreateEvidence = vialEvidenceForSource(initial);
-  syncVialFormFromEvidence();
-  setVialError('');
-  modal.style.display = 'flex';
-  requestAnimationFrame(() => {
-    (document.getElementById('vialName') as HTMLInputElement | null)?.focus();
-    (document.getElementById('vialName') as HTMLInputElement | null)?.select();
-  });
-}
-
-function closeVialCreate(): void {
-  const modal = document.getElementById('vialCreateModal');
-  if (modal) modal.style.display = 'none';
-  vialCreateEvidence = null;
-}
-
-function saveVialFromModal(publish: boolean): void {
-  const ev = vialCreateEvidence;
-  if (!ev) {
-    setVialError('Pick a check with both smells still in the library.');
-    return;
-  }
-  const input = vialInput();
-  if (!input.name) {
-    setVialError('Give the Vial a name.');
-    return;
-  }
-  if (!input.author) {
-    setVialError('Add an author or handle.');
-    return;
-  }
-  try {
-    let vial = Vial.createManifest(input, ev);
-    if (publish) vial = Vial.applyValidation(vial);
-    else {
-      vial.status = 'draft';
-      vial.validation = null;
-    }
-    Vial.upsertVial(vial);
-    localStorage.setItem(VIAL_AUTHOR_KEY, input.author);
-    closeVialCreate();
-    renderVials();
-    openVialDetail(vial.id);
-    if (!publish) showToast('Vial draft saved. Validate it before using it for a decision.');
-    else if (vial.status === 'gated') showToast('Saved as Gated. Every critical check passed on the stored evidence. This is a local evidence status; a registry listing or signature is separate.');
-    else showToast('Vial saved as Open. Validation failed — inspect the gate before using it.');
-  } catch (err) {
-    setVialError(err instanceof Error ? err.message : 'Could not save this Vial.');
-  }
-}
 
 let activeDomainPackId: string | null = null;
 
@@ -8883,7 +8612,7 @@ const COMMANDS: CommandAction[] = [
   { id: 'check', group: 'Go', title: 'Analyse → Separability', hint: 'which classes can this array tell apart?', run: () => activateSmellsView('check') },
   { id: 'compare', group: 'Go', title: 'Analyse → Compare', hint: 'overlay saved recordings', run: () => activateSmellsView('compare') },
   { id: 'recipes', group: 'Go', title: 'Analyse → Transforms', hint: 'trim, normalize, export a derived recording', run: () => activateSmellsView('recipes') },
-  { id: 'vials', group: 'Go', title: 'Vials', hint: 'domain workspaces + decisions', run: () => activateSmellsView('vials') },
+  { id: 'vials', group: 'Go', title: 'Vials', hint: 'domain workspaces', run: () => activateSmellsView('vials') },
   { id: 'aromatory', group: 'Go', title: 'Vials → Aromatory', hint: 'install a domain Vial', run: () => { activateSmellsView('vials'); setVialsTab('aromatory'); window.setTimeout(() => document.getElementById('domainCatalog')?.scrollIntoView({ block: 'start' }), 80); } },
   { id: 'sessions', group: 'Go', title: 'Explore → Recordings', hint: 'import, inspect, replay, trim', run: () => activateSmellsView('sessions') },
   { id: 'playground', group: 'Go', title: 'Playground', hint: 'replay a real recording, no rig needed', run: () => { void openPlayground(); } },
@@ -9143,40 +8872,7 @@ document.getElementById('domainWorkspaceBody')?.addEventListener('change', (ev) 
   }
 });
 
-function vialCardHtml(v: Vial.VialManifest): string {
-  const status = vialStatusOf(v);
-  const c = v.claim;
-  const passed = v.validation ? v.validation.checks.filter(x => x.passed).length : 0;
-  const total = v.validation ? v.validation.checks.length : 0;
-  return `<div class="vial-card ${status}">
-    <div class="vial-card-head">
-      <div style="min-width:0">
-        <div class="vial-card-name">${escapeHtmlText(v.name)}</div>
-        <div class="vial-card-sub">v${escapeHtmlText(v.version)} · ${escapeHtmlText(v.author)} · ${escapeHtmlText(v.domain)}</div>
-      </div>
-      <span class="vial-status ${status}">${vialStatusLabel(status)}</span>
-    </div>
-    <div class="vial-question">${escapeHtmlText(c.question)}</div>
-    <div class="vial-stats">
-      <div class="vial-stat"><b>${escapeHtmlText(SEP_VERDICT_LABEL[c.verdict] || c.verdict)}</b><span>verdict</span></div>
-      <div class="vial-stat"><b>${vialCorrect(c)}</b><span>left out</span></div>
-      <div class="vial-stat"><b>${vialLower(c)}</b><span>95% lower</span></div>
-    </div>
-    <div class="vial-card-meta">
-      ${escapeHtmlText(vialP(c))} · ${c.nRef} vs ${c.nSample} replicates · ${c.channels.length} channels · ${escapeHtmlText(v.source)}<br>
-      ${v.validation ? `${passed}/${total} validation checks · ` : 'Not validated · '}${v.usage.uses} use${v.usage.uses === 1 ? '' : 's'}
-    </div>
-    <div class="vial-card-actions">
-      <button class="mini-btn primary" type="button" data-vial-action="use" data-vial-id="${escapeHtmlText(v.id)}">Use</button>
-      <button class="mini-btn" type="button" data-vial-action="inspect" data-vial-id="${escapeHtmlText(v.id)}">Inspect</button>
-      <button class="mini-btn" type="button" data-vial-action="validate" data-vial-id="${escapeHtmlText(v.id)}">${v.validation ? 'Revalidate' : 'Validate'}</button>
-      <button class="mini-btn" type="button" data-vial-action="export" data-vial-id="${escapeHtmlText(v.id)}">Export</button>
-      <button class="mini-btn" type="button" data-vial-action="delete" data-vial-id="${escapeHtmlText(v.id)}">Delete</button>
-    </div>
-  </div>`;
-}
-
-let activeVialsTab: 'workspaces' | 'decisions' | 'aromatory' = 'workspaces';
+let activeVialsTab: 'workspaces' | 'aromatory' = 'workspaces';
 let registryEntries: RegistryVialEntry[] = [];
 let registryLoading = false;
 let registryLoaded = false;
@@ -9185,7 +8881,6 @@ let registryError = '';
 function syncVialsTabs(): void {
   const panes: Record<string, string> = {
     workspaces: 'vialsWorkspacesPane',
-    decisions: 'vialsDecisionsPane',
     aromatory: 'vialsAromatoryPane',
   };
   for (const [tab, id] of Object.entries(panes)) {
@@ -9198,136 +8893,30 @@ function syncVialsTabs(): void {
 }
 
 function setVialsTab(tab: string): void {
-  if (tab !== 'workspaces' && tab !== 'decisions' && tab !== 'aromatory') return;
+  if (tab !== 'workspaces' && tab !== 'aromatory') return;
   activeVialsTab = tab;
   if (tab === 'aromatory') renderDomainArea();
   syncVialsTabs();
 }
 
-function renderVials(): void {
-  const list = document.getElementById('vialsList');
-  const summary = document.getElementById('vialsSummary');
-  if (!list) return;
-  const vials = Vial.loadVials();
-  const gated = vials.filter(v => vialStatusOf(v) === 'gated').length;
-  const uses = vials.reduce((n, v) => n + (v.usage?.uses || 0), 0);
+function installedDomainCount(): number {
   const allDomain = Domain.allDomainPacks();
-  const domainCount = Domain.loadInstalledIds().filter(id => allDomain.some(p => p.id === id)).length;
-  if (summary) summary.textContent = `${domainCount} domain · ${vials.length} decision${vials.length === 1 ? '' : 's'} · ${gated} gated · ${uses} use${uses === 1 ? '' : 's'}`;
+  return Domain.loadInstalledIds().filter(id => allDomain.some(p => p.id === id)).length;
+}
+
+function renderVials(): void {
+  const summary = document.getElementById('vialsSummary');
+  const allDomain = Domain.allDomainPacks();
+  const installed = installedDomainCount();
+  if (summary) {
+    summary.textContent = `${installed} workspace${installed === 1 ? '' : 's'} · ${allDomain.length} available`;
+  }
   const workspaces = document.getElementById('vialsWorkspacesCount');
-  const decisions = document.getElementById('vialsDecisionsCount');
   const aromatory = document.getElementById('vialsAromatoryCount');
-  const decisionCount = document.getElementById('vialsDecisionCount');
-  if (workspaces) workspaces.textContent = String(domainCount);
-  if (decisions) decisions.textContent = String(vials.length);
+  if (workspaces) workspaces.textContent = String(installed);
   if (aromatory) aromatory.textContent = String(allDomain.length);
-  if (decisionCount) decisionCount.textContent = String(vials.length);
   renderDomainArea();
   syncVialsTabs();
-  if (!vials.length) {
-    list.innerHTML = `<div class="vial-empty">
-      <b>No decision Vials yet.</b>
-      <p>A check answers a question once. A decision Vial packages that answer — claim, evidence, array, limits, method — so you can use it again, give it to someone, or sell it. Start from a saved check.</p>
-      <button class="mini-btn primary" type="button" data-vial-action="new">Package a check</button>
-    </div>`;
-    return;
-  }
-  list.innerHTML = vials.map(vialCardHtml).join('');
-}
-
-function openVialDetail(id: string): void {
-  const vial = Vial.loadVials().find(v => v.id === id);
-  if (!vial) return;
-  vialDetailId = id;
-  const modal = document.getElementById('vialDetailModal');
-  const title = document.getElementById('vialDetailTitle');
-  const meta = document.getElementById('vialDetailMeta');
-  const body = document.getElementById('vialDetailBody');
-  if (!modal || !title || !meta || !body) return;
-  const status = vialStatusOf(vial);
-  const c = vial.claim;
-  const recipe = vial.recipe
-    ? `${vial.recipe.name} ${vial.recipe.version} · ${vial.recipe.steps} step(s)`
-    : 'No recipe attached. The check evidence is still inspectable.';
-  title.textContent = vial.name;
-  meta.textContent = `v${vial.version} · ${vial.author} · ${vial.domain} · ${vialStatusLabel(status)}`;
-  body.innerHTML = `
-    ${vial.validation ? vialValidationSummary(vial.validation) : '<div class="vial-validation-summary fail">Not validated. Run the gate before treating this as a decision.</div>'}
-    <div class="vial-detail-section">
-      <h4>Claim</h4>
-      <p>${escapeHtmlText(c.question)}</p>
-      <div class="vial-stats">
-        <div class="vial-stat"><b>${escapeHtmlText(SEP_VERDICT_LABEL[c.verdict] || c.verdict)}</b><span>verdict</span></div>
-        <div class="vial-stat"><b>${vialCorrect(c)}</b><span>left out</span></div>
-        <div class="vial-stat"><b>${vialLower(c)}</b><span>95% lower</span></div>
-      </div>
-      <p class="vial-card-meta">${escapeHtmlText(c.reference)} ↔ ${escapeHtmlText(c.sample)} · ${escapeHtmlText(vialP(c))} · ${c.nRef} vs ${c.nSample} replicates · ${c.channels.length} channels</p>
-    </div>
-    <div class="vial-detail-section"><h4>Array</h4><p>${escapeHtmlText(c.channels.join(' · '))}</p></div>
-    <div class="vial-detail-section"><h4>Evidence</h4><ul>${vial.evidence.map(e => `<li>${escapeHtmlText(e)}</li>`).join('')}</ul></div>
-    <div class="vial-detail-section"><h4>Limits</h4><ul>${vial.limits.map(l => `<li>${escapeHtmlText(l)}</li>`).join('')}</ul></div>
-    <div class="vial-detail-section"><h4>Method</h4><p>${escapeHtmlText(recipe)}</p></div>
-    <div class="vial-detail-section"><h4>Validation gate</h4>${vial.validation ? vialChecksHtml(vial.validation) : '<p>Not run.</p>'}</div>
-    <div class="vial-detail-section"><h4>Usage</h4><p>${vial.usage.uses} use${vial.usage.uses === 1 ? '' : 's'}${vial.usage.lastUsedAt ? ` · last ${new Date(vial.usage.lastUsedAt).toLocaleString()}` : ''}</p></div>
-    <div class="vial-detail-actions">
-      <button class="mini-btn primary" type="button" data-vial-detail-action="use" data-vial-id="${escapeHtmlText(vial.id)}">Use</button>
-      <button class="mini-btn" type="button" data-vial-detail-action="validate" data-vial-id="${escapeHtmlText(vial.id)}">Re-run gate</button>
-      <button class="mini-btn" type="button" data-vial-detail-action="copy" data-vial-id="${escapeHtmlText(vial.id)}">Copy JSON</button>
-      <button class="mini-btn" type="button" data-vial-detail-action="export" data-vial-id="${escapeHtmlText(vial.id)}">Export .vial.json</button>
-      <button class="mini-btn" type="button" data-vial-detail-action="delete" data-vial-id="${escapeHtmlText(vial.id)}">Delete</button>
-    </div>`;
-  modal.style.display = 'flex';
-}
-
-function closeVialDetail(): void {
-  const modal = document.getElementById('vialDetailModal');
-  if (modal) modal.style.display = 'none';
-  vialDetailId = null;
-}
-
-function validateStoredVial(id: string): void {
-  const vial = Vial.loadVials().find(v => v.id === id);
-  if (!vial) return;
-  const next = Vial.applyValidation(vial);
-  Vial.upsertVial(next);
-  renderVials();
-  openVialDetail(id);
-  showToast(next.status === 'gated'
-    ? 'Gated. Every critical check passes on the stored evidence (local status — no external review).'
-    : 'Ungated. The stored evidence does not support this decision yet.');
-}
-
-async function copyVialJson(id: string): Promise<void> {
-  const vial = Vial.loadVials().find(v => v.id === id);
-  if (!vial) return;
-  const text = Vial.vialToJson(vial);
-  try {
-    await navigator.clipboard.writeText(text);
-    showToast('Vial JSON copied. Submit it or hand it to another rig.');
-  } catch {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand('copy'); } catch { /* no clipboard, no false success */ }
-    ta.remove();
-    showToast('Vial JSON copied.');
-  }
-}
-
-function exportVial(id: string): void {
-  const vial = Vial.loadVials().find(v => v.id === id);
-  if (!vial) return;
-  const blob = new Blob([Vial.vialToJson(vial)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `${vial.id}.vial.json`;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-  showToast('Vial exported. The manifest is the submission unit.');
 }
 
 function downloadTextFile(filename: string, text: string, type = 'application/json'): void {
@@ -9617,215 +9206,6 @@ async function installRegistryManifest(
     button.disabled = false;
     button.textContent = previous;
   }
-}
-
-function armOrDeleteVial(id: string, button: HTMLButtonElement): void {
-  if (vialDeleteArm?.id === id) {
-    window.clearTimeout(vialDeleteArm.timer);
-    vialDeleteArm = null;
-    Vial.deleteVial(id);
-    // The runtime caches the chosen source per pack; leaving it behind makes a
-    // reinstalled vial with the same id silently inherit stale state.
-    localStorage.removeItem(`osmograph.vial.source.${id}`);
-    renderVials();
-    closeVialDetail();
-    showToast('Vial deleted.');
-    return;
-  }
-  if (vialDeleteArm) {
-    window.clearTimeout(vialDeleteArm.timer);
-    vialDeleteArm.button.textContent = 'Delete';
-  }
-  button.textContent = 'Confirm';
-  button.title = 'Click again to delete this Vial';
-  const timer = window.setTimeout(() => {
-    if (vialDeleteArm?.id === id) {
-      vialDeleteArm = null;
-      button.textContent = 'Delete';
-      button.title = '';
-    }
-  }, 2500);
-  vialDeleteArm = { id, timer, button };
-}
-
-function openVialUse(id: string): void {
-  const vial = Vial.loadVials().find(v => v.id === id);
-  if (!vial) return;
-  const ref = smellCards.find(c => c.key === vial.claim.referenceKey);
-  if (!ref) {
-    showToast('The Vial’s reference smell is no longer in the library.');
-    return;
-  }
-  const candidates = smellCards.filter(c => c.key !== ref.key);
-  if (!candidates.length) {
-    showToast('Add a second smell on this array before using the Vial.');
-    return;
-  }
-  const modal = document.getElementById('vialUseModal');
-  const intro = document.getElementById('vialUseIntro');
-  const select = document.getElementById('vialUseSample') as HTMLSelectElement | null;
-  const result = document.getElementById('vialUseResult');
-  if (!modal || !intro || !select || !result) return;
-  vialUseId = id;
-  intro.textContent = `${vial.name} · reference ${vial.claim.reference} · ${vialStatusLabel(vialStatusOf(vial))}${vial.status === 'gated' ? '' : ' — ungated: exploratory only'}`;
-  select.innerHTML = candidates
-    .map(c => `<option value="${escapeHtmlText(c.key)}">${escapeHtmlText(titleCase(c.substance))}</option>`)
-    .join('');
-  const preferred = candidates.find(c => c.key === vial.claim.sampleKey);
-  if (preferred) select.value = preferred.key;
-  result.innerHTML = `<div class="vial-validation-summary ${vialStatusOf(vial) === 'gated' ? 'pass' : 'fail'}">
-    ${vialStatusOf(vial) === 'gated'
-      ? 'Gated Vial (local gate passed). The result below is a check on this sample, not a guarantee about a different rig.'
-      : 'Ungated Vial. This is an exploratory check; do not treat it as a validated decision.'}
-  </div>`;
-  modal.style.display = 'flex';
-}
-
-function closeVialUse(): void {
-  const modal = document.getElementById('vialUseModal');
-  if (modal) modal.style.display = 'none';
-  vialUseId = null;
-}
-
-async function runVialUse(): Promise<void> {
-  const vial = vialUseId ? Vial.loadVials().find(v => v.id === vialUseId) : null;
-  if (!vial) return;
-  const ref = smellCards.find(c => c.key === vial.claim.referenceKey);
-  const select = document.getElementById('vialUseSample') as HTMLSelectElement | null;
-  const sample = select ? smellCards.find(c => c.key === select.value) : null;
-  const result = document.getElementById('vialUseResult');
-  const run = document.getElementById('vialUseRun') as HTMLButtonElement | null;
-  if (!ref || !sample || !result) {
-    showToast('Pick a sample smell from the library.');
-    return;
-  }
-  if (sample.key === ref.key) {
-    showToast('Pick a smell other than the reference.');
-    return;
-  }
-  if (run) run.disabled = true;
-  result.innerHTML = '<div class="vial-validation-summary fail">Reading replicates…</div>';
-  try {
-    const [ra, rb] = await Promise.all([smellReplicates(ref), smellReplicates(sample)]);
-    if (!ra || !rb) {
-      result.innerHTML = '<div class="vial-validation-summary fail"><b>Not enough usable recordings.</b> Both smells need a channel series on this array.</div>';
-      return;
-    }
-    if (!sameChannelSignature(ra.channels, rb.channels)) {
-      result.innerHTML = `<div class="vial-validation-summary fail"><b>Different arrays — no comparison.</b><br>
-        ${escapeHtmlText(titleCase(ref.substance))} uses ${escapeHtmlText(ra.channels.join(' · '))}.<br>
-        ${escapeHtmlText(titleCase(sample.substance))} uses ${escapeHtmlText(rb.channels.join(' · '))}.<br>
-        The Vial cannot be applied across arrays.</div>`;
-      return;
-    }
-    const pair = makeSeparationPair(ref, sample, ra, rb);
-    if (!pair) {
-      result.innerHTML = '<div class="vial-validation-summary fail"><b>No usable replicates.</b> Record another sample on the same array.</div>';
-      return;
-    }
-    const distinct = pair.verdict === 'separable';
-    Vial.recordVialUse(vial.id);
-    renderVials();
-    result.innerHTML = `
-      <div class="vial-validation-summary ${distinct ? 'pass' : 'fail'}">
-        <b>${distinct ? 'Distinct from the reference on this array.' : 'Not distinguishable from the reference on this array.'}</b><br>
-        ${distinct
-          ? 'This sample does not behave like the Vial’s reference under the same decision rule. That is evidence of difference, not identification.'
-          : 'This is a refusal, not a match claim. The array may not carry enough signal, or the sample may be the reference.'}
-      </div>
-      ${sepPairHtml(pair)}
-      <div class="vial-detail-section">
-        <h4>Vial claim</h4>
-        <p>${escapeHtmlText(vial.name)} claims ${escapeHtmlText(vial.claim.reference)} ↔ ${escapeHtmlText(vial.claim.sample)} is ${escapeHtmlText(SEP_VERDICT_LABEL[vial.claim.verdict] || vial.claim.verdict)} on ${vial.claim.nRef} vs ${vial.claim.nSample} saved replicates. This run compares ${escapeHtmlText(titleCase(ref.substance))} ↔ ${escapeHtmlText(titleCase(sample.substance))}.</p>
-      </div>`;
-  } catch (err) {
-    result.innerHTML = `<div class="vial-validation-summary fail"><b>Could not run this Vial.</b> ${escapeHtmlText(err instanceof Error ? err.message : 'Unknown read error.')}</div>`;
-  } finally {
-    if (run) run.disabled = false;
-  }
-}
-
-function importVialFile(file: File): void {
-  const reader = new FileReader();
-  reader.onload = () => {
-    const text = String(reader.result || '');
-    try {
-      const parsed = JSON.parse(text) as { schema?: unknown };
-      if (parsed?.schema === 'osmograph.domain-pack/1' || parsed?.schema === 'osmograph.domain-pack/2') {
-        importDomainPackText(text);
-        return;
-      }
-      const vial = Vial.importVialJson(text);
-      const checked = Vial.applyValidation(vial);
-      Vial.upsertVial(checked);
-      renderVials();
-      openVialDetail(checked.id);
-      showToast(checked.status === 'gated'
-        ? 'Vial imported, local gate passed. This is a local evidence status; a registry listing or signature is separate.'
-        : 'Vial imported ungated. Its evidence does not pass the local gate.');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not import this Vial.');
-    }
-  };
-  reader.onerror = () => showToast('Could not read that file.');
-  reader.readAsText(file);
-}
-
-document.getElementById('vialNewBtn')?.addEventListener('click', () => openVialCreate());
-document.getElementById('vialImportBtn')?.addEventListener('click', () => {
-  (document.getElementById('vialImportFile') as HTMLInputElement | null)?.click();
-});
-document.getElementById('vialImportFile')?.addEventListener('change', (ev) => {
-  const input = ev.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (file) importVialFile(file);
-  input.value = '';
-});
-document.getElementById('vialsList')?.addEventListener('click', (ev) => {
-  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-vial-action]');
-  if (!target) return;
-  const action = target.dataset.vialAction;
-  const id = target.dataset.vialId || '';
-  if (action === 'new') openVialCreate();
-  else if (action === 'use' && id) openVialUse(id);
-  else if (action === 'inspect' && id) openVialDetail(id);
-  else if (action === 'validate' && id) validateStoredVial(id);
-  else if (action === 'export' && id) exportVial(id);
-  else if (action === 'delete' && id) armOrDeleteVial(id, target as HTMLButtonElement);
-});
-document.getElementById('vialDetailBody')?.addEventListener('click', (ev) => {
-  const target = (ev.target as HTMLElement).closest<HTMLElement>('[data-vial-detail-action]');
-  if (!target) return;
-  const action = target.dataset.vialDetailAction;
-  const id = target.dataset.vialId || '';
-  if (!id) return;
-  if (action === 'use') openVialUse(id);
-  else if (action === 'validate') validateStoredVial(id);
-  else if (action === 'copy') void copyVialJson(id);
-  else if (action === 'export') exportVial(id);
-  else if (action === 'delete') armOrDeleteVial(id, target as HTMLButtonElement);
-});
-document.getElementById('vialCreateClose')?.addEventListener('click', closeVialCreate);
-document.getElementById('vialDetailClose')?.addEventListener('click', closeVialDetail);
-document.getElementById('vialUseClose')?.addEventListener('click', closeVialUse);
-document.getElementById('vialUseRun')?.addEventListener('click', () => { void runVialUse(); });
-document.getElementById('vialCreateDraft')?.addEventListener('click', () => saveVialFromModal(false));
-document.getElementById('vialCreateValidate')?.addEventListener('click', () => saveVialFromModal(true));
-document.getElementById('vialSourceCheck')?.addEventListener('change', (ev) => {
-  vialCreateEvidence = vialEvidenceForSource((ev.target as HTMLSelectElement).value);
-  syncVialFormFromEvidence();
-});
-for (const el of document.querySelectorAll('#vialCreateModal input, #vialCreateModal textarea')) {
-  el.addEventListener('input', updateVialValidationPreview);
-}
-for (const modalId of ['vialCreateModal', 'vialDetailModal', 'vialUseModal']) {
-  document.getElementById(modalId)?.addEventListener('click', (ev) => {
-    if (ev.target === ev.currentTarget) {
-      if (modalId === 'vialCreateModal') closeVialCreate();
-      else if (modalId === 'vialDetailModal') closeVialDetail();
-      else closeVialUse();
-    }
-  });
 }
 
 // === Smell detail — the front door's one-click answer ===
@@ -10486,10 +9866,7 @@ document.getElementById('smellCompare')?.addEventListener('click', () => {
     .filter((f): f is string => !!f);
   showWorkspaceView('compare');
 });
-document.getElementById('smellClearSel')?.addEventListener('click', () => {
-  smellSel.clear();
-  void renderSmellGallery();
-});
+document.getElementById('smellClearSel')?.addEventListener('click', clearSmellSelection);
 
 // Gallery controls. A search field that only filters after Enter is a dead
 // control, so this re-renders after a short pause and keeps the result count
@@ -15776,7 +15153,7 @@ async function reportIssue(): Promise<void> {
     `UA: ${navigator.userAgent}`,
     `Rig: ${rig}`,
     `Link: ${linkText} · ${sampleCount} samples this session`,
-    `Vials: ${Vial.loadVials().length} decisions · ${Domain.allDomainPacks().length} domain packs`,
+    `Vials: ${installedDomainCount()} installed · ${Domain.allDomainPacks().length} available`,
     recentFailures.length ? `Recent failures:\n${recentFailures.join('\n')}` : 'Recent failures: none captured',
     '```',
     '',
@@ -15842,7 +15219,7 @@ async function reportVialIssue(pack: Domain.DomainPack): Promise<void> {
     `UA: ${navigator.userAgent}`,
     `Rig: ${rig}`,
     `Link: ${linkText} · ${sampleCount} samples this session`,
-    `Vials: ${Vial.loadVials().length} decisions · ${Domain.allDomainPacks().length} domain packs`,
+    `Vials: ${installedDomainCount()} installed · ${Domain.allDomainPacks().length} available`,
     recentFailures.length ? `Recent failures:\n${recentFailures.join('\n')}` : 'Recent failures: none captured',
     '```',
     '',

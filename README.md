@@ -49,10 +49,6 @@ not a universal smell identifier, a concentration meter, or a safety instrument.
 
 Vials are installable ways of working, not just saved files.
 
-- **Decision Vials** package a saved Check: a closed-set, same-array claim with the reference and
-  sample, unique channels, replicates, held-out evaluations, separation verdict, 95% Wilson lower
-  bound, permutation p-value, limits, provenance, and method. The local gate seals a Vial only when
-  every critical check passes. “Sealed” is a local evidence status, not external validation.
 - **Domain Vials** package a protocol, a local log, a risk model, stop rules, field notes, citations,
   and a workspace. The app ships no domain Vial source. The reference projects live in author-hosted
   repos: **Fermentation Lab** has a workspace UI and a compact Home view, **Plant Respiration** is
