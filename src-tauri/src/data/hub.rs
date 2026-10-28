@@ -325,10 +325,14 @@ pub fn import_external_csv(
     fs::copy(src_path, &dest_path).map_err(|e| e.to_string())?;
 
     let (rows, sensor_count, duration_sec) = csv_summary_for(&dest_path);
-    let substance = substance_from_filename(&dest_name);
+    let (substance, preparation) = super::collections::split_preparation(
+        &substance_from_filename(&dest_name),
+    );
     let record = SessionRecord {
         file_id,
+        role: super::collections::recording_role(&substance),
         substance,
+        preparation,
         label: "Imported".to_string(),
         csv_path: dest_path.to_string_lossy().to_string(),
         timestamp: now.timestamp() as f64,

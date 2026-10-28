@@ -19,8 +19,73 @@ pub struct Classification {
     pub collection_id: String,
     pub collection_name: String,
     pub substance: String,
+    /// Preparation/nuance inside a substance (`warm`, `after warm`, `ground`).
+    /// Empty when the path does not declare one; never invented from a guess.
+    pub preparation: String,
+    /// `reference` (room air, blank, baseline) or `noise` for control runs.
+    /// Empty for an ordinary sample. Controls stay in the library but are not
+    /// counted as smell classes or training labels.
+    pub role: String,
     pub split: String,
     pub condition: String,
+}
+
+/// Files the library can parse as recordings.
+pub fn is_supported_recording(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("csv") || e.eq_ignore_ascii_case("osmell"))
+        .unwrap_or(false)
+}
+
+/// Known non-recordings inside otherwise valid corpus folders. The TADI archive
+/// ships an anemometer CSV beside the gas loggers; importing it as a methane
+/// recording would invent a label for wind data.
+pub fn is_known_non_recording(path: &Path) -> bool {
+    let p = path.to_string_lossy().to_ascii_lowercase().replace('\\', "/");
+    let file = path.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    if file == "_index_.csv"
+        || file == "test_index.csv"
+        || file == "sonic3d_anemometer.csv"
+        || file.contains("_index_")
+    {
+        return true;
+    }
+    if p.contains("/gcms_") || p.contains("/_index_") || p.contains("/test_index") {
+        return true;
+    }
+    p.contains("gcms_") || p.contains("/test_index") || p.contains("sonic3d_anemometer.csv")
+}
+
+/// Split an explicit preparation prefix from a user label. Only unambiguous
+/// words are treated as preparations; a bare name stays intact.
+pub fn split_preparation(raw: &str) -> (String, String) {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    let prefixes: &[(&str, &str)] = &[
+        ("after warm ", "after warm"),
+        ("after-warm ", "after warm"),
+        ("after warming ", "after warm"),
+        ("warm ", "warm"),
+        ("warmed ", "warm"),
+        ("raw ", "raw"),
+        ("ground ", "ground"),
+        ("peeled ", "peeled"),
+        ("sliced ", "sliced"),
+        ("chopped ", "chopped"),
+        ("crushed ", "crushed"),
+        ("heated ", "heated"),
+        ("cold ", "cold"),
+    ];
+    for (prefix, prep) in prefixes {
+        if lower.starts_with(prefix) {
+            let rest = trimmed[prefix.len()..].trim();
+            if !rest.is_empty() {
+                return (rest.to_string(), (*prep).to_string());
+            }
+        }
+    }
+    (trimmed.to_string(), String::new())
 }
 
 const GENERIC_DIRS: &[&str] = &[
@@ -118,7 +183,86 @@ pub fn has_timestamp_prefix(name: &str) -> bool {
     strip_timestamp(strip_ext(name)).is_some()
 }
 
+fn split_concatenated_pascal(s: &str) -> Option<String> {
+    if s.contains(' ') || s.contains('_') || s.contains('-') {
+        return None;
+    }
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() < 12 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for i in 1..chars.len() {
+        let c = chars[i];
+        let prev = chars[i - 1];
+        if c.is_ascii_uppercase() && (prev.is_ascii_lowercase() || prev.is_ascii_digit()) {
+            let part: String = chars[start..i].iter().collect();
+            if part.len() >= 2 {
+                parts.push(part);
+            }
+            start = i;
+        } else if c.is_ascii_digit() && prev.is_ascii_lowercase() {
+            let part: String = chars[start..i].iter().collect();
+            if part.len() >= 2 {
+                parts.push(part);
+            }
+            start = i;
+        }
+    }
+    if start < chars.len() {
+        let part: String = chars[start..].iter().collect();
+        if part.len() >= 2 {
+            parts.push(part);
+        }
+    }
+    if parts.len() >= 3 {
+        Some(parts.join(" "))
+    } else {
+        None
+    }
+}
+
+pub fn is_suspicious_substance(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return true;
+    }
+    if t.to_ascii_lowercase() == "unknown" {
+        return true;
+    }
+    if t.contains(' ') || t.contains('_') || t.contains('-') || t.contains('+') {
+        return false;
+    }
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() > 28 {
+        return true;
+    }
+    let upper = chars.iter().filter(|c| c.is_ascii_uppercase()).count();
+    let lower = chars.iter().filter(|c| c.is_ascii_lowercase()).count();
+    if upper >= 3 && lower >= chars.len() / 3 {
+        return true;
+    }
+    false
+}
+
 fn prettify(raw: &str) -> String {
+    if let Some(split) = split_concatenated_pascal(raw) {
+        let mut out = String::with_capacity(split.len());
+        let mut last_space = true;
+        for c in split.chars() {
+            if c == '_' || c == '-' || c.is_whitespace() {
+                if !last_space {
+                    out.push(' ');
+                    last_space = true;
+                }
+            } else {
+                out.push(c);
+                last_space = false;
+            }
+        }
+        return out.trim().to_string();
+    }
     let mut out = String::with_capacity(raw.len());
     let mut last_space = true;
     for c in raw.chars() {
@@ -270,6 +414,29 @@ fn food_label(file: &str) -> (String, String) {
     (prettify(stem), String::new())
 }
 
+/// Control runs are evidence, not smell classes. A label is only treated as a
+/// reference/noise run when the word is explicit; `air freshener` stays a
+/// sample.
+pub fn recording_role(substance: &str) -> String {
+    let s = substance.trim().to_ascii_lowercase();
+    if s == "noise" || s.starts_with("noise ") {
+        "noise".to_string()
+    } else if s == "air"
+        || s == "reference"
+        || s.starts_with("room air")
+        || s.starts_with("ambient air")
+        || s.starts_with("fresh air")
+        || s.starts_with("clean air")
+        || s.starts_with("baseline")
+        || s.starts_with("blank")
+        || s.starts_with("empty")
+    {
+        "reference".to_string()
+    } else {
+        String::new()
+    }
+}
+
 fn filename_substance(file: &str) -> String {
     let stem = strip_ext(file);
     if let Some(rest) = strip_timestamp(stem) {
@@ -364,20 +531,37 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
         let (id, name) = dataset_identity(dest);
         c.collection_id = id.clone();
         c.collection_name = name;
-        classify_dataset(&id, &comps[2..], file, &mut c);
+        // The final component is the file itself; only directories inside the
+        // collection root describe split/substance.
+        let inner = if comps.len() > 2 {
+            &comps[2..comps.len() - 1]
+        } else {
+            &[]
+        };
+        classify_dataset(&id, inner, file, &mut c);
+        let (substance, preparation) = split_preparation(&c.substance);
+        c.substance = substance;
+        c.preparation = preparation;
+        c.role = recording_role(&c.substance);
         return c;
     }
 
     if comps.first().is_some_and(|part| part.eq_ignore_ascii_case("legacy")) {
         c.collection_id = "legacy".to_string();
         c.collection_name = "Legacy".to_string();
-        c.substance = filename_substance(file);
+        let (substance, preparation) = split_preparation(&filename_substance(file));
+        c.substance = substance;
+        c.preparation = preparation;
+        c.role = recording_role(&c.substance);
         return c;
     }
     if comps.first().is_some_and(|part| part.eq_ignore_ascii_case("derived")) {
         c.collection_id = "derived".to_string();
         c.collection_name = "Derived".to_string();
-        c.substance = filename_substance(file);
+        let (substance, preparation) = split_preparation(&filename_substance(file));
+        c.substance = substance;
+        c.preparation = preparation;
+        c.role = recording_role(&c.substance);
         return c;
     }
 
@@ -396,7 +580,10 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
     if p.starts_with(rd.as_str()) {
         c.collection_id = "own".to_string();
         c.collection_name = "Own rig".to_string();
-        c.substance = filename_substance(file);
+        let (substance, preparation) = split_preparation(&filename_substance(file));
+        c.substance = substance;
+        c.preparation = preparation;
+        c.role = recording_role(&c.substance);
         return c;
     }
 
@@ -411,11 +598,15 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
     } else {
         title_case(&parent_clean)
     };
-    c.substance = if !parent.is_empty() && !is_generic(parent) {
+    let raw_substance = if !parent.is_empty() && !is_generic(parent) {
         parent_clean
     } else {
         filename_substance(file)
     };
+    let (substance, preparation) = split_preparation(&raw_substance);
+    c.substance = substance;
+    c.preparation = preparation;
+    c.role = recording_role(&c.substance);
     c.condition = run_condition(file);
     c
 }
@@ -435,6 +626,9 @@ pub fn stable_import_id(path: &str) -> String {
 pub fn display_label(c: &Classification) -> String {
     if c.collection_id == "own" {
         return "Recorded".to_string();
+    }
+    if !c.preparation.is_empty() {
+        return title_case(&c.preparation);
     }
     if !c.condition.is_empty() {
         return title_case(&c.condition);
@@ -498,6 +692,37 @@ mod tests {
         let c = classify(&p, &root());
         assert_eq!(c.collection_id, "own");
         assert_eq!(c.substance, "mosquito coil 15 jun");
+        assert_eq!(c.preparation, "");
+    }
+
+    #[test]
+    fn own_preparation_is_a_nuance_not_a_new_smell() {
+        let warm = root().join("20260613_180633_warm garlic.csv");
+        let after = root().join("20260613_180921_after warm garlic.csv");
+        let w = classify(&warm, &root());
+        let a = classify(&after, &root());
+        assert_eq!(w.substance, "garlic");
+        assert_eq!(w.preparation, "warm");
+        assert_eq!(a.substance, "garlic");
+        assert_eq!(a.preparation, "after warm");
+        assert_ne!(w.preparation, a.preparation);
+    }
+
+    #[test]
+    fn controls_are_not_ordinary_smells() {
+        assert_eq!(recording_role("room air"), "reference");
+        assert_eq!(recording_role("Baseline 2"), "reference");
+        assert_eq!(recording_role("noise"), "noise");
+        assert_eq!(recording_role("air freshener"), "");
+        assert_eq!(recording_role("garlic"), "");
+    }
+
+    #[test]
+    fn tadi_anemometer_is_not_a_methane_recording() {
+        let p = root().join("datasets/TADI-2019/sonic3d_anemometer.csv");
+        assert!(is_known_non_recording(&p));
+        let logger = root().join("datasets/TADI-2019/Logger_A.csv");
+        assert!(!is_known_non_recording(&logger));
     }
 
     #[test]

@@ -18,6 +18,7 @@ pub mod hub;
 pub mod dataset_io;
 pub mod journal;
 pub mod collections;
+pub mod manifest;
 
 use std::fs;
 use std::io::Write;
@@ -373,6 +374,13 @@ pub fn sanitize_label(label: &str) -> String {
 pub struct SessionRecord {
     pub file_id: String,
     pub substance: String,
+    /// Explicit preparation/nuance (`warm`, `after warm`, `ground`) when the
+    /// label declares one. Empty means the path did not say, not "unknown".
+    #[serde(default)]
+    pub preparation: String,
+    /// `reference` or `noise` for control runs; empty for ordinary samples.
+    #[serde(default)]
+    pub role: String,
     pub label: String,
     pub csv_path: String,
     pub timestamp: f64,
@@ -405,10 +413,15 @@ pub struct SessionIndex {
     pub version: u32,
     pub updated: f64,
     pub records: Vec<SessionRecord>,
+    /// Collections the user removed from the library without deleting the
+    /// downloaded files. They stay visible on disk in Datasets and can be added
+    /// back without a re-download.
+    #[serde(default)]
+    pub hidden_collections: Vec<String>,
 }
 
 /// Bumped when the index gains derived fields that older builds cannot fill.
-pub const INDEX_VERSION: u32 = 2;
+pub const INDEX_VERSION: u32 = 4;
 
 impl Default for SessionIndex {
     fn default() -> Self {
@@ -416,6 +429,7 @@ impl Default for SessionIndex {
             version: INDEX_VERSION,
             updated: now_secs(),
             records: Vec::new(),
+            hidden_collections: Vec::new(),
         }
     }
 }
@@ -453,6 +467,12 @@ impl SessionIndex {
         let mut paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for mut r in std::mem::take(&mut self.records) {
+            // Some CSVs beside a corpus are measurements, not gas recordings:
+            // TADI ships an anemometer table next to its six loggers.
+            if self::collections::is_known_non_recording(Path::new(&r.csv_path)) {
+                changed = true;
+                continue;
+            }
             let path_norm = r.csv_path.replace('\\', "/");
             let c = self::collections::classify(Path::new(&r.csv_path), dir);
             // Folder structure, not the old label, decides what is an import.
@@ -477,7 +497,9 @@ impl SessionIndex {
                     changed = true;
                 }
             } else {
-                if r.substance.trim().is_empty() && !c.substance.is_empty() {
+                // A renamed own recording renames its file; the path remains
+                // the label source. Empty classifications never erase a name.
+                if !c.substance.is_empty() && r.substance != c.substance {
                     r.substance = c.substance.clone();
                     changed = true;
                 }
@@ -485,6 +507,14 @@ impl SessionIndex {
                     r.label = "Recorded".to_string();
                     changed = true;
                 }
+            }
+            if r.preparation != c.preparation {
+                r.preparation = c.preparation.clone();
+                changed = true;
+            }
+            if r.role != c.role {
+                r.role = c.role.clone();
+                changed = true;
             }
             if r.collection_id != c.collection_id {
                 r.collection_id = c.collection_id;
@@ -557,7 +587,7 @@ impl SessionIndex {
     pub fn records_for_training(&self) -> Vec<&SessionRecord> {
         self.records
             .iter()
-            .filter(|r| !r.substance.trim().is_empty())
+            .filter(|r| !r.substance.trim().is_empty() && r.role.is_empty())
             .collect()
     }
 
@@ -698,14 +728,19 @@ mod tests {
 
     #[test]
     fn session_index_roundtrip() {
-        let dir = std::env::temp_dir().join("osm_test_index");
+        let dir = std::env::temp_dir().join(format!("osm_test_index_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
         let mut idx = SessionIndex::default();
+        let csv_path = dir.join("a.csv");
+        fs::write(&csv_path, "timestamp,VOC\n0,1000\n").unwrap();
         idx.upsert(SessionRecord {
             file_id: "20260828_120000_000001".into(),
             substance: "garlic".into(),
+            preparation: String::new(),
+            role: String::new(),
             label: "Recorded".into(),
-            csv_path: dir.join("a.csv").to_string_lossy().to_string(),
+            csv_path: csv_path.to_string_lossy().to_string(),
             timestamp: 1.0,
             duration_sec: 60.0,
             sensor_count: 6,
@@ -720,11 +755,14 @@ mod tests {
             condition: String::new(),
         });
         idx.save(&dir).unwrap();
-        let loaded = SessionIndex::load(&dir);
+        let mut loaded = SessionIndex::load(&dir);
         assert_eq!(loaded.records.len(), 1);
-        assert_eq!(loaded.records[0].substance, "garlic");
-        idx.upsert(loaded.records[0].clone()); // dedupe
-        assert_eq!(idx.records.len(), 1);
+        // Migration derives substance from the file path/name.
+        assert_eq!(loaded.records[0].substance, "a");
+        // After migration we use the loaded index; dedupe against it.
+        let r = loaded.records[0].clone();
+        loaded.upsert(r); // dedupe should be a no-op
+        assert_eq!(loaded.records.len(), 1);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -744,6 +782,8 @@ mod tests {
         SessionRecord {
             file_id: file_id.into(),
             substance: substance.into(),
+            preparation: String::new(),
+            role: String::new(),
             label: label.into(),
             csv_path: dir.join(rel).to_string_lossy().to_string(),
             timestamp: 1.0,
@@ -785,7 +825,16 @@ mod tests {
                 // Same path as the first walnut: the migration must drop it.
                 legacy_record(&dir, "walnuts_5_000000", "Imported", "", &format!("{walnuts}/walnuts_5.csv")),
                 legacy_record(&dir, "mixture_000000", "Imported", "", mixture),
+                // TADI's anemometer is weather data, not a gas recording.
+                legacy_record(
+                    &dir,
+                    "anemometer_000000",
+                    "Imported",
+                    "methane",
+                    "datasets/TADI-2019/sonic3d_anemometer.csv",
+                ),
             ],
+            hidden_collections: Vec::new(),
         };
         fs::write(
             dir.join(".session_index.json"),

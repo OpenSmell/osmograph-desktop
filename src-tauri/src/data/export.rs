@@ -374,6 +374,8 @@ mod tests {
         idx.upsert(super::super::SessionRecord {
             file_id: "a".into(),
             substance: "coffee".into(),
+            preparation: String::new(),
+            role: String::new(),
             label: "coffee".into(),
             timestamp: 1_000.0,
             duration_sec: 1.0,
@@ -410,6 +412,8 @@ mod tests {
         idx.upsert(super::super::SessionRecord {
             file_id: "a".into(),
             substance: "coffee".into(),
+            preparation: String::new(),
+            role: String::new(),
             label: "coffee".into(),
             timestamp: 1_000.0,
             duration_sec: 1.0,
@@ -450,6 +454,8 @@ mod tests {
         idx.upsert(super::super::SessionRecord {
             file_id: "a".into(),
             substance: "coffee".into(),
+            preparation: String::new(),
+            role: String::new(),
             label: "coffee".into(),
             timestamp: 1_000.0,
             duration_sec: 1.0,
@@ -496,6 +502,8 @@ mod tests {
         idx.upsert(super::super::SessionRecord {
             file_id: "a".into(),
             substance: "coffee".into(),
+            preparation: String::new(),
+            role: String::new(),
             label: "coffee".into(),
             timestamp: 1_000.0,
             duration_sec: 1.0,

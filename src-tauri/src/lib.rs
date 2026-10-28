@@ -1249,9 +1249,13 @@ fn stop_session(state: State<'_, AppState>) -> Result<SessionSummary, String> {
             let now_local = chrono::Local::now();
             let fid = SessionIndex::make_file_id(now_local);
             let preset = current_preset_name(&state);
+            let (own_substance, own_preparation) =
+                data::collections::split_preparation(&substance);
             let record = SessionRecord {
                 file_id: fid.clone(),
-                substance: substance.clone(),
+                role: data::collections::recording_role(&own_substance),
+                substance: own_substance,
+                preparation: own_preparation,
                 label: "Recorded".to_string(),
                 csv_path: path.clone(),
                 timestamp: now_secs(),
@@ -1417,9 +1421,13 @@ fn stop_phase_recording(state: State<AppState>) -> Result<PhaseRecordingSummary,
     if let Some(p) = path.clone() {
         if std::path::Path::new(&p).exists() {
             let fid = SessionIndex::make_file_id(chrono::Local::now());
+            let (own_substance, own_preparation) =
+                data::collections::split_preparation(&label);
             let record = SessionRecord {
                 file_id: fid.clone(),
-                substance: label.clone(),
+                role: data::collections::recording_role(&own_substance),
+                substance: own_substance,
+                preparation: own_preparation,
                 label: "Recorded".to_string(),
                 csv_path: p.clone(),
                 timestamp: now_secs(),
@@ -1494,9 +1502,12 @@ fn recover_phase_session(
     };
     let quality = SessionIndex::provision_quality(total_duration, n_samples);
     let fid = SessionIndex::make_file_id(chrono::Local::now());
+    let (own_substance, own_preparation) = data::collections::split_preparation(&label);
     let record = SessionRecord {
         file_id: fid.clone(),
-        substance: label.clone(),
+        role: data::collections::recording_role(&own_substance),
+        substance: own_substance,
+        preparation: own_preparation,
         label: "Recovered".to_string(),
         csv_path: new_path.to_string_lossy().to_string(),
         timestamp: now_secs(),
@@ -1929,6 +1940,8 @@ pub struct RecordingFile {
     pub path: String,
     pub name: String,
     pub substance: String,
+    pub preparation: String,
+    pub role: String,
     pub label: String,
     pub collection_id: String,
     pub collection_name: String,
@@ -2174,7 +2187,19 @@ fn import_recordings(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
     };
     let mut imported = Vec::new();
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    // The index is provisional and filesystem-derived. Drop rows whose file was
+    // deleted or moved, and rows that were never gas recordings. Without this,
+    // a deleted corpus folder leaves phantom sessions that cannot be opened.
+    let before = index.records.len();
+    index.records.retain(|r| {
+        let path = std::path::Path::new(&r.csv_path);
+        path.is_file() && !data::collections::is_known_non_recording(path)
+    });
+    let pruned = index.records.len() != before;
     for f in files {
+        if index.hidden_collections.iter().any(|id| id == &f.collection_id) {
+            continue;
+        }
         let exists = index
             .records
             .iter()
@@ -2186,7 +2211,7 @@ fn import_recordings(state: State<AppState>) -> Result<Vec<SessionRecord>, Strin
         index.upsert(record.clone());
         imported.push(record);
     }
-    if !imported.is_empty() {
+    if !imported.is_empty() || pruned {
         let _ = index.save(&dir);
     }
     Ok(imported)
@@ -2197,6 +2222,8 @@ fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
     SessionRecord {
         file_id: f.file_id.clone(),
         substance: f.substance.clone(),
+        preparation: f.preparation.clone(),
+        role: f.role.clone(),
         label: f.label.clone(),
         csv_path: f.path.clone(),
         timestamp: f.mtime,
@@ -2214,9 +2241,93 @@ fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
     }
 }
 
+fn path_is_inside(path: &std::path::Path, root: &std::path::Path) -> bool {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    path.starts_with(root)
+}
+
+fn unique_import_dest(base: std::path::PathBuf) -> std::path::PathBuf {
+    if !base.exists() {
+        return base;
+    }
+    let stem = base
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "import".to_string());
+    let ext = base.extension().map(|e| e.to_string_lossy().to_string());
+    for n in 2..1000 {
+        let name = match &ext {
+            Some(ext) => format!("{stem}-{n}.{ext}"),
+            None => format!("{stem}-{n}"),
+        };
+        let candidate = base.with_file_name(name);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
+fn copy_supported_tree(src: &std::path::Path, dest: &std::path::Path) -> Result<usize, String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    let mut entries: Vec<_> = std::fs::read_dir(src)
+        .map_err(|e| e.to_string())?
+        .flatten()
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    let mut copied = 0usize;
+    for entry in entries {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| e.to_string())?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        let nested = dest.join(&name);
+        if file_type.is_dir() {
+            if name.to_string_lossy().starts_with('.') {
+                continue;
+            }
+            copied += copy_supported_tree(&path, &nested)?;
+        } else if data::collections::is_supported_recording(&path) {
+            std::fs::copy(&path, &nested).map_err(|e| e.to_string())?;
+            copied += 1;
+        }
+    }
+    Ok(copied)
+}
+
+/// Copy an external import into the managed library so the row cannot point at
+/// a Downloads folder the user later cleans out. External folders keep their
+/// own name under `datasets/Imported/`.
+fn copy_external_import(
+    src: &std::path::Path,
+    recordings_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
+    let imported = data::dataset_io::datasets_dir(recordings_dir).join("Imported");
+    std::fs::create_dir_all(&imported).map_err(|e| e.to_string())?;
+    let name = src
+        .file_name()
+        .map(|n| n.to_owned())
+        .ok_or_else(|| format!("Cannot import a path without a name: {}", src.display()))?;
+    let dest = unique_import_dest(imported.join(name));
+    if src.is_dir() {
+        let copied = copy_supported_tree(src, &dest)?;
+        if copied == 0 {
+            let _ = std::fs::remove_dir_all(&dest);
+            return Err(format!("No .csv or .osmell recordings found in {}", src.display()));
+        }
+    } else {
+        std::fs::copy(src, &dest).map_err(|e| e.to_string())?;
+    }
+    Ok(dest)
+}
+
 /// Import user-chosen files/folders from anywhere (not just the recordings dir).
-/// Accepts absolute paths to `.csv`/`.osmell` files, or directories whose tree
-/// is scanned for them. Deduplicates against the existing index.
+/// External evidence is copied into `datasets/Imported/` first; paths already
+/// inside the recordings directory are indexed in place. Deduplicates against
+/// the existing index.
 #[tauri::command]
 fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<SessionRecord>, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
@@ -2226,12 +2337,18 @@ fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<Sessio
         for p in paths {
             let path = std::path::PathBuf::from(&p);
             let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {}", p, e))?;
+            if !meta.is_dir() && !matches_file_ext(&path) {
+                continue;
+            }
+            let scan_path = if path_is_inside(&path, &dir) {
+                path
+            } else {
+                copy_external_import(&path, &dir)?
+            };
             if meta.is_dir() {
-                collect_recordings_in_tree(&path, &mut files, &mut cache, &dir);
-            } else if matches_file_ext(&path) {
-                if let Some(rf) = recording_from_path(&path, &mut cache, &dir) {
-                    files.push(rf);
-                }
+                collect_recordings_in_tree(&scan_path, &mut files, &mut cache, &dir);
+            } else if let Some(rf) = recording_from_path(&scan_path, &mut cache, &dir) {
+                files.push(rf);
             }
         }
     }
@@ -2253,15 +2370,23 @@ fn import_paths(state: State<AppState>, paths: Vec<String>) -> Result<Vec<Sessio
         index.upsert(record.clone());
         imported.push(record);
     }
+    if !imported.is_empty() {
+        // Explicitly importing a path is also how a hidden collection comes
+        // back, so it cannot be re-hidden on the next reload.
+        let shown: std::collections::HashSet<&str> = imported
+            .iter()
+            .map(|r| r.collection_id.as_str())
+            .collect();
+        index
+            .hidden_collections
+            .retain(|id| !shown.contains(id.as_str()));
+    }
     let _ = index.save(&dir);
     Ok(imported)
 }
 
 fn matches_file_ext(path: &std::path::Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.eq_ignore_ascii_case("csv") || e.eq_ignore_ascii_case("osmell"))
-        .unwrap_or(false)
+    data::collections::is_supported_recording(path)
 }
 
 /// Read a single file into a `RecordingFile` (generalizes `scan_recordings`).
@@ -2301,6 +2426,8 @@ fn recording_from_path(
         path: path_str,
         name,
         substance,
+        preparation: c.preparation.clone(),
+        role: c.role.clone(),
         label,
         collection_id: c.collection_id,
         collection_name: c.collection_name,
@@ -2339,9 +2466,9 @@ fn collect_recordings_in_tree(
         if meta.is_dir() {
             collect_recordings_in_tree(&path, out, cache, recordings_dir);
         } else if matches_file_ext(&path) {
-            let lower = path.to_string_lossy().to_ascii_lowercase();
-            // Split indexes and GC-MS tables are not e-nose recordings.
-            if lower.contains("/gcms_") || lower.contains("_index_") || lower.contains("test_index") {
+            // Split indexes, GC-MS tables, and TADI's anemometer are not
+            // e-nose recordings, even though they live in the corpus folder.
+            if data::collections::is_known_non_recording(&path) {
                 continue;
             }
             if let Some(rf) = recording_from_path(&path, cache, recordings_dir) {
@@ -3117,11 +3244,165 @@ fn dataset_control(state: State<AppState>, filename: String, action: String) -> 
 }
 
 #[tauri::command]
-fn dataset_extract(state: State<AppState>, path: String) -> Result<Vec<String>, String> {
+fn dataset_extract(
+    state: State<AppState>,
+    path: String,
+    dest_name: Option<String>,
+) -> Result<Vec<String>, String> {
     let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
-    let dest = data::dataset_io::datasets_dir(&dir).join("extracted");
-    let csvs = data::dataset_io::extract_csvs(std::path::Path::new(&path), &dest)?;
+    let archive = std::path::Path::new(&path);
+    let derived = archive
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok_or_else(|| "The archive has no filename to derive a folder from.".to_string())?;
+    let safe_dest = data::dataset_io::safe_relative(
+        dest_name.as_deref().unwrap_or(&derived),
+    )?;
+    let dest = data::dataset_io::datasets_dir(&dir).join(safe_dest);
+    let csvs = data::dataset_io::extract_csvs(archive, &dest)?;
     Ok(csvs.into_iter().map(|p| p.to_string_lossy().into_owned()).collect())
+}
+
+#[derive(serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ArchiveSpec {
+    archive: String,
+    dest_name: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ArchiveRecovery {
+    archive: String,
+    dest: String,
+    files: Vec<String>,
+    extracted: bool,
+    error: Option<String>,
+}
+
+/// Finish archives that were downloaded but never extracted (for example after
+/// an app update, a crash, or an older build that left the zip beside an empty
+/// `datasets/extracted` directory). Only caller-listed archives are touched.
+#[tauri::command]
+fn dataset_recover_archives(
+    state: State<AppState>,
+    archives: Vec<ArchiveSpec>,
+) -> Result<Vec<ArchiveRecovery>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let datasets = data::dataset_io::datasets_dir(&dir);
+    let mut out = Vec::new();
+    for spec in archives {
+        let name = std::path::Path::new(&spec.archive)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if name.is_empty() || name != spec.archive {
+            out.push(ArchiveRecovery {
+                archive: spec.archive,
+                dest: String::new(),
+                files: Vec::new(),
+                extracted: false,
+                error: Some("Unsafe archive filename.".to_string()),
+            });
+            continue;
+        }
+        let archive = datasets.join(&name);
+        if !archive.is_file() {
+            continue;
+        }
+        let dest_name = data::dataset_io::safe_relative(&spec.dest_name)?;
+        let dest = datasets.join(dest_name);
+        let existing = data::manifest::recording_paths(&dest).unwrap_or_default();
+        if !existing.is_empty() {
+            out.push(ArchiveRecovery {
+                archive: name,
+                dest: dest.to_string_lossy().into_owned(),
+                files: existing
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                extracted: false,
+                error: None,
+            });
+            continue;
+        }
+        match data::dataset_io::extract_csvs(&archive, &dest) {
+            Ok(csvs) => out.push(ArchiveRecovery {
+                archive: name,
+                dest: dest.to_string_lossy().into_owned(),
+                files: csvs
+                    .into_iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                extracted: true,
+                error: None,
+            }),
+            Err(err) => out.push(ArchiveRecovery {
+                archive: name,
+                dest: dest.to_string_lossy().into_owned(),
+                files: Vec::new(),
+                extracted: false,
+                error: Some(err),
+            }),
+        }
+    }
+    Ok(out)
+}
+
+/// Summaries for every non-empty corpus folder under `datasets/`.
+#[tauri::command]
+fn dataset_collections(
+    state: State<AppState>,
+) -> Result<Vec<data::manifest::CollectionSummary>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    data::manifest::scan_collections(&dir)
+}
+
+/// Write or refresh `collection.json` for one on-disk corpus.
+#[tauri::command]
+fn dataset_write_manifest(
+    state: State<AppState>,
+    dest_name: String,
+    meta: data::manifest::CollectionMeta,
+    if_missing: Option<bool>,
+) -> Result<data::manifest::CollectionSummary, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    data::manifest::write_manifest(&dir, &dest_name, &meta, if_missing.unwrap_or(false))
+}
+
+/// Re-hash a collection against its manifest and report missing, changed, or
+/// unlisted recordings. Runs on demand so a 300-file corpus never stalls boot.
+#[tauri::command]
+fn dataset_verify(
+    state: State<AppState>,
+    dest_name: String,
+) -> Result<data::manifest::ManifestVerification, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    data::manifest::verify_collection(&dir, &dest_name)
+}
+
+/// Hide or restore a collection without deleting a single downloaded file.
+/// Hiding drops its rows from the index and records the collection id so the
+/// filesystem scan cannot silently re-add them on the next launch.
+#[tauri::command]
+fn set_collection_hidden(
+    state: State<AppState>,
+    collection_id: String,
+    hidden: bool,
+) -> Result<(), String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    if collection_id.trim().is_empty() {
+        return Err("Missing collection id.".to_string());
+    }
+    if hidden {
+        index.records.retain(|r| r.collection_id != collection_id);
+        if !index.hidden_collections.iter().any(|id| id == &collection_id) {
+            index.hidden_collections.push(collection_id);
+        }
+    } else {
+        index.hidden_collections.retain(|id| id != &collection_id);
+    }
+    index.save(&dir)
 }
 
 // === Fleet Management ===
@@ -3910,9 +4191,14 @@ pub fn run() {    env_logger::init();
             dataset_download_tree,
             dataset_control,
             dataset_extract,
+            dataset_recover_archives,
+            dataset_collections,
+            dataset_write_manifest,
+            dataset_verify,
             get_session_index,
             install_playground_sample,
             remove_session,
+            set_collection_hidden,
             rename_session,
             clear_recordings,
             analyze_recording,
@@ -4030,6 +4316,8 @@ mod tests {
         index.upsert(SessionRecord {
             file_id: "20260101_000000_000000".to_string(),
             substance: "garlic".to_string(),
+            preparation: String::new(),
+            role: String::new(),
             label: "garlic".to_string(),
             csv_path: csv.to_string_lossy().to_string(),
             timestamp: 0.0,

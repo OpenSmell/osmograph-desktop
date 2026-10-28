@@ -359,6 +359,8 @@ mod tests {
             index.records.push(crate::data::SessionRecord {
                 file_id: format!("fid{}", i),
                 substance: label.to_string(),
+                preparation: String::new(),
+            role: String::new(),
                 label: "Recorded".to_string(),
                 csv_path: path.to_string_lossy().to_string(),
                 timestamp: start,

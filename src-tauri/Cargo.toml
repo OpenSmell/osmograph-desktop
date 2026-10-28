@@ -26,6 +26,7 @@ serialport = "4"
 log = "0.4"
 env_logger = "0.11"
 chrono = "0.4"
+sha2 = "0.10"
 semver = "1"
 csv = "1"
 base64 = "0.22"
@@ -37,6 +38,9 @@ futures = "0.3"
 mdns-sd = "0.11"
 ureq = { version = "3", default-features = false, features = ["rustls", "json", "charset"] }
 urlencoding = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 default = ["custom-protocol"]

@@ -109,6 +109,7 @@ export const DATASET_CATALOG: DatasetEntry[] = [
       url: 'https://zenodo.org/api/records/17285312/files/Food-Freshness-E-Nose-Dataset.zip/content',
       filename: 'Food-Freshness-E-Nose-Dataset.zip',
       archive: true,
+      destName: 'Food-Freshness-E-Nose-Dataset',
       sizeBytes: 10281838,
       extractedBytes: 38005711,
       fileCount: 59,
@@ -201,7 +202,7 @@ export const DATASET_CATALOG: DatasetEntry[] = [
         { url: 'https://zenodo.org/api/records/8399829/files/Loggers_COLUMNS.txt/content', filename: 'Loggers_COLUMNS.txt' },
       ],
       sizeBytes: 4830000,
-      fileCount: 7,
+      fileCount: 6,
     },
   },
 ];

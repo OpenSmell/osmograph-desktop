@@ -77,6 +77,13 @@ export const MOCK = String.raw`
       case 'get_data_dir': return ok('/tmp/opencode/ui/data');
       case 'get_recordings_dir': return ok('/tmp/opencode/ui/data/recordings');
       case 'dataset_dir': return ok('/tmp/opencode/ui/data/datasets');
+      case 'dataset_collections': return ok([]);
+      case 'dataset_recover_archives': return ok([]);
+      case 'dataset_extract': return ok([]);
+      case 'dataset_write_manifest': return ok(null);
+      case 'dataset_verify': return ok({ folder: a.destName || '', root: '', ok: true, checked: 0, missing: [], changed: [], extra: [], manifest_hash: '' });
+      case 'import_paths': return ok([]);
+      case 'set_collection_hidden': return ok(null);
       case 'get_session_index': return ok(self.playgroundInstalled ? [...sessions, playground] : sessions);
       case 'install_playground_sample': self.playgroundInstalled = true; return ok(playground);
       case 'import_recordings': return ok(0);

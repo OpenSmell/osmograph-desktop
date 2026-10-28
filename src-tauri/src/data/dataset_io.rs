@@ -91,6 +91,62 @@ fn retryable(err: &str) -> bool {
     !err.contains("http status: 4")
 }
 
+/// Bytes needed beyond the actual download so a full disk cannot strand the
+/// app while it writes manifests or extracts an archive.
+const DISK_RESERVE: u64 = 32 * 1024 * 1024;
+
+#[cfg(unix)]
+fn available_space(path: &Path) -> Option<u64> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return None;
+    }
+    let unit = if stat.f_frsize > 0 { stat.f_frsize } else { stat.f_bsize };
+    Some((stat.f_bavail as u64).saturating_mul(unit as u64))
+}
+
+#[cfg(not(unix))]
+fn available_space(_path: &Path) -> Option<u64> {
+    // The download still checks advertised sizes after the fact; this build
+    // cannot ask the OS for free space without a platform-specific call.
+    None
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const MB: f64 = 1024.0 * 1024.0;
+    if n >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", n as f64 / (1024.0 * MB * 1024.0))
+    } else if n >= 1024 * 1024 {
+        format!("{:.0} MB", n as f64 / MB)
+    } else if n >= 1024 {
+        format!("{:.0} KB", n as f64 / 1024.0)
+    } else {
+        format!("{n} B")
+    }
+}
+
+fn ensure_space(dir: &Path, needed: u64) -> Result<(), String> {
+    if needed == 0 {
+        return Ok(());
+    }
+    let Some(free) = available_space(dir) else {
+        return Ok(());
+    };
+    let required = needed.saturating_add(DISK_RESERVE);
+    if required > free {
+        return Err(format!(
+            "Not enough free disk space: this needs about {} plus a {} reserve, but only {} is available. Free up space or choose a smaller corpus.",
+            fmt_bytes(needed),
+            fmt_bytes(DISK_RESERVE),
+            fmt_bytes(free)
+        ));
+    }
+    Ok(())
+}
+
 fn cancelled_outcome(dest: &Path, filename: String, bytes: u64) -> DownloadOutcome {
     let _ = fs::remove_file(part_path(dest));
     DownloadOutcome {
@@ -135,6 +191,10 @@ pub fn download_url(
     // cache hit. Remove it so the next attempt can land cleanly.
     if dest.exists() {
         let _ = fs::remove_file(&dest);
+    }
+    if let Some(want) = expected_size {
+        let already = fs::metadata(part_path(&dest)).map(|m| m.len()).unwrap_or(0);
+        ensure_space(dest_dir, want.saturating_sub(already))?;
     }
 
     let mut last_err = String::new();
@@ -358,6 +418,20 @@ pub fn download_batch(
         .iter()
         .map(|f| f.expected_size)
         .try_fold(0u64, |sum, size| size.map(|n| sum + n));
+    // Sum what is actually missing so a resumed or partly cached corpus is not
+    // rejected because the full payload would not fit twice.
+    let mut needed = 0u64;
+    for file in files {
+        let Ok(rel) = safe_relative(&file.path) else { continue };
+        let Some(want) = file.expected_size else { continue };
+        let dest = dest_root.join(&rel);
+        if cached_file(&dest, Some(want)).is_some() {
+            continue;
+        }
+        let already = fs::metadata(part_path(&dest)).map(|m| m.len()).unwrap_or(0);
+        needed = needed.saturating_add(want.saturating_sub(already));
+    }
+    ensure_space(dest_root, needed)?;
     let mut received_total: u64 = 0;
     let mut saved: Vec<String> = Vec::new();
 
@@ -410,6 +484,18 @@ pub fn extract_csvs(zip_path: &Path, dest_dir: &Path) -> Result<Vec<PathBuf>, St
     let mut archive =
         zip::ZipArchive::new(file).map_err(|e| format!("Not a readable zip: {e}"))?;
     fs::create_dir_all(dest_dir).map_err(|e| e.to_string())?;
+    let mut needed = 0u64;
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| e.to_string())?;
+        if entry.is_dir() {
+            continue;
+        }
+        let name = entry.name().map_err(|e| e.to_string())?;
+        if name.to_ascii_lowercase().ends_with(".csv") {
+            needed = needed.saturating_add(entry.size());
+        }
+    }
+    ensure_space(dest_dir, needed)?;
 
     let mut out = Vec::new();
     for i in 0..archive.len() {
@@ -469,6 +555,15 @@ mod tests {
             assert_request(&request);
             stream.write_all(&response).unwrap();
         })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disk_preflight_rejects_an_impossible_batch() {
+        let dir = temp_dir("space");
+        assert!(ensure_space(&dir, u64::MAX).is_err());
+        assert!(ensure_space(&dir, 0).is_ok());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

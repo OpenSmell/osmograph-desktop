@@ -461,6 +461,8 @@ interface SessionRecord {
   id: string;
   time: string;
   substance: string;
+  preparation?: string;
+  role?: string;
   label: string;
   format: string;
   duration: string;
@@ -4859,6 +4861,22 @@ interface MeanResponse {
 }
 
 let smellCards: SmellCardData[] = [];
+
+/** Explicit preparations inside one substance, e.g. `Warm · After warm`.
+ *  These are nuances, not separate smell identities, and never invented. */
+function smellPreparationLabel(c: SmellCardData): string {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of c.records) {
+    const prep = (r.preparation || '').trim();
+    const key = prep.toLowerCase();
+    if (!prep || seen.has(key)) continue;
+    seen.add(key);
+    out.push(titleCase(prep));
+  }
+  return out.join(' · ');
+}
+
 const smellSel = new Set<string>();
 const smellFpCache = new Map<string, MeanResponse | null>();
 // In-flight fingerprint loads, so opening a detail while the gallery is still
@@ -5722,9 +5740,36 @@ function clearSmellSelection(): void {
 
 function buildSmellCards(): void {
   const bySub = new Map<string, { display: string; records: SessionRecord[] }>();
+  const controls = sessions.filter(s => s.role === 'reference' || s.role === 'noise').length;
+  function looksConcatenatedSubstance(s: string): boolean {
+    const t = s.trim();
+    if (!t || t.includes(' ') || t.includes('_') || t.includes('-') || t.includes('+')) return false;
+    if (t.length < 12 || t.length > 40) return false;
+    const upper = (t.match(/[A-Z]/g) || []).length;
+    const lower = (t.match(/[a-z]/g) || []).length;
+    if (upper >= 3 && lower >= t.length / 3) return true;
+    return false;
+  }
+  function splitConcatenatedSubstance(s: string): string {
+    const t = s.trim();
+    if (t.includes(' ') || t.includes('_') || t.includes('-')) return t;
+    const re = /[A-Z][a-z]+|\d+[A-Za-z]+/g;
+    const parts = t.match(re);
+    if (parts && parts.length >= 3) {
+      return parts.join(' ');
+    }
+    return t;
+  }
   for (const s of sessions) {
     const raw = (s.substance || '').trim();
     if (!raw || raw.toLowerCase() === 'unknown') continue;
+    // Reference/noise runs stay in the Library as evidence, but they are not
+    // smell classes and must not be counted as substances.
+    if (s.role === 'reference' || s.role === 'noise') continue;
+    if (looksConcatenatedSubstance(raw)) {
+      console.warn('Suspicious concatenated substance label dropped from gallery:', raw);
+      continue;
+    }
     // Group case-insensitively: "Mosquito coil" and "mosquito coil" are one smell.
     const key = raw.toLowerCase();
     const g = bySub.get(key);
@@ -5742,7 +5787,7 @@ function buildSmellCards(): void {
     .sort((a, b) => b.records.length - a.records.length || a.substance.localeCompare(b.substance));
   const sub = document.getElementById('smellsSub');
   if (sub) {
-    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings · grouped by substance`;
+    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings${controls ? ` · ${controls} control${controls === 1 ? '' : 's'} in Library` : ''} · grouped by substance`;
   }
 }
 
@@ -5767,7 +5812,7 @@ function smellNewest(c: SmellCardData): string {
 function visibleSmellCards(): SmellCardData[] {
   const q = smellQuery.trim().toLowerCase();
   const out = smellCards.filter(c => {
-    if (q && !`${c.substance} ${smellSource(c)}`.toLowerCase().includes(q)) return false;
+    if (q && !`${c.substance} ${smellPreparationLabel(c)} ${smellSource(c)}`.toLowerCase().includes(q)) return false;
     if (smellFilter === 'ready' && c.records.filter(r => !!r.file_id).length < 2) return false;
     if (smellFilter === 'needs' && c.analyzed > 0) return false;
     if (smellFilter === 'multi' && smellArrayCount(c) < 2) return false;
@@ -5855,17 +5900,20 @@ async function renderSmellGallery(): Promise<void> {
     return;
   }
 
-  grid.innerHTML = visible.map((c, i) => `
+  grid.innerHTML = visible.map((c, i) => {
+    const prep = smellPreparationLabel(c);
+    return `
     <div class="smell-card${smellSel.has(c.key) ? ' selected' : ''}" data-idx="${i}" role="button" tabindex="0">
       <button class="smell-card-save" data-idx="${i}" title="Save a shareable Smell Card (PNG)">&#8595;</button>
       <span class="smell-card-name">${titleCase(c.substance)}</span>
       <canvas class="smell-card-print" data-idx="${i}" title="Fingerprint — mean settled response across the array"></canvas>
-      <span class="smell-card-meta" data-idx="${i}">${c.records.length} recording${c.records.length === 1 ? '' : 's'}</span>
+      <span class="smell-card-meta" data-idx="${i}">${c.records.length} recording${c.records.length === 1 ? '' : 's'}${prep ? ` · ${prep}` : ''}</span>
       <span class="smell-card-foot">
         <input type="checkbox" class="smell-card-pick" data-idx="${i}" ${smellSel.has(c.key) ? 'checked' : ''}>
         <span class="smell-card-pick-label">compare</span>
       </span>
-    </div>`).join('');
+    </div>`;
+  }).join('');
   grid.querySelectorAll<HTMLElement>('.smell-card').forEach(el => {
     el.addEventListener('click', (ev) => {
       const t = ev.target as HTMLElement;
@@ -5911,11 +5959,14 @@ async function renderSmellGallery(): Promise<void> {
       if (fp) {
         const meta = grid.querySelector<HTMLElement>(`.smell-card-meta[data-idx="${i}"]`);
         if (meta) {
+          const prep = smellPreparationLabel(c);
+          const prepSuffix = prep ? ` · ${prep}` : '';
           if (fp.groupSize < c.records.length) {
-            meta.textContent = `${fp.groupSize} of ${c.records.length} on this array · mean of ${fp.used}`;
-            meta.title = `${c.records.length - fp.groupSize} recording${c.records.length - fp.groupSize === 1 ? '' : 's'} use a different array and are not blended into this fingerprint.`;
+            meta.textContent = `${fp.groupSize} of ${c.records.length} on this array · mean of ${fp.used}${prepSuffix}`;
+            meta.title = `${c.records.length - fp.groupSize} recording${c.records.length - fp.groupSize === 1 ? '' : 's'} use a different array and are not blended into this fingerprint.${prep ? ` Preparations: ${prep}.` : ''}`;
           } else {
-            meta.textContent = `${fp.groupSize} recording${fp.groupSize === 1 ? '' : 's'} · mean of ${fp.used}`;
+            meta.textContent = `${fp.groupSize} recording${fp.groupSize === 1 ? '' : 's'} · mean of ${fp.used}${prepSuffix}`;
+            if (prep) meta.title = `Preparations: ${prep}.`;
           }
         }
         drawCardFingerprint(canvas, fp.values, fp.channels);
@@ -10119,7 +10170,7 @@ async function exportSmellCard(card: SmellCardData): Promise<void> {
 // index straight into `sessions` silently drops `time`/`path` and leaves the
 // Train table full of "undefined".
 interface RawSessionRecord {
-  file_id: string; substance: string; label: string; timestamp: number;
+  file_id: string; substance: string; preparation?: string; role?: string; label: string; timestamp: number;
   duration_sec: number; sensor_count: number; quality: number; csv_path: string;
   quality_report: string | null;
   collection_id?: string; collection_name?: string; split?: string; condition?: string;
@@ -10139,6 +10190,8 @@ function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
       id: `s-${r.file_id}`,
       time: fmtLibTime(r.timestamp),
       substance: r.substance && r.substance !== 'unknown' ? r.substance : 'Unknown',
+      preparation: r.preparation || '',
+      role: r.role || '',
       label: r.label,
       format: 'CSV',
       duration: `${Math.round(r.duration_sec)}s`,
@@ -11557,6 +11610,197 @@ function datasetLocalCount(id: string): number {
   return sessions.filter(s => recordingSource(s).datasetId === id).length;
 }
 
+interface CollectionSummary {
+  folder: string;
+  root: string;
+  id: string;
+  name: string;
+  description: string;
+  source_url: string;
+  citation: string;
+  credit: string;
+  licence: string;
+  licence_url: string;
+  commercial_use: boolean;
+  publishable: boolean;
+  rearranged: boolean;
+  has_manifest: boolean;
+  manifest_path: string | null;
+  manifest_hash: string;
+  retrieved_at: string;
+  files: number;
+  bytes: number;
+  disk_files: number;
+  disk_bytes: number;
+  transformations: string[];
+  manifest_error: string | null;
+}
+
+interface ManifestVerification {
+  folder: string;
+  root: string;
+  ok: boolean;
+  checked: number;
+  missing: string[];
+  changed: string[];
+  extra: string[];
+  manifest_hash: string;
+}
+
+interface CollectionMeta {
+  id: string;
+  name: string;
+  description: string;
+  sourceUrl: string;
+  citation: string;
+  credit: string;
+  licenceId: string;
+  licenceUrl: string;
+  commercialUse: boolean;
+  attributionRequired: boolean;
+  shareAlike: boolean;
+  redistribution: string;
+  licenceNotes: string;
+  rearranged: boolean;
+  publishable: boolean;
+  transformations: string[];
+  layoutKind: string;
+  splitFolders: Record<string, string>;
+  substanceSource: string;
+  conditionSource: string;
+}
+
+let collectionSummaries: CollectionSummary[] = [];
+
+function datasetDestName(d: DatasetEntry): string {
+  const dl = d.download;
+  if (!dl) return '';
+  if (dl.destName) return dl.destName;
+  if (dl.archive && dl.filename) return dl.filename.replace(/\.zip$/i, '');
+  return '';
+}
+
+function collectionForDataset(d: DatasetEntry): CollectionSummary | null {
+  const dest = datasetDestName(d);
+  return collectionSummaries.find((s) => s.id === d.id || (dest && s.folder === dest)) || null;
+}
+
+function collectionForSource(source: RecordingSource): CollectionSummary | null {
+  if (!source.datasetId) return null;
+  return collectionSummaries.find((s) => s.id === source.datasetId || s.id === source.id) || null;
+}
+
+function collectionMetaFor(d: DatasetEntry, archive: boolean): CollectionMeta {
+  const dest = datasetDestName(d) || d.id;
+  const splitFolders: Record<string, string> = {};
+  if (d.id === 'smellnet') {
+    splitFolders.Training = 'base_data/training';
+    splitFolders.Testing = 'base_data/testing';
+  } else if (d.id === 'smellnet-mixtures') {
+    splitFolders['test_seen'] = 'mixture_data/test_seen';
+    splitFolders['test_unseen'] = 'mixture_data/test_unseen';
+  }
+  const transformations = [`downloaded from the original source`, `stored under datasets/${dest}`];
+  if (archive) transformations.push('extracted archive preserving paths');
+  return {
+    id: d.id,
+    name: d.name,
+    description: d.what,
+    sourceUrl: d.url,
+    citation: d.citation || '',
+    credit: d.credit,
+    licenceId: d.license,
+    licenceUrl: d.licenseUrl || '',
+    commercialUse: d.commercial === 'yes',
+    attributionRequired: !/CC0/i.test(d.license),
+    shareAlike: /BY-SA/i.test(d.license),
+    redistribution: /MIT|CC BY|CC0|Apache/i.test(d.license) ? 'allowed' : 'unknown',
+    licenceNotes: 'Local working copy. The source terms govern reuse; this copy is not published by Osmograph.',
+    rearranged: true,
+    publishable: false,
+    transformations,
+    layoutKind: d.id,
+    splitFolders,
+    substanceSource: 'folder-or-filename',
+    conditionSource: 'filename',
+  };
+}
+
+function storeCollectionSummary(summary: CollectionSummary | null): void {
+  if (!summary || !summary.folder) return;
+  collectionSummaries = [
+    ...collectionSummaries.filter((s) => s.folder !== summary.folder),
+    summary,
+  ].sort((a, b) => a.folder.localeCompare(b.folder));
+}
+
+async function loadCollectionSummaries(): Promise<void> {
+  try {
+    const loaded = await invoke<CollectionSummary[]>('dataset_collections');
+    collectionSummaries = Array.isArray(loaded) ? loaded : [];
+  } catch (e) {
+    console.warn('Collection manifest scan failed:', e);
+    collectionSummaries = [];
+  }
+}
+
+async function writeCollectionManifest(
+  d: DatasetEntry,
+  ifMissing = true,
+  folder?: string,
+): Promise<CollectionSummary | null> {
+  const dest = folder || datasetDestName(d);
+  if (!dest) return null;
+  try {
+    const summary = await invoke<CollectionSummary>('dataset_write_manifest', {
+      destName: dest,
+      meta: collectionMetaFor(d, !!d.download?.archive),
+      ifMissing,
+    });
+    storeCollectionSummary(summary);
+    return summary;
+  } catch (e) {
+    console.warn(`Collection file for ${d.name} was not written:`, e);
+    return null;
+  }
+}
+
+async function verifyDataset(folder: string): Promise<void> {
+  try {
+    const v = await invoke<ManifestVerification>('dataset_verify', { destName: folder });
+    if (v.ok) {
+      showToast(`Verified ${v.checked} file${v.checked === 1 ? '' : 's'} against collection.json.`);
+      return;
+    }
+    const parts = [
+      v.missing.length ? `${v.missing.length} missing` : '',
+      v.changed.length ? `${v.changed.length} changed` : '',
+      v.extra.length ? `${v.extra.length} unlisted` : '',
+    ].filter(Boolean);
+    showToast(`Collection drift in ${v.folder}: ${parts.join(', ')}.`);
+  } catch (e) {
+    showToast(`Could not verify the collection: ${e}`);
+  }
+}
+
+async function addLocalDataset(id: string): Promise<void> {
+  const d = DATASET_BY_ID.get(id);
+  if (!d) return;
+  const summary = collectionForDataset(d);
+  if (!summary) return;
+  try {
+    const imported = await invoke<SessionRecord[]>('import_paths', { paths: [summary.root] });
+    await loadCollectionSummaries();
+    await reloadLibrary();
+    renderDatasetCatalog();
+    showToast(imported.length
+      ? `Added ${imported.length} recording${imported.length === 1 ? '' : 's'} from disk.`
+      : 'Those recordings are already in the library.');
+  } catch (e) {
+    showToast(`Could not add the local copy: ${e}`);
+  }
+}
+
 function fmtBytes(n?: number): string {
   if (!n || !Number.isFinite(n) || n <= 0) return '';
   return n >= 1e9 ? `${(n / 1e9).toFixed(1)} GB` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1e3))} KB`;
@@ -11571,7 +11815,8 @@ function renderDatasetLocal(): void {
   const stamp = document.getElementById('dsLibraryStamp');
   if (stamp) stamp.textContent = `${recordings} recording${recordings === 1 ? '' : 's'} · ${smells} smell${smells === 1 ? '' : 's'}`;
   const localStamp = document.getElementById('dsLocalStamp');
-  if (localStamp) localStamp.textContent = `${buckets.length} source${buckets.length === 1 ? '' : 's'}`;
+  const manifests = collectionSummaries.filter((s) => s.has_manifest).length;
+  if (localStamp) localStamp.textContent = `${buckets.length} source${buckets.length === 1 ? '' : 's'} · ${manifests} collection file${manifests === 1 ? '' : 's'}`;
   if (!buckets.length) {
     host.innerHTML = `<div class="ds-local-empty">No recordings. <button class="text-link" type="button" data-ds-import-inline>Import a CSV</button> or download a corpus below.</div>`;
     host.querySelector<HTMLElement>('[data-ds-import-inline]')?.addEventListener('click', () => (document.getElementById('dsImport') as HTMLButtonElement | null)?.click());
@@ -11580,14 +11825,22 @@ function renderDatasetLocal(): void {
   host.innerHTML = buckets.map(b => {
     const source = b.source;
     const dataset = source.datasetId ? DATASET_BY_ID.get(source.datasetId) : null;
+    const summary = collectionForSource(source);
     const license = source.license ? `<span class="ds-source-license">${esc(source.license)}</span>` : '';
+    const manifest = summary?.has_manifest
+      ? `<span class="ds-source-manifest" title="Collection file · ${summary.files} files · ${esc(summary.licence || 'licence unknown')} · local copy, not published">manifest</span>`
+      : '';
     const title = [
       `${b.records.length} recording${b.records.length === 1 ? '' : 's'} · ${b.smells.size} smell${b.smells.size === 1 ? '' : 's'}`,
+      summary?.has_manifest ? `collection.json · ${summary.files} files` : 'no collection file yet',
       source.credit,
       source.citation,
     ].filter(Boolean).join(' · ');
     const menu = [
       `<button type="button" data-ds-open-recordings="${esc(source.name)}">Recordings</button>`,
+      summary?.manifest_path ? `<button type="button" data-ds-open-manifest="${esc(summary.manifest_path)}">Collection file</button>` : '',
+      summary?.manifest_path ? `<button type="button" data-ds-verify="${esc(summary.folder)}">Verify files</button>` : '',
+      summary?.root ? `<button type="button" data-ds-open-folder="${esc(summary.root)}">Folder</button>` : '',
       dataset ? `<button type="button" data-ds-cite="${esc(dataset.id)}">Cite</button>` : '',
       dataset?.download ? `<button type="button" class="ds-remove" data-ds-remove="${esc(dataset.id)}">Remove from library</button>` : '',
     ].filter(Boolean).join('');
@@ -11596,6 +11849,7 @@ function renderDatasetLocal(): void {
         <span class="ds-source-dot"></span>
         <span class="ds-source-name">${esc(source.name)}</span>
         <span class="ds-source-count">${b.records.length}</span>
+        ${manifest}
         ${license}
       </button>
       <details class="ds-row-menu">
@@ -11623,6 +11877,9 @@ function renderDatasetCatalog() {
   el.innerHTML = rows.map((d) => {
     const local = datasetLocalCount(d.id);
     const installed = local > 0;
+    const summary = collectionForDataset(d);
+    const onDisk = summary?.disk_files || 0;
+    const present = onDisk > 0;
     const chips = [
       d.sensors,
       d.channels ? `${d.channels} channels` : '',
@@ -11631,8 +11888,12 @@ function renderDatasetCatalog() {
       d.size,
     ].filter(Boolean)
       .map((c) => `<span class="ds-chip">${esc(c)}</span>`).join('');
-    const formatClass = installed ? 'ready' : d.format;
-    const formatLabel = installed ? `${local} in library` : d.format === 'ready' ? 'Ready to open' : d.format === 'converts' ? 'Imports into Osmograph' : 'Source only';
+    const formatClass = installed || present ? 'ready' : d.format;
+    const formatLabel = installed
+      ? `${local} in library`
+      : present
+        ? `${onDisk} on disk · not in library`
+        : d.format === 'ready' ? 'Ready to open' : d.format === 'converts' ? 'Imports into Osmograph' : 'Source only';
     const license = d.licenseUrl
       ? `<a class="ds-license-link" href="${esc(d.licenseUrl)}">${esc(d.license)}</a>`
       : `<span class="ds-license-link">${esc(d.license)}</span>`;
@@ -11640,10 +11901,17 @@ function renderDatasetCatalog() {
     const primary = d.download
       ? installed
         ? `<button class="mini-btn primary" data-ds-open-gallery="${esc(sourceName)}" type="button">Open</button>`
-        : `<button class="mini-btn primary ds-download" data-id="${esc(d.id)}" type="button" title="Download and import${d.download.sizeBytes ? ` (${fmtBytes(d.download.sizeBytes)})` : ''}">Download</button>`
+        : present
+          ? `<button class="mini-btn primary ds-add-local" data-id="${esc(d.id)}" type="button" title="Add the ${onDisk} files already on disk back to the library">Add to library</button>`
+          : `<button class="mini-btn primary ds-download" data-id="${esc(d.id)}" type="button" title="Download and import${d.download.sizeBytes ? ` (${fmtBytes(d.download.sizeBytes)})` : ''}">Download</button>`
       : `<a class="mini-btn" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Source ↗</a>`;
+    const manifest = summary
+      ? `<div class="ds-manifest ${summary.has_manifest ? 'ok' : 'missing'}" title="${esc(summary.manifest_hash || '')}">${summary.has_manifest
+          ? `Collection file · ${summary.disk_files} file${summary.disk_files === 1 ? '' : 's'} · ${esc(summary.licence || 'licence unknown')} · private working copy`
+          : 'No collection file yet'}</div>`
+      : '';
     return `
-    <article class="ds-card${installed ? ' installed' : ''}">
+    <article class="ds-card${installed ? ' installed' : ''}${present && !installed ? ' ondisk' : ''}">
       <div class="ds-card-head">
         <div style="min-width:0">
           <div class="ds-card-name">${esc(d.name)}</div>
@@ -11663,9 +11931,12 @@ function renderDatasetCatalog() {
           ${d.useFor ? `<div class="ds-use"><span>Use it for</span>${esc(d.useFor)}</div>` : ''}
           <div class="ds-note"><span>Watch out</span>${esc(d.note)}</div>
           <div class="ds-rights">${license}<span>${esc(d.credit)}</span></div>
+          ${manifest}
           <div class="ds-details-links">
             ${d.citation ? `<button class="text-link" type="button" data-ds-cite="${esc(d.id)}">Cite</button>` : ''}
             <a class="text-link" href="${esc(d.url)}" target="_blank" rel="noopener noreferrer">Source ↗</a>
+            ${summary ? `<button class="text-link" type="button" data-ds-open-folder="${esc(summary.root)}">Open folder</button>` : ''}
+            ${summary?.manifest_path ? `<button class="text-link" type="button" data-ds-verify="${esc(summary.folder)}">Verify files</button>` : ''}
             ${installed ? `<button class="text-link ds-remove" type="button" data-ds-remove="${esc(d.id)}">Remove</button>` : ''}
           </div>
         </div>
@@ -11872,6 +12143,7 @@ interface DatasetBatchOutcome {
 }
 
 async function finishDatasetImport(d: DatasetEntry, importedCount: number, job: DlJob, folder: string): Promise<void> {
+  await loadCollectionSummaries();
   await reloadLibrary();
   renderDatasetCatalog();
   const sourceName = DATASET_SOURCE_NAME[d.id] || d.name;
@@ -11940,6 +12212,7 @@ async function downloadDatasetRow(d: DatasetEntry) {
       }
       job.meta.textContent = `Importing ${out.files.length} file${out.files.length === 1 ? '' : 's'}…`;
       const imported = await invoke<SessionRecord[]>('import_paths', { paths: [out.root] });
+      await writeCollectionManifest(d, true);
       await finishDatasetImport(d, imported.length, job, out.root);
       setCard('In library ✓', false);
     } catch (e) {
@@ -11996,7 +12269,10 @@ async function downloadDatasetRow(d: DatasetEntry) {
     let paths = [out.path];
     if (dl.archive) {
       job.meta.textContent = 'Extracting…';
-      paths = await invoke<string[]>('dataset_extract', { path: out.path });
+      paths = await invoke<string[]>('dataset_extract', {
+        path: out.path,
+        destName: datasetDestName(d) || undefined,
+      });
     }
     if (!paths.length) {
       dlDone(job, `Downloaded ${dlFmt(out.bytes)} — no CSV inside.`, {
@@ -12008,6 +12284,7 @@ async function downloadDatasetRow(d: DatasetEntry) {
 
     job.meta.textContent = `Importing ${paths.length} file${paths.length > 1 ? 's' : ''}…`;
     const imported = await invoke<SessionRecord[]>('import_paths', { paths });
+    await writeCollectionManifest(d, true);
     await finishDatasetImport(d, imported.length, job, await invoke<string>('dataset_dir'));
     setCard('In library ✓', false);
   } catch (e) {
@@ -12045,23 +12322,84 @@ async function removeDataset(id: string): Promise<void> {
   const matches = sessions.filter(s => recordingSource(s).datasetId === id);
   if (!matches.length) return;
   const name = DATASET_SOURCE_NAME[id] || d.name;
-  if (!confirm(`Remove ${matches.length} ${name} recording${matches.length === 1 ? '' : 's'} from the library?\n\nThe downloaded archive stays in the datasets folder until you open it and delete it.`)) return;
-  let removed = 0;
-  for (const s of matches) {
-    if (!s.file_id) continue;
-    try {
-      await invoke('remove_session', { fileId: s.file_id });
-      removed++;
-    } catch { /* keep going; report the count below */ }
+  const summary = collectionForDataset(d);
+  if (!confirm(`Remove ${matches.length} ${name} recording${matches.length === 1 ? '' : 's'} from the library?\n\nThe downloaded files stay in the datasets folder. You can add them back from this card without downloading again.`)) return;
+  try {
+    await invoke('set_collection_hidden', { collectionId: summary?.id || id, hidden: true });
+  } catch (e) {
+    showToast(`Could not remove the collection: ${e}`);
+    return;
   }
   selectedSession = null;
+  await loadCollectionSummaries();
   await reloadLibrary();
   renderDatasetCatalog();
-  showToast(`Removed ${removed} recording${removed === 1 ? '' : 's'}. Download files are still in the datasets folder.`);
+  showToast(`Removed ${matches.length} recording${matches.length === 1 ? '' : 's'}. Files kept on disk.`);
+}
+
+interface ArchiveRecovery {
+  archive: string;
+  dest: string;
+  files: string[];
+  extracted: boolean;
+  error: string | null;
+}
+
+/// Finish downloads that landed on disk but never made it into the library.
+/// This is deliberately idempotent: an archive whose folder is already imported
+/// is left alone, and manifests are backfilled only where one is missing.
+async function reconcileDatasetCorpora(): Promise<void> {
+  let imported = 0;
+  const recovered: string[] = [];
+  const archives = DATASET_CATALOG
+    .filter((d) => d.download?.archive && d.download.filename)
+    .map((d) => ({
+      archive: d.download!.filename!,
+      destName: datasetDestName(d),
+    }))
+    .filter((a) => a.destName);
+  if (archives.length) {
+    try {
+      const outcomes = await invoke<ArchiveRecovery[]>('dataset_recover_archives', { archives });
+      for (const out of outcomes) {
+        if (out.error) {
+          console.warn(`Archive recovery failed for ${out.archive}: ${out.error}`);
+          continue;
+        }
+        if (!out.extracted || !out.files.length) continue;
+        const d = DATASET_CATALOG.find((x) => x.download?.filename === out.archive);
+        if (!d) continue;
+        const added = await invoke<SessionRecord[]>('import_paths', { paths: [out.dest] });
+        imported += added.length;
+        await writeCollectionManifest(d, true);
+        recovered.push(d.name);
+      }
+    } catch (e) {
+      console.warn('Archive recovery scan failed:', e);
+    }
+  }
+
+  await loadCollectionSummaries();
+  for (const d of DATASET_CATALOG) {
+    const summary = collectionForDataset(d);
+    if (summary && !summary.has_manifest) {
+      await writeCollectionManifest(d, true, summary.folder);
+    }
+  }
+  await loadCollectionSummaries();
+  if (imported > 0 || recovered.length) {
+    await reloadLibrary();
+    renderDatasetCatalog();
+    showToast(recovered.length
+      ? `Finished importing ${recovered.join(', ')} · ${imported} recording${imported === 1 ? '' : 's'}.`
+      : `Added ${imported} recording${imported === 1 ? '' : 's'} from downloaded files.`);
+  }
 }
 
 function initDatasetCatalog() {
   renderDatasetCatalog();
+  void loadCollectionSummaries().then(renderDatasetCatalog);
+  setTimeout(() => { void reconcileDatasetCorpora(); }, 600);
   document.getElementById('dsFilter')?.addEventListener('input', renderDatasetCatalog);
   void (async () => {
     try {
@@ -12102,10 +12440,18 @@ function initDatasetCatalog() {
     if (btn.classList.contains('ds-download')) {
       const d = DATASET_CATALOG.find((x) => x.id === btn.dataset.id);
       if (d) void downloadDatasetRow(d);
+    } else if (btn.classList.contains('ds-add-local')) {
+      void addLocalDataset(btn.dataset.id || '');
     } else if (btn.dataset.dsOpenGallery) {
       openDatasetSource(btn.dataset.dsOpenGallery);
     } else if (btn.dataset.dsOpenRecordings) {
       openSourceRecordings(btn.dataset.dsOpenRecordings);
+    } else if (btn.dataset.dsOpenManifest) {
+      void invoke('open_path', { path: btn.dataset.dsOpenManifest }).catch((e) => showToast(`Could not open the collection file: ${e}`));
+    } else if (btn.dataset.dsOpenFolder) {
+      void invoke('open_path', { path: btn.dataset.dsOpenFolder }).catch((e) => showToast(`Could not open the folder: ${e}`));
+    } else if (btn.dataset.dsVerify) {
+      void verifyDataset(btn.dataset.dsVerify);
     } else if (btn.dataset.dsCite) {
       void copyDatasetCitation(btn.dataset.dsCite);
     } else if (btn.dataset.dsRemove) {
