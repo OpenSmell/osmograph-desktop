@@ -437,7 +437,6 @@ export function assertSandboxableUi(html: string): void {
   }
   const allowed = new Set([
     'version', 'onData', 'action', 'ready', 'toast',
-    'setDetection', 'setTransforms', 'setTrajectory',
   ]);
   for (const match of html.matchAll(/osmograph\.([A-Za-z_$][\w$]*)/g)) {
     if (!allowed.has(match[1])) {
@@ -723,31 +722,14 @@ function bridgeScript(nonce: string, capabilities: VialCapabilities): string {
     action: send,
     ready: function(){ send({ type: "ready" }); },
     toast: function(message){ send({ type: "toast", message: String(message || "") }); },
-    setDetection: function(config){
-      config = config || {};
-      send({
-        type: "set-detection",
-        enabled: config.enabled !== false,
-        alertThreshold: typeof config.alertThreshold === "number" ? config.alertThreshold : 0.5,
-        perChannelLimits: config.perChannelLimits || {}
-      });
+    setDetection: function(){
+      throw new Error("A v2 Vial cannot set detection from its UI; the anomaly profile in vial.json is the program.");
     },
-    setTransforms: function(t){
-      t = t || {};
-      send({
-        type: "set-transforms",
-        baseline: String(t.baseline || "first-n"),
-        conditioning: Array.isArray(t.conditioning) ? t.conditioning : [],
-        response: String(t.response || "delta-over-r0")
-      });
+    setTransforms: function(){
+      throw new Error("A v2 Vial cannot set transforms from its UI; the anomaly profile in vial.json is the program.");
     },
-    setTrajectory: function(spec){
-      spec = spec || {};
-      send({
-        type: "set-trajectory",
-        fields: Array.isArray(spec.fields) ? spec.fields : [],
-        intervalMs: typeof spec.intervalMs === "number" ? spec.intervalMs : 10000
-      });
+    setTrajectory: function(){
+      throw new Error("A v2 Vial cannot set trajectory from its UI; the trajectory spec is set by the host.");
     }
   };
 

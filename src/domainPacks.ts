@@ -759,8 +759,8 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
       const metrics = ev.metrics;
       const hasNumber = [metrics.farPerMonth, metrics.latencyS, metrics.mde, metrics.nSamples, metrics.nAlarms]
         .some(v => typeof v === 'number' && Number.isFinite(v));
-      add('evidence', 'Held-out evidence', /^https:\/\//i.test(ev.reportUrl) && ev.dataset.trim().length >= 10 && hasNumber, true,
-        'A v2 Vial needs an https evidence report, the dataset it describes, and at least one measured number.');
+      add('evidence', 'Held-out evidence', /^https:\/\//i.test(ev.reportUrl) && ev.dataset.trim().length >= 10 && hasNumber, false,
+        'A v2 Vial installs without evidence, but is Ungated until it has an https evidence report, the dataset it describes, and at least one measured number.');
       add('evidence-date', 'Evidence date', /^\d{4}-\d{2}-\d{2}/.test(ev.measuredAt), false,
         ev.measuredAt ? `Measured ${ev.measuredAt}.` : 'Add the measurement date.');
       const badFixture = ev.fixtures.find(f =>
@@ -774,8 +774,8 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
             ? `Each fixture needs an id, a fixtures/<name>.json path, and an expected state: ${badFixture.file || badFixture.id}.`
             : `${ev.fixtures.length} fixture(s).`);
     } else {
-      add('evidence', 'Held-out evidence', false, true,
-        'A v2 Vial needs an evidence block with a report URL, the dataset, and measured numbers.');
+      add('evidence', 'Held-out evidence', false, false,
+        'No evidence block declared; this Vial installs as Ungated and cannot be listed.');
     }
   } else {
     add('anomaly', 'Anomaly profile', false, false,
@@ -859,9 +859,11 @@ export function validateDomainPack(pack: DomainPack, imported = false): DomainVa
 
   const errors = checks.filter(c => c.critical && !c.passed).map(c => c.detail);
   const warnings = checks.filter(c => !c.critical && !c.passed).map(c => c.detail);
+  const evidenceCheck = checks.find(c => c.id === 'evidence');
   const fixtures = checks.find(c => c.id === 'evidence-fixtures');
   const gated = errors.length === 0
     && pack.schema === 'osmograph.domain-pack/2'
+    && !!evidenceCheck?.passed
     && !!fixtures?.passed;
   return { passed: errors.length === 0, gated, imported, checks, errors, warnings };
 }

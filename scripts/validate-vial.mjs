@@ -133,7 +133,24 @@ for (const [label, spec] of [['ui-asset', pack.ui], ['home-ui-asset', pack.homeU
   }
 }
 
-const ok = validation.passed && !uiError;
+// A declared fixture must point at a real file beside the manifest; a
+// listing gate cannot pin bytes that do not exist.
+let fixtureError = '';
+for (const f of (pack.evidence && pack.evidence.fixtures) || []) {
+  const fixturePath = path.join(project.dir, f.file);
+  if (!fs.existsSync(fixturePath)) {
+    fixtureError = `fixture ${f.id || f.file}: ${f.file} declared in evidence but missing beside the manifest.`;
+    break;
+  }
+  try {
+    JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
+  } catch (err) {
+    fixtureError = `fixture ${f.id || f.file}: ${f.file} is not valid JSON: ${err instanceof Error ? err.message : String(err)}`;
+    break;
+  }
+}
+
+const ok = validation.passed && !uiError && !fixtureError;
 const label = ok ? (validation.gated ? 'PASS' : 'PASS (Ungated)') : 'FAIL';
 console.log(`${label} ${pack.id}@${pack.version} — ${passed}/${total} policy checks`);
 const printed = new Set();
@@ -148,6 +165,12 @@ for (const warning of validation.warnings) {
 }
 if (uiError) console.log(`  ERROR ${uiError}`);
 if (ok && !validation.gated && pack.schema === 'osmograph.domain-pack/2') {
-  console.log('  note  Gated requires at least one declarative fixture. Add one under fixtures/ and run noses test.');
+  const missing = pack.evidence && !pack.evidence.fixtures?.length;
+  console.log(
+    missing
+      ? '  note  Gated requires at least one declarative fixture. Add one under fixtures/ and declare it in evidence.fixtures.'
+      : '  note  Gated also needs real measured numbers in evidence.metrics; the scaffold uses placeholders until you measure them.',
+  );
 }
+if (fixtureError) console.log(`  ERROR ${fixtureError}`);
 process.exit(ok ? 0 : 1);
