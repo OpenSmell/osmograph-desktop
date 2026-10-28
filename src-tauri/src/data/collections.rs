@@ -14,6 +14,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct MixtureComponent {
+    pub name: String,
+    /// Declared share when the source names one (`Almond20_Orange80`). None
+    /// means the source lists components without amounts; never invent one.
+    #[serde(default)]
+    pub fraction: Option<f64>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Classification {
     pub collection_id: String,
@@ -28,6 +37,10 @@ pub struct Classification {
     pub role: String,
     pub split: String,
     pub condition: String,
+    /// Parsed mixture composition. A mixture is one recording with several
+    /// components, never several smells. Empty for a single substance.
+    #[serde(default)]
+    pub mixture: Vec<MixtureComponent>,
 }
 
 /// Files the library can parse as recordings.
@@ -183,28 +196,32 @@ pub fn has_timestamp_prefix(name: &str) -> bool {
     strip_timestamp(strip_ext(name)).is_some()
 }
 
-fn split_concatenated_pascal(s: &str) -> Option<String> {
-    if s.contains(' ') || s.contains('_') || s.contains('-') {
-        return None;
+/// Split a run-together PascalCase label into its words. Empty when the label
+/// is already separated or is a single word, so `Strawberry` never becomes a
+/// fake mixture while `AppleBananaTomato` becomes three components.
+pub fn concatenated_parts(raw: &str) -> Vec<String> {
+    let t = raw.trim();
+    if t.is_empty()
+        || t.contains(' ')
+        || t.contains('_')
+        || t.contains('-')
+        || t.contains('+')
+        || t.chars().any(|c| c.is_ascii_digit())
+    {
+        return Vec::new();
     }
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() < 12 {
-        return None;
+    let chars: Vec<char> = t.chars().collect();
+    if chars.len() < 4 {
+        return Vec::new();
     }
     let mut parts = Vec::new();
     let mut start = 0;
     for i in 1..chars.len() {
         let c = chars[i];
         let prev = chars[i - 1];
-        if c.is_ascii_uppercase() && (prev.is_ascii_lowercase() || prev.is_ascii_digit()) {
+        if c.is_ascii_uppercase() && prev.is_ascii_lowercase() {
             let part: String = chars[start..i].iter().collect();
-            if part.len() >= 2 {
-                parts.push(part);
-            }
-            start = i;
-        } else if c.is_ascii_digit() && prev.is_ascii_lowercase() {
-            let part: String = chars[start..i].iter().collect();
-            if part.len() >= 2 {
+            if part.chars().count() >= 2 {
                 parts.push(part);
             }
             start = i;
@@ -212,15 +229,110 @@ fn split_concatenated_pascal(s: &str) -> Option<String> {
     }
     if start < chars.len() {
         let part: String = chars[start..].iter().collect();
-        if part.len() >= 2 {
+        if part.chars().count() >= 2 {
             parts.push(part);
         }
     }
-    if parts.len() >= 3 {
+    if parts.len() >= 2 && parts.iter().all(|p| p.chars().all(char::is_alphabetic)) {
+        parts
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn split_concatenated_pascal(s: &str) -> Option<String> {
+    let parts = concatenated_parts(s);
+    if parts.len() >= 2 {
         Some(parts.join(" "))
     } else {
         None
     }
+}
+
+/// Parse a declared composition such as `Almond20_Orange80` into components
+/// with real fractions. Amounts are normalised by their sum; an unparseable
+/// name returns no mixture rather than guessing.
+pub fn ratio_mixture_components(raw: &str) -> Vec<MixtureComponent> {
+    let parts: Vec<&str> = raw.split('_').filter(|p| !p.is_empty()).collect();
+    if parts.len() < 2 {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    let mut amounts = Vec::new();
+    for part in parts {
+        let Some(cut) = part.char_indices().find(|(_, c)| c.is_ascii_digit()).map(|(i, _)| i) else {
+            return Vec::new();
+        };
+        if cut == 0 || cut >= part.len() {
+            return Vec::new();
+        }
+        let Ok(amount) = part[cut..].parse::<f64>() else {
+            return Vec::new();
+        };
+        if !amount.is_finite() || amount <= 0.0 {
+            return Vec::new();
+        }
+        names.push(title_case(part[..cut].trim()));
+        amounts.push(amount);
+    }
+    let total: f64 = amounts.iter().sum();
+    if names.len() < 2 || total <= 0.0 {
+        return Vec::new();
+    }
+    names
+        .into_iter()
+        .zip(amounts)
+        .map(|(name, amount)| MixtureComponent {
+            name,
+            fraction: Some(amount / total),
+        })
+        .collect()
+}
+
+/// Parse an explicitly authored mixture such as `apple + mandarin`.
+pub fn plus_mixture(raw: &str) -> Vec<MixtureComponent> {
+    if !raw.contains('+') {
+        return Vec::new();
+    }
+    let parts: Vec<&str> = raw
+        .split('+')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() < 2 {
+        return Vec::new();
+    }
+    parts
+        .into_iter()
+        .map(|name| MixtureComponent {
+            name: name.to_string(),
+            fraction: None,
+        })
+        .collect()
+}
+
+/// Food Freshness concatenates fruit names (`AppleBananaTomato.csv`) and
+/// appends a day (`Banana D1.csv`). Only the name part is a mixture; a spaced
+/// single fruit such as `Green Apple` stays one substance.
+fn food_mixture(file: &str) -> Vec<MixtureComponent> {
+    let stem = strip_ext(file);
+    let mut base = stem;
+    for sep in [' ', '_'] {
+        if let Some((candidate, tail)) = base.rsplit_once(sep) {
+            if let Some(rest) = tail.strip_prefix('D').or_else(|| tail.strip_prefix('d')) {
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                    base = candidate;
+                }
+            }
+        }
+    }
+    concatenated_parts(base)
+        .into_iter()
+        .map(|name| MixtureComponent {
+            name: title_case(&name),
+            fraction: None,
+        })
+        .collect()
 }
 
 pub fn is_suspicious_substance(s: &str) -> bool {
@@ -235,12 +347,15 @@ pub fn is_suspicious_substance(s: &str) -> bool {
         return false;
     }
     let chars: Vec<char> = t.chars().collect();
-    if chars.len() > 28 {
+    if chars.len() > 60 {
         return true;
     }
     let upper = chars.iter().filter(|c| c.is_ascii_uppercase()).count();
     let lower = chars.iter().filter(|c| c.is_ascii_lowercase()).count();
-    if upper >= 3 && lower >= chars.len() / 3 {
+    if upper >= 3 && lower >= chars.len() / 4 {
+        return true;
+    }
+    if upper >= 2 && lower >= 5 && chars.len() > 15 {
         return true;
     }
     false
@@ -483,15 +598,18 @@ fn classify_dataset(id: &str, inner: &[&str], file: &str, c: &mut Classification
                 .rev()
                 .copied()
                 .find(|part| !part.contains('.') && !is_generic(part));
-            let mixture = folder
-                .map(prettify)
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| {
-                    let stem = strip_ext(file);
-                    mixture_label(stem.split('.').next().unwrap_or(stem))
-                });
-            c.substance = mixture;
             let stem = strip_ext(file);
+            let raw_name = folder.unwrap_or_else(|| stem.split('.').next().unwrap_or(stem));
+            let components = ratio_mixture_components(raw_name);
+            if components.len() >= 2 {
+                c.mixture = components;
+                c.substance = mixture_label(raw_name);
+            } else {
+                c.substance = folder
+                    .map(prettify)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| mixture_label(raw_name));
+            }
             c.condition = condition_from_suffix(stem);
         }
         "tadi-2019" => {
@@ -503,7 +621,17 @@ fn classify_dataset(id: &str, inner: &[&str], file: &str, c: &mut Classification
         }
         "food-freshness" => {
             let (substance, condition) = food_label(file);
-            c.substance = substance;
+            let components = food_mixture(file);
+            if components.len() >= 2 {
+                c.substance = components
+                    .iter()
+                    .map(|component| component.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" + ");
+                c.mixture = components;
+            } else {
+                c.substance = substance;
+            }
             c.condition = condition;
         }
         _ => {
@@ -539,9 +667,15 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
             &[]
         };
         classify_dataset(&id, inner, file, &mut c);
+        if let Some(split) = split_concatenated_pascal(&c.substance) {
+            c.substance = split;
+        }
         let (substance, preparation) = split_preparation(&c.substance);
         c.substance = substance;
         c.preparation = preparation;
+        if c.mixture.is_empty() {
+            c.mixture = plus_mixture(&c.substance);
+        }
         c.role = recording_role(&c.substance);
         return c;
     }
@@ -552,6 +686,7 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
         let (substance, preparation) = split_preparation(&filename_substance(file));
         c.substance = substance;
         c.preparation = preparation;
+        c.mixture = plus_mixture(&c.substance);
         c.role = recording_role(&c.substance);
         return c;
     }
@@ -561,6 +696,7 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
         let (substance, preparation) = split_preparation(&filename_substance(file));
         c.substance = substance;
         c.preparation = preparation;
+        c.mixture = plus_mixture(&c.substance);
         c.role = recording_role(&c.substance);
         return c;
     }
@@ -583,6 +719,7 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
         let (substance, preparation) = split_preparation(&filename_substance(file));
         c.substance = substance;
         c.preparation = preparation;
+        c.mixture = plus_mixture(&c.substance);
         c.role = recording_role(&c.substance);
         return c;
     }
@@ -603,9 +740,23 @@ pub fn classify(path: &Path, recordings_dir: &Path) -> Classification {
     } else {
         filename_substance(file)
     };
+    if let Some(split) = split_concatenated_pascal(&raw_substance) {
+        c.substance = split.clone();
+    }
     let (substance, preparation) = split_preparation(&raw_substance);
+    c.substance = if c.substance.is_empty() { substance } else { c.substance };
+    if c.preparation.is_empty() {
+        c.preparation = preparation;
+    }
+    if let Some(split) = split_concatenated_pascal(&c.substance) {
+        c.substance = split;
+    }
+    let (substance, preparation) = split_preparation(&c.substance);
     c.substance = substance;
     c.preparation = preparation;
+    if c.mixture.is_empty() {
+        c.mixture = plus_mixture(&c.substance);
+    }
     c.role = recording_role(&c.substance);
     c.condition = run_condition(file);
     c
@@ -683,7 +834,49 @@ mod tests {
         let c = classify(&p, &root());
         assert_eq!(c.collection_id, "food-freshness");
         assert_eq!(c.substance, "Green Apple");
+        assert!(c.mixture.is_empty());
         assert_eq!(c.condition, "day 3");
+    }
+
+    #[test]
+    fn food_freshness_concatenated_names_are_one_mixture() {
+        let p = root().join("datasets/extracted/AllSmaples-Report/AppleBananaTomato.csv");
+        let c = classify(&p, &root());
+        assert_eq!(c.collection_id, "food-freshness");
+        assert_eq!(c.substance, "Apple + Banana + Tomato");
+        assert_eq!(c.mixture.len(), 3);
+        assert_eq!(c.mixture[0].name, "Apple");
+        assert!(c.mixture.iter().all(|component| component.fraction.is_none()));
+    }
+
+    #[test]
+    fn declared_ratios_become_real_fractions() {
+        let components = ratio_mixture_components("Almond20_Orange80");
+        assert_eq!(components.len(), 2);
+        assert_eq!(components[0].name, "Almond");
+        assert!((components[0].fraction.unwrap() - 0.2).abs() < 1e-9);
+        assert!((components[1].fraction.unwrap() - 0.8).abs() < 1e-9);
+        assert!(ratio_mixture_components("Almond").is_empty());
+        assert!(ratio_mixture_components("Almond_Orange").is_empty());
+    }
+
+    #[test]
+    fn arbitrary_corpus_uses_folder_then_file_without_an_adapter() {
+        let p = root().join("datasets/Lavender-Batch/training/lavender/lavender_3.csv");
+        let c = classify(&p, &root());
+        assert_eq!(c.collection_id, "lavender-batch");
+        assert_eq!(c.substance, "lavender");
+        assert_eq!(c.split, "Training");
+        assert_eq!(c.condition, "run 3");
+        assert!(c.mixture.is_empty());
+    }
+
+    #[test]
+    fn explicit_plus_composition_is_a_mixture_in_any_corpus() {
+        let p = root().join("datasets/Lavender-Batch/lavender + cedar.csv");
+        let c = classify(&p, &root());
+        assert_eq!(c.substance, "lavender + cedar");
+        assert_eq!(c.mixture.len(), 2);
     }
 
     #[test]

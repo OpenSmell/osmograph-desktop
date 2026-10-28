@@ -90,6 +90,10 @@ pub struct ManifestFile {
     pub split: String,
     #[serde(default)]
     pub condition: String,
+    /// Mixture composition parsed from the folder/file name. Empty for a
+    /// single substance; never a list of smell classes.
+    #[serde(default)]
+    pub mixture: Vec<collections::MixtureComponent>,
     #[serde(default)]
     pub replicate_group_id: String,
 }
@@ -559,6 +563,7 @@ fn enumerate_recordings(root: &Path, recordings_dir: &Path) -> Result<Vec<Manife
             role: c.role.clone(),
             split: c.split.clone(),
             condition: c.condition.clone(),
+            mixture: c.mixture.clone(),
             replicate_group_id: replicate_group_id(&c),
         });
     }

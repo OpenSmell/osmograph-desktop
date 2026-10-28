@@ -347,6 +347,7 @@ pub fn import_external_csv(
         collection_name: "Data Commons".to_string(),
         split: String::new(),
         condition: String::new(),
+        mixture: Vec::new(),
     };
     index.upsert(record.clone());
     let _ = index.save(recordings_dir);

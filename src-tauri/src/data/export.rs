@@ -390,6 +390,7 @@ mod tests {
             collection_name: "Own rig".to_string(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         });
 
         let out = dir.join("out/session_a_export.csv");
@@ -428,6 +429,7 @@ mod tests {
             collection_name: "Own rig".to_string(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         });
 
         let out = dir.join("out/session_a.osmell");
@@ -470,6 +472,7 @@ mod tests {
             collection_name: "Own rig".to_string(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         });
 
         let out = dir.join("out/session_a.osmell");
@@ -518,6 +521,7 @@ mod tests {
             collection_name: "Own rig".to_string(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         });
 
         let run = crate::recipe::RecipeRun {

@@ -116,6 +116,18 @@ export interface DomainPack {
   uiUrl?: string;
   /** Optional provenance for a manifest installed from a URL. */
   sourceUrl?: string;
+  /** Declarative capability names (`read:live`, `log:events`, …). A manifest
+   *  that declares this list grants only what it names. */
+  capabilities?: string[];
+  /** Explicit boolean form; takes precedence over `capabilities`. */
+  permissions?: Partial<{
+    readLive: boolean;
+    readBaseline: boolean;
+    logEvents: boolean;
+    persist: boolean;
+    requestAction: boolean;
+    exportData: boolean;
+  }>;
 }
 
 export interface DomainState {
@@ -552,6 +564,16 @@ function coercePack(raw: unknown): DomainPack {
     ? coerceAnomalyProfile(source.anomaly)
     : undefined;
   const evidence = schema === 'osmograph.domain-pack/2' ? coerceEvidence(source.evidence) : undefined;
+  const permissions = isRecord(source.permissions)
+    ? {
+        readLive: source.permissions.readLive !== false,
+        readBaseline: source.permissions.readBaseline !== false,
+        logEvents: source.permissions.logEvents !== false,
+        persist: source.permissions.persist !== false,
+        requestAction: source.permissions.requestAction !== false,
+        exportData: source.permissions.exportData !== false,
+      }
+    : undefined;
   return {
     schema,
     id: asString(source.id),
@@ -581,6 +603,8 @@ function coercePack(raw: unknown): DomainPack {
     ui,
     homeUi,
     sourceUrl: asString(source.sourceUrl) || undefined,
+    capabilities: asStringArray(source.capabilities),
+    permissions,
   };
 }
 

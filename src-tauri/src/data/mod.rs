@@ -406,6 +406,10 @@ pub struct SessionRecord {
     /// Per-record condition inside the split (`run 5`, `day 3`, `ingestion balanced`).
     #[serde(default)]
     pub condition: String,
+    /// Parsed composition for mixture recordings. A mixture is one recording
+    /// with several components, never several smell classes.
+    #[serde(default)]
+    pub mixture: Vec<self::collections::MixtureComponent>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -421,7 +425,7 @@ pub struct SessionIndex {
 }
 
 /// Bumped when the index gains derived fields that older builds cannot fill.
-pub const INDEX_VERSION: u32 = 4;
+pub const INDEX_VERSION: u32 = 5;
 
 impl Default for SessionIndex {
     fn default() -> Self {
@@ -474,7 +478,14 @@ impl SessionIndex {
                 continue;
             }
             let path_norm = r.csv_path.replace('\\', "/");
-            let c = self::collections::classify(Path::new(&r.csv_path), dir);
+            let mut c = self::collections::classify(Path::new(&r.csv_path), dir);
+            if let Some(split) = self::collections::split_concatenated_pascal(&c.substance) {
+                c.substance = split;
+            }
+            let (substance, preparation) = self::collections::split_preparation(&c.substance);
+            c.substance = substance;
+            c.preparation = preparation;
+            c.role = self::collections::recording_role(&c.substance);
             // Folder structure, not the old label, decides what is an import.
             // Legacy indexes mislabelled some root recordings as "Imported".
             let imported = path_norm.contains("/datasets/")
@@ -530,6 +541,10 @@ impl SessionIndex {
             }
             if r.condition != c.condition {
                 r.condition = c.condition;
+                changed = true;
+            }
+            if r.mixture != c.mixture {
+                r.mixture = c.mixture;
                 changed = true;
             }
             if !paths.insert(r.csv_path.clone()) {
@@ -753,6 +768,7 @@ mod tests {
             collection_name: "Own rig".into(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         });
         idx.save(&dir).unwrap();
         let mut loaded = SessionIndex::load(&dir);
@@ -798,6 +814,7 @@ mod tests {
             collection_name: String::new(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         }
     }
 

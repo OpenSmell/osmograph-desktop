@@ -1251,6 +1251,7 @@ fn stop_session(state: State<'_, AppState>) -> Result<SessionSummary, String> {
             let preset = current_preset_name(&state);
             let (own_substance, own_preparation) =
                 data::collections::split_preparation(&substance);
+            let own_mixture = data::collections::plus_mixture(&own_substance);
             let record = SessionRecord {
                 file_id: fid.clone(),
                 role: data::collections::recording_role(&own_substance),
@@ -1270,6 +1271,7 @@ fn stop_session(state: State<'_, AppState>) -> Result<SessionSummary, String> {
                 collection_name: "Own rig".to_string(),
                 split: String::new(),
                 condition: String::new(),
+                mixture: own_mixture,
             };
             let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
             {
@@ -1423,6 +1425,7 @@ fn stop_phase_recording(state: State<AppState>) -> Result<PhaseRecordingSummary,
             let fid = SessionIndex::make_file_id(chrono::Local::now());
             let (own_substance, own_preparation) =
                 data::collections::split_preparation(&label);
+            let own_mixture = data::collections::plus_mixture(&own_substance);
             let record = SessionRecord {
                 file_id: fid.clone(),
                 role: data::collections::recording_role(&own_substance),
@@ -1442,6 +1445,7 @@ fn stop_phase_recording(state: State<AppState>) -> Result<PhaseRecordingSummary,
                 collection_name: "Own rig".to_string(),
                 split: String::new(),
                 condition: String::new(),
+                mixture: own_mixture,
             };
             let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
             let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
@@ -1503,6 +1507,7 @@ fn recover_phase_session(
     let quality = SessionIndex::provision_quality(total_duration, n_samples);
     let fid = SessionIndex::make_file_id(chrono::Local::now());
     let (own_substance, own_preparation) = data::collections::split_preparation(&label);
+    let own_mixture = data::collections::plus_mixture(&own_substance);
     let record = SessionRecord {
         file_id: fid.clone(),
         role: data::collections::recording_role(&own_substance),
@@ -1522,6 +1527,7 @@ fn recover_phase_session(
         collection_name: "Own rig".to_string(),
         split: String::new(),
         condition: String::new(),
+        mixture: own_mixture,
     };
     let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
     index.upsert(record);
@@ -1947,6 +1953,7 @@ pub struct RecordingFile {
     pub collection_name: String,
     pub split: String,
     pub condition: String,
+    pub mixture: Vec<data::collections::MixtureComponent>,
     pub duration_sec: f64,
     pub sensor_count: usize,
     pub rows: usize,
@@ -2238,6 +2245,7 @@ fn build_record_from_file(f: &RecordingFile) -> SessionRecord {
         collection_name: f.collection_name.clone(),
         split: f.split.clone(),
         condition: f.condition.clone(),
+        mixture: f.mixture.clone(),
     }
 }
 
@@ -2433,6 +2441,7 @@ fn recording_from_path(
         collection_name: c.collection_name,
         split: c.split,
         condition: c.condition,
+        mixture: c.mixture,
         duration_sec,
         sensor_count,
         rows,
@@ -4255,10 +4264,129 @@ pub fn run() {    env_logger::init();
             live::get_live_classification,
             phenotype::compute_phenotype,
             updates::check_for_updates,
+            vial_log_event,
+            vial_get_journal,
+            vial_clear_journal,
+            vial_export_journal,
             open_https_url,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Vial journals live under the recordings root, beside the evidence they
+/// describe, so a reinstall does not erase the record and an export is just a
+/// copy of a real file.
+fn vial_journal_path(dir: &std::path::Path, vial_id: &str) -> Result<std::path::PathBuf, String> {
+    let safe = !vial_id.is_empty()
+        && vial_id.len() <= 128
+        && vial_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    if !safe {
+        return Err("Invalid vial id.".to_string());
+    }
+    Ok(dir.join("vials").join(vial_id).join("journal.jsonl"))
+}
+
+fn validate_vial_event(event: &serde_json::Value) -> Result<(), String> {
+    let size = serde_json::to_string(event).map_err(|e| e.to_string())?.len();
+    if size > 32_768 {
+        return Err("Vial event is too large.".to_string());
+    }
+    let object = event.as_object().ok_or_else(|| "Vial event must be an object.".to_string())?;
+    let kind = object.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let message = object.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    if kind.is_empty() || kind.len() > 40 || message.len() > 400 {
+        return Err("Vial event type/message is invalid.".to_string());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn vial_log_event(
+    state: State<AppState>,
+    vial_id: String,
+    event: serde_json::Value,
+) -> Result<(), String> {
+    validate_vial_event(&event)?;
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let path = vial_journal_path(&dir, &vial_id)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| e.to_string())?;
+    let line = serde_json::to_string(&event).map_err(|e| e.to_string())?;
+    writeln!(file, "{line}").map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn vial_get_journal(
+    state: State<AppState>,
+    vial_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let path = vial_journal_path(&dir, &vial_id)?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err.to_string()),
+    };
+    let take = limit.unwrap_or(2000).clamp(1, 5000);
+    let mut events: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .collect();
+    if events.len() > take {
+        events = events.split_off(events.len() - take);
+    }
+    Ok(events)
+}
+
+#[tauri::command]
+fn vial_clear_journal(state: State<AppState>, vial_id: String) -> Result<(), String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let path = vial_journal_path(&dir, &vial_id)?;
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+#[tauri::command]
+fn vial_export_journal(
+    state: State<AppState>,
+    vial_id: String,
+    format: Option<String>,
+) -> Result<String, String> {
+    let events = vial_get_journal(state, vial_id, Some(5000))?;
+    if format.as_deref() == Some("csv") {
+        let mut out = String::from("id,type,message,timestamp,data\n");
+        for event in events {
+            let cell = |value: String| format!("\"{}\"", value.replace('"', "\"\""));
+            let id = cell(event.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string());
+            let kind = cell(event.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string());
+            let message = cell(event.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string());
+            let timestamp = event.get("timestamp").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let data = cell(
+                event
+                    .get("data")
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".to_string()),
+            );
+            out.push_str(&format!("{id},{kind},{message},{timestamp},{data}\n"));
+        }
+        return Ok(out);
+    }
+    serde_json::to_string_pretty(&events).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -4332,6 +4460,7 @@ mod tests {
             collection_name: "Own rig".to_string(),
             split: String::new(),
             condition: String::new(),
+            mixture: Vec::new(),
         });
         let removed = clear_recordings_files(&tmp, &mut index);
         assert_eq!(removed, 1, "one indexed recording should be removed");

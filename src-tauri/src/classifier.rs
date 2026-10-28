@@ -375,6 +375,7 @@ mod tests {
                 collection_name: "Own rig".to_string(),
                 split: String::new(),
                 condition: String::new(),
+                mixture: Vec::new(),
             });
         }
 

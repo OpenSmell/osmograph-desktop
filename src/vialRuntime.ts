@@ -13,6 +13,7 @@
 // data honestly.
 
 import type { VialHostSnapshot } from './vialHost';
+import type { VialCapabilities } from './vials/host';
 
 export const VIAL_RUNTIME_SCHEMA = 'osmograph.vial-runtime/1' as const;
 export const VIAL_UI_MAX_BYTES = 512_000;
@@ -156,7 +157,18 @@ export type VialAction =
       perChannelLimits: Record<string, number>;
     }
   | { type: 'set-transforms'; baseline: string; conditioning: string[]; response: string }
-  | { type: 'set-trajectory'; fields: string[]; intervalMs: number };
+  | { type: 'set-trajectory'; fields: string[]; intervalMs: number }
+  | {
+      type: 'host-request';
+      requestId: string;
+      request: 'persist' | 'retrieve' | 'action';
+      key?: string;
+      value?: unknown;
+      action?: string;
+      params?: unknown;
+    }
+  | { type: 'journal-log'; event: { id: string; type: string; message: string; data?: unknown; timestamp: number } }
+  | { type: 'journal-clear' };
 
 export interface VialActionEnvelope {
   vialAction: VialAction;
@@ -166,7 +178,7 @@ export interface VialActionEnvelope {
 const ACTION_TYPES = new Set<VialAction['type']>([
   'ready', 'toast', 'resize', 'save-field', 'add-log', 'remove-log', 'export-log',
   'open-dashboard', 'open-datasets', 'open-check', 'open-vials', 'open-workspace', 'set-source',
-  'set-detection', 'set-transforms', 'set-trajectory',
+  'set-detection', 'set-transforms', 'set-trajectory', 'host-request', 'journal-log', 'journal-clear',
 ]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -186,6 +198,10 @@ function safeActionKey(key: string): boolean {
 
 export function parseVialActionEnvelope(value: unknown): VialActionEnvelope | null {
   if (!isRecord(value) || !isRecord(value.vialAction)) return null;
+  // The bridge stamps a schema version. Absent is accepted for vials mounted
+  // before this field existed; a different version is refused rather than
+  // interpreted with the wrong rules.
+  if (value.schema !== undefined && value.schema !== 'osmograph.vial-action/1') return null;
   const nonce = typeof value.nonce === 'string' ? value.nonce : '';
   const raw = value.vialAction;
   const type = typeof raw.type === 'string' ? raw.type : '';
@@ -222,6 +238,52 @@ export function parseVialActionEnvelope(value: unknown): VialActionEnvelope | nu
   if (type === 'set-source') {
     const source = typeof raw.source === 'string' ? raw.source.slice(0, 120) : '';
     return { nonce, vialAction: { type, source } };
+  }
+  if (type === 'host-request') {
+    const requestId = typeof raw.requestId === 'string' ? raw.requestId : '';
+    const request = typeof raw.request === 'string' ? raw.request : '';
+    if (!/^[a-z0-9_-]{1,64}$/i.test(requestId)) return null;
+    if (request === 'persist') {
+      const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+      if (!safeActionKey(key)) return null;
+      let serialized = '';
+      try { serialized = JSON.stringify(raw.value ?? null); } catch { return null; }
+      if (serialized.length > 16_384) return null;
+      return { nonce, vialAction: { type, requestId, request, key, value: raw.value ?? null } };
+    }
+    if (request === 'retrieve') {
+      const key = typeof raw.key === 'string' ? raw.key.trim() : '';
+      if (!safeActionKey(key)) return null;
+      return { nonce, vialAction: { type, requestId, request, key } };
+    }
+    if (request === 'action') {
+      const action = typeof raw.action === 'string' ? raw.action.trim() : '';
+      if (!safeActionKey(action)) return null;
+      if (raw.params !== undefined && !isRecord(raw.params) && !Array.isArray(raw.params)) return null;
+      let serialized = '';
+      try { serialized = JSON.stringify(raw.params ?? null); } catch { return null; }
+      if (serialized.length > 8_192) return null;
+      return { nonce, vialAction: { type, requestId, request, action, params: raw.params ?? null } };
+    }
+    return null;
+  }
+  if (type === 'journal-log') {
+    if (!isRecord(raw.event)) return null;
+    const event = raw.event;
+    const id = typeof event.id === 'string' ? event.id.slice(0, 80) : '';
+    const kind = typeof event.type === 'string' ? event.type.slice(0, 40) : '';
+    const message = typeof event.message === 'string' ? event.message.slice(0, 400) : '';
+    const timestamp = typeof event.timestamp === 'number' && Number.isFinite(event.timestamp)
+      ? event.timestamp
+      : Date.now();
+    if (!/^[a-z0-9_-]{1,80}$/i.test(id) || !kind) return null;
+    let serialized = '';
+    try { serialized = JSON.stringify(event.data ?? null); } catch { return null; }
+    if (serialized.length > 8_192) return null;
+    return { nonce, vialAction: { type, event: { id, type: kind, message, data: event.data ?? null, timestamp } } };
+  }
+  if (type === 'journal-clear') {
+    return { nonce, vialAction: { type } };
   }
   if (type === 'set-detection') {
     if (!isRecord(raw.perChannelLimits)) return null;
@@ -454,18 +516,204 @@ h3 { margin: 0; font-size: 11px; }
 }
 `;
 
-function bridgeScript(nonce: string): string {
+/** Capabilities are declared by the manifest. A legacy pack that declares
+ *  neither `permissions` nor `capabilities` keeps the historical full surface;
+ *  a pack that declares a list grants only what it names. */
+export function resolveVialCapabilities(pack: {
+  capabilities?: string[];
+  permissions?: Partial<VialCapabilities>;
+}): VialCapabilities {
+  const all: VialCapabilities = {
+    readLive: true,
+    readBaseline: true,
+    logEvents: true,
+    persist: true,
+    requestAction: true,
+    exportData: true,
+  };
+  const explicit = pack.permissions;
+  if (explicit && Object.keys(explicit).length) {
+    return {
+      readLive: explicit.readLive !== false,
+      readBaseline: explicit.readBaseline !== false,
+      logEvents: explicit.logEvents !== false,
+      persist: explicit.persist !== false,
+      requestAction: explicit.requestAction !== false,
+      exportData: explicit.exportData !== false,
+    };
+  }
+  const declared = Array.isArray(pack.capabilities) ? pack.capabilities : [];
+  if (!declared.length) return all;
+  const set = new Set(declared);
+  return {
+    readLive: set.has('read:live'),
+    readBaseline: set.has('read:baseline'),
+    logEvents: set.has('log:events'),
+    persist: set.has('write:persist'),
+    requestAction: set.has('action:request'),
+    exportData: set.has('export:data'),
+  };
+}
+
+function bridgeScript(nonce: string, capabilities: VialCapabilities): string {
   const safeNonce = JSON.stringify(nonce);
+  const safeCaps = JSON.stringify(capabilities);
   return `<script>(function(){
   "use strict";
   var NONCE = ${safeNonce};
+  var CAPS = ${safeCaps};
   var last = null;
   var handlers = new Set();
+  var hostHandlers = { tick: [], data: [], connect: [], disconnect: [], event: [] };
+  var hostState = { channels: [], latest: null, baseline: null, readings: [], snapshot: null, series: null, source: null, connected: false };
+  var journal = [];
+  var pending = {};
+  var requestSeq = 0;
+
   function send(action) {
-    try { parent.postMessage({ vialAction: action, nonce: NONCE }, "*"); } catch (e) {}
+    try {
+      parent.postMessage({ schema: "osmograph.vial-action/1", vialAction: action, nonce: NONCE }, "*");
+    } catch (e) {}
   }
+  function assertCap(name, label) {
+    if (!CAPS[name]) throw new Error("Vial does not declare the " + label + " capability.");
+  }
+  function hostRequest(request, body) {
+    var id = String(++requestSeq) + "_" + Math.random().toString(36).slice(2, 8);
+    return new Promise(function(resolve, reject) {
+      pending[id] = { resolve: resolve, reject: reject };
+      send(Object.assign({ type: "host-request", requestId: id, request: request }, body || {}));
+      setTimeout(function() {
+        if (pending[id]) { delete pending[id]; reject(new Error("Host request timed out.")); }
+      }, 5000);
+    });
+  }
+  function emit(name, value) {
+    (hostHandlers[name] || []).slice().forEach(function(fn) {
+      try { fn(value); } catch (e) { console.error("Vial host listener error:", e); }
+    });
+  }
+  function hostOn(name, fn) {
+    if (typeof fn !== "function") return function() {};
+    if (!hostHandlers[name]) hostHandlers[name] = [];
+    hostHandlers[name].push(fn);
+    if (name === "tick" && hostState.latest) {
+      try { fn(hostState.latest); } catch (e) { console.error(e); }
+    }
+    return function() { hostOff(name, fn); };
+  }
+  function hostOff(name, fn) {
+    var list = hostHandlers[name];
+    if (!list) return;
+    hostHandlers[name] = list.filter(function(item) { return item !== fn; });
+  }
+  function movingAverage(values, window) {
+    if (!Array.isArray(values) || !(window > 0)) return Array.isArray(values) ? values.slice() : [];
+    var out = [];
+    for (var i = 0; i < values.length; i++) {
+      var start = Math.max(0, i - Math.floor(window / 2));
+      var end = Math.min(values.length, i + Math.ceil(window / 2));
+      var slice = values.slice(start, end);
+      var sum = 0;
+      var n = 0;
+      for (var j = 0; j < slice.length; j++) {
+        if (Number.isFinite(slice[j])) { sum += slice[j]; n++; }
+      }
+      out.push(n ? sum / n : null);
+    }
+    return out;
+  }
+  function derivative(values, window) {
+    var w = Math.max(1, Math.round(window || 1));
+    var out = [];
+    if (!Array.isArray(values) || values.length < 2) return out;
+    for (var i = w; i < values.length; i++) {
+      var a = values[i];
+      var b = values[i - w];
+      out.push(Number.isFinite(a) && Number.isFinite(b) ? (a - b) / w : null);
+    }
+    return out;
+  }
+  function rateOfChange(readings, channelIndex, windowMs) {
+    if (!Array.isArray(readings) || readings.length < 2) return 0;
+    var span = windowMs || 10000;
+    var now = readings[readings.length - 1].timestamp;
+    var recent = readings.filter(function(r) { return now - r.timestamp <= span; });
+    if (recent.length < 2) return 0;
+    var first = recent[0].channels[channelIndex];
+    var last = recent[recent.length - 1].channels[channelIndex];
+    var dt = (recent[recent.length - 1].timestamp - recent[0].timestamp) / 1000;
+    if (!Number.isFinite(first) || !Number.isFinite(last) || dt <= 0) return 0;
+    return (last - first) / dt;
+  }
+  function journalCsv(events) {
+    function cell(value) { return '"' + String(value == null ? "" : value).replace(/"/g, '""') + '"'; }
+    var rows = ["id,type,message,timestamp,data"];
+    events.forEach(function(e) {
+      rows.push([cell(e.id), cell(e.type), cell(e.message), cell(e.timestamp), cell(JSON.stringify(e.data == null ? null : e.data))].join(","));
+    });
+    return rows.join("\\n");
+  }
+  function ingest(payload) {
+    var snapshot = payload.snapshot || null;
+    var series = payload.series || null;
+    hostState.snapshot = snapshot;
+    hostState.series = series;
+    hostState.channels = ((snapshot && snapshot.channels) || []).map(function(c, i) {
+      return { index: i, name: c.label || c.id || ("CH" + (i + 1)), id: c.id, kind: c.kind, unit: c.unit };
+    });
+    if (!hostState.channels.length && series && series.channels) {
+      hostState.channels = series.channels.map(function(name, i) {
+        return { index: i, name: name, id: name, kind: "", unit: "" };
+      });
+    }
+    var channels = [];
+    if (series && Array.isArray(series.values)) {
+      channels = series.values.map(function(channel) {
+        for (var i = channel.length - 1; i >= 0; i--) {
+          if (channel[i] !== null && Number.isFinite(channel[i])) return channel[i];
+        }
+        return null;
+      });
+    }
+    var environment = snapshot && snapshot.environment
+      ? { temperature: snapshot.environment.temperature, humidity: snapshot.environment.humidity }
+      : undefined;
+    var reading = {
+      timestamp: Date.now(),
+      channels: channels,
+      channelsMeta: hostState.channels,
+      env: environment
+    };
+    hostState.latest = reading;
+    hostState.readings.push(reading);
+    if (hostState.readings.length > 2000) hostState.readings.splice(0, hostState.readings.length - 2000);
+    var baseline = snapshot && snapshot.baseline;
+    hostState.baseline = baseline
+      ? { channels: [], timestamp: Date.now(), state: baseline.state, progress: baseline.progress, ageSec: baseline.ageSec }
+      : null;
+    hostState.source = series ? series.source : null;
+
+    window.__OSMOGRAPH_HOST_STATE__ = {
+      readings: channels,
+      channels: hostState.channels,
+      env: environment,
+      baseline: []
+    };
+    window.__OSMOGRAPH_READINGS_BUFFER__ = hostState.readings;
+    if (reading.channels.some(function(value) { return value !== null; })) {
+      if (!hostState.connected) { hostState.connected = true; emit("connect", reading); }
+      emit("tick", reading);
+      emit("data", reading);
+    } else if (hostState.connected) {
+      hostState.connected = false;
+      emit("disconnect", reading);
+    }
+  }
+
   window.osmograph = {
     version: "sandbox/1",
+    host: function() { return window.__OSMOGRAPH_VIAL_HOST__; },
     onData: function(fn) {
       if (typeof fn !== "function") return function(){};
       handlers.add(fn);
@@ -502,11 +750,105 @@ function bridgeScript(nonce: string): string {
       });
     }
   };
+
+  var host = {
+    version: "1.0.0",
+    capabilities: CAPS,
+    getLiveReadings: function() {
+      assertCap("readLive", "read:live");
+      return hostState.latest;
+    },
+    getChannels: function() {
+      assertCap("readLive", "read:live");
+      return hostState.channels.slice();
+    },
+    getBaseline: function() {
+      assertCap("readBaseline", "read:baseline");
+      return hostState.baseline;
+    },
+    getRecentReadings: function(count) {
+      assertCap("readLive", "read:live");
+      var n = Math.max(1, Math.min(2000, Math.round(count || 100)));
+      return hostState.readings.slice(-n);
+    },
+    on: hostOn,
+    off: hostOff,
+    logEvent: function(type, message, data) {
+      assertCap("logEvents", "log:events");
+      var event = {
+        id: Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8),
+        type: String(type || "note").slice(0, 40),
+        message: String(message || "").slice(0, 400),
+        data: data === undefined ? null : data,
+        timestamp: Date.now()
+      };
+      journal.push(event);
+      if (journal.length > 2000) journal.splice(0, journal.length - 2000);
+      send({ type: "journal-log", event: event });
+      emit("event", event);
+      return Promise.resolve(event);
+    },
+    getEvents: function(limit) {
+      assertCap("logEvents", "log:events");
+      var n = Math.max(1, Math.min(2000, Math.round(limit || 100)));
+      if (!journal.length && CAPS.requestAction) {
+        return hostRequest("action", { action: "journal-events", params: null }).then(function(events) {
+          if (Array.isArray(events)) journal = events.slice(-2000);
+          return journal.slice(-n);
+        }).catch(function() { return journal.slice(-n); });
+      }
+      return Promise.resolve(journal.slice(-n));
+    },
+    clearEvents: function() {
+      assertCap("logEvents", "log:events");
+      journal = [];
+      send({ type: "journal-clear" });
+      return Promise.resolve();
+    },
+    persist: function(key, value) {
+      assertCap("persist", "write:persist");
+      return hostRequest("persist", { key: String(key || ""), value: value });
+    },
+    retrieve: function(key) {
+      assertCap("persist", "write:persist");
+      return hostRequest("retrieve", { key: String(key || "") });
+    },
+    requestAction: function(action, params) {
+      assertCap("requestAction", "action:request");
+      return hostRequest("action", { action: String(action || ""), params: params === undefined ? null : params });
+    },
+    computeMovingAverage: movingAverage,
+    computeDerivative: derivative,
+    computeRateOfChange: rateOfChange,
+    exportJournal: function(format) {
+      assertCap("exportData", "export:data");
+      var wantsCsv = String(format || "json") === "csv";
+      var ready = (!journal.length && CAPS.requestAction)
+        ? hostRequest("action", { action: "journal-events", params: null }).then(function(events) {
+            if (Array.isArray(events)) journal = events.slice(-2000);
+          }).catch(function() {})
+        : Promise.resolve();
+      return ready.then(function() {
+        return wantsCsv ? journalCsv(journal) : JSON.stringify(journal, null, 2);
+      });
+    }
+  };
+  window.__OSMOGRAPH_VIAL_HOST__ = host;
+
   window.addEventListener("message", function(event) {
     if (event.source !== parent) return;
     var data = event.data;
-    if (!data || data.vialData !== true || !data.payload) return;
+    if (!data || typeof data !== "object") return;
+    if (data.vialHostResponse === true && data.requestId && pending[data.requestId]) {
+      var waiting = pending[data.requestId];
+      delete pending[data.requestId];
+      if (data.ok) waiting.resolve(data.result);
+      else waiting.reject(new Error(String(data.error || "Host request failed.")));
+      return;
+    }
+    if (data.vialData !== true || !data.payload) return;
     last = data.payload;
+    ingest(last);
     handlers.forEach(function(fn) {
       try { fn(last); } catch (e) { console.error(e); send({ type: "toast", message: "Vial UI error: " + (e && e.message ? e.message : "unknown") }); }
     });
@@ -519,7 +861,11 @@ function bridgeScript(nonce: string): string {
 
 /** Build the only document the host ever puts into the sandbox. The CSP is
  *  intentionally narrow: no network, no storage, no forms, no frames. */
-export function buildSandboxDocument(uiHtml: string, nonce: string): string {
+export function buildSandboxDocument(
+  uiHtml: string,
+  nonce: string,
+  capabilities: VialCapabilities = resolveVialCapabilities({}),
+): string {
   assertSandboxableUi(uiHtml);
   return `<!doctype html>
 <html>
@@ -530,7 +876,7 @@ export function buildSandboxDocument(uiHtml: string, nonce: string): string {
 <style>${SANDBOX_BASE_CSS}</style>
 </head>
 <body>
-${bridgeScript(nonce)}
+${bridgeScript(nonce, capabilities)}
 ${uiHtml}
 </body>
 </html>`;

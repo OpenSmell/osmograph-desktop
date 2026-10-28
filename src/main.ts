@@ -475,6 +475,9 @@ interface SessionRecord {
   collection_name?: string;
   split?: string;
   condition?: string;
+  /** Present only when the source path names a composition. A mixture is one
+   *  recording with components, not several smell classes. */
+  mixture?: { name: string; fraction?: number | null }[];
 }
 
 interface HubEntry {
@@ -2313,9 +2316,13 @@ function renderLibrary() {
     const ticked = s.file_id ? compareFiles.includes(s.file_id) : false;
     const src = recordingSource(s);
     const srcTitle = [src.credit, src.license && `Licence: ${src.license}`, src.citation].filter(Boolean).join(' · ');
+    const mixture = Array.isArray(s.mixture) && s.mixture.length >= 2;
+    const mixtureTitle = mixture
+      ? `Mixture: ${s.mixture!.map(c => `${c.name}${typeof c.fraction === 'number' ? ` ${Math.round(c.fraction * 100)}%` : ''}`).join(' + ')}`
+      : '';
     return `<tr class="${i === selectedSession ? 'selected' : ''}" data-idx="${i}">
       <td><input type="checkbox" class="compare-tick" data-idx="${i}" ${ticked ? 'checked' : ''} title="Overlay in Compare"></td>
-      <td>${s.time}</td><td class="lib-sub" data-idx="${i}" title="Double-click to rename the recording + its file">${s.substance}</td><td>${s.label}</td>
+      <td>${s.time}</td><td class="lib-sub" data-idx="${i}" title="Double-click to rename the recording + its file">${s.substance}${mixture ? ` <span class="lib-mixture-tag" title="${esc(mixtureTitle)}">mixture</span>` : ''}</td><td>${s.label}</td>
       <td><span class="lib-source" title="${esc(srcTitle)}">${esc(src.name)}</span></td>
       <td>${s.format}</td><td>${s.duration}</td><td>${s.sensors}</td>
       <td>${statusCell}</td>
@@ -2403,6 +2410,10 @@ function beginRenameCell(td: HTMLElement) {
 }
 
 function inspectSession(s: SessionRecord) {
+  const mixture = Array.isArray(s.mixture) ? s.mixture : [];
+  const mixtureRow = mixture.length >= 2
+    ? `<span class="k">Composition</span><span class="v">${mixture.map(c => `${c.name}${typeof c.fraction === 'number' ? ` ${Math.round(c.fraction * 100)}%` : ''}`).join(' + ')}</span>`
+    : '';
   const details = `
     <div style="margin-bottom:6px"><strong>${s.substance}</strong></div>
     <div class="kv-row">
@@ -2411,6 +2422,7 @@ function inspectSession(s: SessionRecord) {
       <span class="k">Duration</span><span class="v">${s.duration}</span>
       <span class="k">Sensors</span><span class="v">${s.sensors}</span>
       <span class="k">Quality</span><span class="v">${s.quality}/100</span>
+      ${mixtureRow}
     </div>
   `;
   document.getElementById('inspectorDetails')!.innerHTML = details;
@@ -5741,13 +5753,20 @@ function clearSmellSelection(): void {
 function buildSmellCards(): void {
   const bySub = new Map<string, { display: string; records: SessionRecord[] }>();
   const controls = sessions.filter(s => s.role === 'reference' || s.role === 'noise').length;
+  // A mixture is one recording with several components. Counting it as a new
+  // smell would turn every combination into a fake class, so mixtures stay in
+  // the Library (where the composition is visible) and out of the gallery.
+  const isMixture = (s: SessionRecord) => Array.isArray(s.mixture) && s.mixture.length >= 2;
+  const mixtures = sessions.filter(isMixture).length;
   function looksConcatenatedSubstance(s: string): boolean {
     const t = s.trim();
     if (!t || t.includes(' ') || t.includes('_') || t.includes('-') || t.includes('+')) return false;
-    if (t.length < 12 || t.length > 40) return false;
+    if (t.length < 10 || t.length > 60) return false;
     const upper = (t.match(/[A-Z]/g) || []).length;
     const lower = (t.match(/[a-z]/g) || []).length;
-    if (upper >= 3 && lower >= t.length / 3) return true;
+    if (upper >= 3 && lower >= t.length / 4) return true;
+    // Also catch long mixed case runs with no separators
+    if (upper >= 2 && lower >= 5 && t.length > 15) return true;
     return false;
   }
   function splitConcatenatedSubstance(s: string): string {
@@ -5755,20 +5774,33 @@ function buildSmellCards(): void {
     if (t.includes(' ') || t.includes('_') || t.includes('-')) return t;
     const re = /[A-Z][a-z]+|\d+[A-Za-z]+/g;
     const parts = t.match(re);
-    if (parts && parts.length >= 3) {
+    if (parts && parts.length >= 2) {
       return parts.join(' ');
     }
     return t;
   }
   for (const s of sessions) {
-    const raw = (s.substance || '').trim();
+    let raw = (s.substance || '').trim();
     if (!raw || raw.toLowerCase() === 'unknown') continue;
     // Reference/noise runs stay in the Library as evidence, but they are not
     // smell classes and must not be counted as substances.
     if (s.role === 'reference' || s.role === 'noise') continue;
+    if (isMixture(s)) continue;
     if (looksConcatenatedSubstance(raw)) {
-      console.warn('Suspicious concatenated substance label dropped from gallery:', raw);
-      continue;
+      const split = splitConcatenatedSubstance(raw);
+      if (split !== raw && split.split(/\s+/).length >= 2) {
+        raw = split;
+      } else {
+        // Still try to be defensive - don't drop everything, just normalize if possible
+        const re = /[A-Z][a-z]+/g;
+        const parts = raw.match(re);
+        if (parts && parts.length >= 2) {
+          raw = parts.join(' ');
+        } else {
+          console.warn('Suspicious concatenated substance label dropped from gallery:', raw);
+          continue;
+        }
+      }
     }
     // Group case-insensitively: "Mosquito coil" and "mosquito coil" are one smell.
     const key = raw.toLowerCase();
@@ -5787,7 +5819,7 @@ function buildSmellCards(): void {
     .sort((a, b) => b.records.length - a.records.length || a.substance.localeCompare(b.substance));
   const sub = document.getElementById('smellsSub');
   if (sub) {
-    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings${controls ? ` · ${controls} control${controls === 1 ? '' : 's'} in Library` : ''} · grouped by substance`;
+    sub.textContent = `${smellCards.length} smells · ${sessions.length} recordings${mixtures ? ` · ${mixtures} mixture${mixtures === 1 ? '' : 's'} in Library` : ''}${controls ? ` · ${controls} control${controls === 1 ? '' : 's'} in Library` : ''} · grouped by substance`;
   }
 }
 
@@ -7997,7 +8029,7 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
   activeVialRuntime = runtime;
   void syncVialDetector(pack);
   iframe.style.height = `${pack.ui?.height || 900}px`;
-  iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
+  iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce, VialRuntime.resolveVialCapabilities(pack));
   iframe.addEventListener('load', () => {
     if (runtime.destroyed) return;
     runtime.ready = false;
@@ -8013,7 +8045,7 @@ function mountVialRuntime(pack: Domain.DomainPack, uiHtml: string): void {
     if (runtime.destroyed) return;
     runtime.ready = false;
     runtime.recordingCache.clear();
-    runtime.iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
+    runtime.iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce, VialRuntime.resolveVialCapabilities(runtime.pack));
     showToast('Vial UI reloaded from the same sandbox.');
   });
   document.getElementById('vialReportBtn')?.addEventListener('click', () => { void reportVialIssue(pack); });
@@ -8185,10 +8217,13 @@ function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: 
   };
   homeVialRuntime = runtime;
   void syncVialDetector(pack);
-  iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce);
+  iframe.srcdoc = VialRuntime.buildSandboxDocument(uiHtml, runtime.nonce, VialRuntime.resolveVialCapabilities(pack));
   iframe.addEventListener('load', () => {
     if (runtime.destroyed) return;
     runtime.ready = false;
+    // The sandbox bridge owns the host object. No module import, eval, or
+    // same-origin access is needed; data arrives over the nonce-checked
+    // postMessage channel and the SDK stays available on every payload.
     void sendVialData(runtime, true);
   }, { once: true });
   runtime.timer = window.setInterval(() => {
@@ -8197,6 +8232,166 @@ function mountHomeVialRuntime(pack: Domain.DomainPack, uiHtml: string, frameId: 
     if (runtime.mount === 'home') updateVialHostTruth(runtime);
     if (runtime.source === 'live') void sendVialData(runtime);
   }, 1200);
+}
+
+const VIAL_JOURNAL_KEY = 'osmograph.vial.journal.';
+const VIAL_PERSIST_KEY = 'osmograph.vial.persist.';
+
+/** Journal reads prefer the disk copy; localStorage is the browser/mock
+ *  fallback so the same UI runs in the harness and on a real install. */
+async function vialJournalEvents(vialId: string, limit = 2000): Promise<unknown[]> {
+  try {
+    const events = await invoke<unknown[]>('vial_get_journal', { vialId, limit });
+    if (Array.isArray(events)) return events;
+  } catch { /* fall through */ }
+  try {
+    const raw = localStorage.getItem(VIAL_JOURNAL_KEY + vialId);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.slice(-limit) : [];
+  } catch {
+    return [];
+  }
+}
+
+async function vialJournalLog(vialId: string, event: unknown): Promise<void> {
+  try {
+    const raw = localStorage.getItem(VIAL_JOURNAL_KEY + vialId);
+    const parsed = raw ? JSON.parse(raw) : [];
+    const next = (Array.isArray(parsed) ? parsed : []).concat([event]).slice(-2000);
+    localStorage.setItem(VIAL_JOURNAL_KEY + vialId, JSON.stringify(next));
+  } catch { /* storage full: disk may still accept it */ }
+  try {
+    await invoke('vial_log_event', { vialId, event });
+  } catch { /* mock/browser: localStorage remains the fallback */ }
+}
+
+async function vialJournalClear(vialId: string): Promise<void> {
+  try { localStorage.removeItem(VIAL_JOURNAL_KEY + vialId); } catch { /* ignore */ }
+  try { await invoke('vial_clear_journal', { vialId }); } catch { /* ignore */ }
+}
+
+async function vialJournalExport(vialId: string, format: 'json' | 'csv'): Promise<string> {
+  try {
+    return await invoke<string>('vial_export_journal', { vialId, format });
+  } catch {
+    const events = await vialJournalEvents(vialId, 5000);
+    if (format === 'csv') {
+      const cell = (value: unknown) => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+      const rows = ['id,type,message,timestamp,data'];
+      for (const raw of events) {
+        const event = raw as Record<string, unknown>;
+        rows.push([
+          cell(event.id), cell(event.type), cell(event.message), cell(event.timestamp),
+          cell(JSON.stringify(event.data ?? null)),
+        ].join(','));
+      }
+      return rows.join('\n');
+    }
+    return JSON.stringify(events, null, 2);
+  }
+}
+
+function vialPersistGet(vialId: string): Record<string, unknown> {
+  try {
+    const raw = localStorage.getItem(VIAL_PERSIST_KEY + vialId);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function vialPersistSet(vialId: string, key: string, value: unknown): void {
+  const data = vialPersistGet(vialId);
+  data[key] = value;
+  localStorage.setItem(VIAL_PERSIST_KEY + vialId, JSON.stringify(data));
+}
+
+async function handleVialHostRequest(runtime: ActiveVialRuntime, action: Extract<VialRuntime.VialAction, { type: 'host-request' }>): Promise<void> {
+  const caps = VialRuntime.resolveVialCapabilities(runtime.pack);
+  const reply = (ok: boolean, result?: unknown, error?: string) => {
+    runtime.iframe.contentWindow?.postMessage(
+      { vialHostResponse: true, requestId: action.requestId, ok, result: ok ? result ?? null : undefined, error },
+      '*',
+    );
+  };
+  try {
+    if (action.request === 'persist' || action.request === 'retrieve') {
+      if (!caps.persist) throw new Error('Vial does not declare write:persist.');
+      if (action.request === 'persist') {
+        vialPersistSet(runtime.pack.id, action.key!, action.value);
+        reply(true, null);
+      } else {
+        reply(true, vialPersistGet(runtime.pack.id)[action.key!] ?? null);
+      }
+      return;
+    }
+    if (!caps.requestAction) throw new Error('Vial does not declare action:request.');
+    switch (action.action) {
+      case 'get-source':
+        reply(true, runtime.source);
+        break;
+      case 'get-sources':
+        reply(true, runtime.sources);
+        break;
+      case 'open-dashboard':
+        showWorkspaceView('dashboard');
+        reply(true, null);
+        break;
+      case 'open-datasets':
+        showWorkspaceView('datasets');
+        reply(true, null);
+        break;
+      case 'open-smells':
+      case 'open-gallery':
+        showWorkspaceView('smells');
+        reply(true, null);
+        break;
+      case 'open-vials':
+        showWorkspaceView('vials');
+        reply(true, null);
+        break;
+      case 'open-workspace':
+        openDomainWorkspace(runtime.pack.id);
+        reply(true, null);
+        break;
+      case 'export-log':
+        exportVialLog(runtime.pack);
+        reply(true, null);
+        break;
+      case 'toast':
+        showToast(String((action.params as { message?: string } | null)?.message || 'Vial message.'));
+        reply(true, null);
+        break;
+      case 'journal-events':
+        reply(true, await vialJournalEvents(runtime.pack.id, 2000));
+        break;
+      case 'journal-export': {
+        const format = (action.params as { format?: string } | null)?.format === 'csv' ? 'csv' : 'json';
+        reply(true, await vialJournalExport(runtime.pack.id, format));
+        break;
+      }
+      case 'journal-download': {
+        const format = (action.params as { format?: string } | null)?.format === 'csv' ? 'csv' : 'json';
+        const text = await vialJournalExport(runtime.pack.id, format);
+        const blob = new Blob([text], { type: format === 'csv' ? 'text/csv' : 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${runtime.pack.id.replace(/[^a-z0-9._-]+/gi, '-')}-journal.${format}`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+        reply(true, null);
+        break;
+      }
+      default:
+        throw new Error(`Unsupported vial action: ${action.action}`);
+    }
+  } catch (e) {
+    reply(false, undefined, e instanceof Error ? e.message : String(e));
+  }
 }
 
 function exportVialLog(pack: Domain.DomainPack): void {
@@ -8269,6 +8464,15 @@ function handleVialAction(runtime: ActiveVialRuntime, action: VialRuntime.VialAc
       refreshVialRuntimes(runtime.pack.id);
       break;
     }
+    case 'host-request':
+      void handleVialHostRequest(runtime, action);
+      break;
+    case 'journal-log':
+      void vialJournalLog(runtime.pack.id, action.event);
+      break;
+    case 'journal-clear':
+      void vialJournalClear(runtime.pack.id);
+      break;
     case 'export-log':
       exportVialLog(runtime.pack);
       break;
@@ -10174,6 +10378,7 @@ interface RawSessionRecord {
   duration_sec: number; sensor_count: number; quality: number; csv_path: string;
   quality_report: string | null;
   collection_id?: string; collection_name?: string; split?: string; condition?: string;
+  mixture?: { name: string; fraction?: number | null }[];
 }
 
 function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
@@ -10204,6 +10409,7 @@ function mapIndexRecords(records: RawSessionRecord[]): SessionRecord[] {
       collection_name: r.collection_name,
       split: r.split,
       condition: r.condition,
+      mixture: Array.isArray(r.mixture) ? r.mixture : [],
     };
   });
 }
@@ -11601,7 +11807,11 @@ function librarySources(): SourceBucket[] {
       map.set(source.id, bucket);
     }
     bucket.records.push(s);
-    if (s.substance && s.substance.toLowerCase() !== 'unknown') bucket.smells.add(s.substance.toLowerCase());
+    const mixture = Array.isArray(s.mixture) && s.mixture.length >= 2;
+    if (!mixture && s.role !== 'reference' && s.role !== 'noise'
+      && s.substance && s.substance.toLowerCase() !== 'unknown') {
+      bucket.smells.add(s.substance.toLowerCase());
+    }
   }
   return [...map.values()].sort((a, b) => b.records.length - a.records.length || a.source.name.localeCompare(b.source.name));
 }
@@ -13356,7 +13566,41 @@ listen<{ channels: number[]; timestamp: number; raw_line: string }>('serial-data
     // ground truth: adopt the link instead of claiming NO LINK while plotting.
     adoptLiveLink();
   }
-  if (channels.length > 0) ingestReading(channels);
+  if (channels.length > 0) {
+    ingestReading(channels);
+    try {
+      (window as any).__OSMOGRAPH_HOST_STATE__ = {
+        readings: channels,
+        channels: channels,
+        channelMeta: chNames.map((name, i) => ({ name, kind: channelKinds[i] || 'analog_mox' })),
+        env: (window as any).__OSMOGRAPH_LAST_ENV__ || null,
+        baseline: (window as any).__OSMOGRAPH_BASELINE__ || null,
+        baselineTimestamp: (window as any).__OSMOGRAPH_BASELINE_TS__ || null,
+        connected: true,
+        timestamp: event.payload.timestamp || Date.now(),
+      };
+      if (!(window as any).__OSMOGRAPH_READINGS_BUFFER__) {
+        (window as any).__OSMOGRAPH_READINGS_BUFFER__ = [];
+      }
+      (window as any).__OSMOGRAPH_READINGS_BUFFER__.push({
+        timestamp: event.payload.timestamp || Date.now(),
+        channels: [...channels],
+        channelsMeta: chNames.map((name, i) => ({ name, kind: channelKinds[i] || 'analog_mox' })),
+      });
+      if ((window as any).__OSMOGRAPH_READINGS_BUFFER__.length > 2000) {
+        (window as any).__OSMOGRAPH_READINGS_BUFFER__ = (window as any).__OSMOGRAPH_READINGS_BUFFER__.slice(-2000);
+      }
+      if ((window as any).__OSMOGRAPH_VIAL_HOST__) {
+        const host = (window as any).__OSMOGRAPH_VIAL_HOST__;
+        if (typeof host.emit === 'function') {
+          host.emit('tick', (window as any).__OSMOGRAPH_HOST_STATE__);
+          host.emit('data', (window as any).__OSMOGRAPH_HOST_STATE__);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to pump vial host state:', e);
+    }
+  }
 });
 
 function adoptLiveLink(): void {
@@ -13406,6 +13650,12 @@ listen<{ kinds: string[] }>('serial-kinds', (event) => {
 // ENV — device-reported ambient telemetry (°C / %RH). Purely informational.
 listen<{ temperature: number; humidity: number }>('serial-env', (event) => {
   renderEnvReadout(event.payload);
+  try {
+    (window as any).__OSMOGRAPH_LAST_ENV__ = event.payload;
+    if ((window as any).__OSMOGRAPH_HOST_STATE__) {
+      (window as any).__OSMOGRAPH_HOST_STATE__.env = event.payload;
+    }
+  } catch {}
 });
 
 listen<{ code: number; message: string }>('serial-error', (event) => {
