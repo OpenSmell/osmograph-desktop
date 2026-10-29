@@ -575,8 +575,14 @@ function bridgeScript(nonce: string, capabilities: VialCapabilities): string {
       parent.postMessage({ schema: "osmograph.vial-action/1", vialAction: action, nonce: NONCE }, "*");
     } catch (e) {}
   }
+  var deniedCaps = {};
   function assertCap(name, label) {
-    if (!CAPS[name]) throw new Error("Vial does not declare the " + label + " capability.");
+    if (CAPS[name]) return;
+    if (!deniedCaps[label]) {
+      deniedCaps[label] = true;
+      send({ type: "toast", message: "Vial permission denied: it did not declare " + label + " in vial.json." });
+    }
+    throw new Error("Vial does not declare the " + label + " capability.");
   }
   function hostRequest(request, body) {
     var id = String(++requestSeq) + "_" + Math.random().toString(36).slice(2, 8);

@@ -71,7 +71,9 @@ VialHost SDK: `getLiveReadings`, `getChannels`, `getBaseline`,
 `on('tick'/'data'/'connect'/'disconnect')`,
 `logEvent`, `getEvents`/`clearEvents`, `persist`/`retrieve`, `requestAction`,
 `exportJournal`, and the math helpers) and asks the host for actions through
-`requestAction`. `getSeries()` returns the host-applied window, including the
+`requestAction`. An undeclared capability throws inside the sandbox and the host
+shows a one-time “Vial permission denied” toast; the Vial must declare every
+capability it calls in `vial.json`. `getSeries()` returns the host-applied window, including the
 baseline-relative `response.values` the profile declares; `getSnapshot()`
 returns channel health, per-channel limits (`cv`, `dead`, `r0`), the baseline,
 and the host's detection verdict. Neither hands the Vial a way to change them.
