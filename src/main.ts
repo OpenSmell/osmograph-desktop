@@ -7596,14 +7596,18 @@ function liveVialSeries(): VialRuntime.VialSeriesWindow | null {
   const n = raw.reduce((max, values) => Math.max(max, values.length), 0);
   if (n < 4) return null;
   const sampled = VialRuntime.downsampleChannels(raw, 600);
+  // The live buffer carries no per-sample timestamps, but the measured rate is
+  // known. Emit real seconds so a profile's r0WindowS means seconds here too;
+  // a sample-index axis would make 30 s silently become 30 samples.
+  const rate = liveRateHz > 0 ? liveRateHz : 10;
   return {
     // Source follows reality, not the slot name: a connected rig is live; with
     // no rig the same bytes are a capture and vials must brand them as such.
     source: connected ? 'live' : 'recording',
     label: connected ? 'Live array' : 'Captured buffer — no rig connected',
     channels,
-    time: sampled.indices,
-    timeUnit: 'sample',
+    time: sampled.indices.map(i => i / rate),
+    timeUnit: 's',
     values: sampled.values,
     fingerprint: VialRuntime.fingerprintFromSeries(sampled.values),
     evolution: VialRuntime.evolutionFromSeries(sampled.values),

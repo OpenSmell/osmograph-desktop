@@ -468,6 +468,7 @@ const SANDBOX_BASE_CSS = `
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body {
   margin: 0; padding: 0; background: var(--bg); color: var(--ink);
   font-family: var(--sans); font-size: 12px; line-height: 1.45;
@@ -752,6 +753,14 @@ function bridgeScript(nonce: string, capabilities: VialCapabilities): string {
       assertCap("readLive", "read:live");
       var n = Math.max(1, Math.min(2000, Math.round(count || 100)));
       return hostState.readings.slice(-n);
+    },
+    getSnapshot: function() {
+      assertCap("readLive", "read:live");
+      return hostState.snapshot;
+    },
+    getSeries: function() {
+      assertCap("readLive", "read:live");
+      return hostState.series;
     },
     on: hostOn,
     off: hostOff,

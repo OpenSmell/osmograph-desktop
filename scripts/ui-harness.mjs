@@ -35,12 +35,15 @@ function readVial(name) {
     return null;
   }
 }
-const seeded = ['fermentation-lab', 'plant-respiration'].map(readVial).filter(Boolean);
+const VIAL_ORDER = (process.env.OSMO_VIAL_ORDER || 'fermentation-lab,plant-respiration')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const seeded = VIAL_ORDER.map(readVial).filter(Boolean);
 const seedPacks = seeded.map(v => ({
   ...v.manifest,
   sourceUrl: `https://raw.githubusercontent.com/praisejamesx/${v.manifest.id.split('.')[1]}/main/vial.json`,
 }));
 const seedInstalled = seedPacks.map(p => p.id);
+const PRIMARY_ID = seedPacks[0]?.id || '';
 const seedUi = {};
 for (const v of seeded) {
   if (v.ui) seedUi[v.manifest.id] = { version: v.manifest.version, html: v.ui, fetchedAt: Date.now() };
@@ -234,30 +237,53 @@ if (takeoverBtn) {
   }
   if (!hostTruth.baseline || !hostTruth.change) errors.push('Vial Home host status is incomplete');
 
-  // Programmable Vial: the domain module declares host transforms and a
-  // trajectory, then arms a single-unit watch through the host gate. The host
-  // owns the acceptance; the Vial only declares intent.
+  // Programmable Vial (v2): the anomaly profile is compiled from the manifest
+  // and the UI cannot set it. Assert the installed pack and the SDK surface the
+  // Vial actually consumes: a series with real seconds, the profile's response
+  // transform, and per-channel limits in the snapshot.
   await page.waitForTimeout(1600);
-  let watchArmed = null;
+  let profile = null;
   for (const f of page.frames()) {
     if (f === page.mainFrame()) continue;
-    if (!(await f.locator('#watchLimits input[data-channel]').count())) continue;
-    const declared = await page.evaluate(() => ({
-      transforms: localStorage.getItem('osmograph.vial.transforms.praisejamesx.fermentation'),
-      trajectory: localStorage.getItem('osmograph.vial.trajectorySpec.praisejamesx.fermentation'),
-    }));
-    if (!declared.transforms) errors.push('programmable vial: host transforms were not declared');
-    if (!declared.trajectory) errors.push('programmable vial: trajectory spec was not declared');
-    await f.locator('#watchApply').click().catch(() => {});
-    await page.waitForTimeout(900);
-    watchArmed = await page.evaluate(() => {
-      try { return JSON.parse(localStorage.getItem('osmograph.vial.detection.praisejamesx.fermentation') || 'null'); } catch { return null; }
+    if (!(await f.locator('#watchLimits').count())) continue;
+    const pack = await page.evaluate((pid) => {
+      try {
+        const packs = JSON.parse(localStorage.getItem('osmograph.domain.packs.v1') || '[]');
+        return packs.find(p => p.id === pid) || null;
+      } catch { return null; }
+    }, PRIMARY_ID);
+    const editable = await f.locator('#watchApply, #watchLimits input[data-channel]').count();
+    const sdk = await f.evaluate(() => {
+      const host = window.__OSMOGRAPH_VIAL_HOST__;
+      if (!host) return { host: false };
+      const series = host.getSeries();
+      const snapshot = host.getSnapshot();
+      return {
+        host: true,
+        hasSeries: !!series,
+        timeUnit: series ? series.timeUnit : null,
+        response: !!(series && series.response && series.response.values),
+        applied: snapshot ? (snapshot.transformsApplied || []) : [],
+        baseline: snapshot && snapshot.baseline ? snapshot.baseline.state : null,
+        limits: snapshot && snapshot.channelLimits ? Object.keys(snapshot.channelLimits).length : 0,
+      };
     });
+    profile = { pack: pack ? { schema: pack.schema, hasAnomaly: !!pack.anomaly, version: pack.version } : null, editable, sdk };
     break;
   }
-  console.log('programmable vial:', JSON.stringify(watchArmed));
-  if (!watchArmed || !watchArmed.enabled || !Object.keys(watchArmed.perChannelLimits || {}).length) {
-    errors.push('programmable vial: watch was not armed on the host');
+  console.log('v2 profile:', JSON.stringify(profile));
+  if (!profile || !profile.pack) errors.push('v2 profile: the installed pack was not found');
+  else {
+    if (profile.pack.schema !== 'osmograph.domain-pack/2') errors.push('v2 profile: pack is not schema /2');
+    if (!profile.pack.hasAnomaly) errors.push('v2 profile: no anomaly block');
+  }
+  if (!profile || profile.editable !== 0) errors.push('v2 profile: the UI still offers editable detector controls');
+  if (!profile || !profile.sdk.host) errors.push('v2 sdk: VialHost is missing in the sandbox');
+  else {
+    if (!profile.sdk.hasSeries) errors.push('v2 sdk: getSeries() returned nothing');
+    if (profile.sdk.timeUnit !== 's') errors.push('v2 sdk: live window timeUnit is not seconds');
+    if (!profile.sdk.response) errors.push('v2 sdk: profile response transform was not applied');
+    if (!profile.sdk.limits) errors.push('v2 sdk: getSnapshot() has no channel limits');
   }
   await shot('03c2-home-watch');
 
@@ -276,6 +302,54 @@ if (takeoverBtn) {
   console.log('vial bridge -> workspace:', bridgeWorkspace);
   if (bridgeWorkspace !== 'vials') errors.push('vial bridge: open-workspace did not reach the host');
   await shot('03d-home-action');
+
+  // Keep the rig streaming while the workspace is open, so the live panels
+  // have a real window instead of the empty "no sensor" state.
+  await page.evaluate(async () => {
+    const emit = window.__MOCK_EMIT;
+    for (let i = 0; i < 45; i++) {
+      const chans = [
+        Math.round(1710 + Math.sin(i / 3) * 14 + (i > 30 ? i - 30 : 0)),
+        Math.round(205 + Math.cos(i / 4) * 6),
+        0, 0, 0, 0,
+      ];
+      emit('serial-data', { channels: chans, timestamp: Date.now(), raw_line: 'RIG,' + chans.join(',') });
+      await new Promise(r => setTimeout(r, 45));
+    }
+  });
+  await page.waitForTimeout(1400);
+  await shot('03d2-workspace-live');
+  const workspaceFrames = page.frames().filter(f => f !== page.mainFrame());
+  for (const f of workspaceFrames) {
+    const live = await f.evaluate(() => {
+      const host = window.__OSMOGRAPH_VIAL_HOST__;
+      if (!host) return null;
+      const series = host.getSeries();
+      return series ? { source: series.source, timeUnit: series.timeUnit, channels: series.channels.length, samples: series.time.length } : null;
+    }).catch(() => null);
+    if (live) console.log('workspace series:', JSON.stringify(live));
+  }
+
+  // Open the other vial's workspace too, so both domain UIs are exercised.
+  await page.click('#domainBack').catch(() => {});
+  await page.waitForTimeout(400);
+  const plantOpen = await page.$('[data-domain-open="praisejamesx.plant-respiration"]');
+  if (!plantOpen) {
+    errors.push('plant workspace: open button not found');
+  } else {
+    await plantOpen.click().catch(() => errors.push('plant workspace: open button not clickable'));
+    await page.waitForTimeout(1100);
+    await page.evaluate(async () => {
+      const emit = window.__MOCK_EMIT;
+      for (let i = 0; i < 45; i++) {
+        const chans = [Math.round(1710 + Math.sin(i / 3) * 14), Math.round(205 + Math.cos(i / 4) * 6), 0, 0, 0, 0];
+        emit('serial-data', { channels: chans, timestamp: Date.now(), raw_line: 'RIG,' + chans.join(',') });
+        await new Promise(r => setTimeout(r, 45));
+      }
+    });
+    await page.waitForTimeout(1400);
+    await shot('03d3-plant-workspace-live');
+  }
 
   await page.evaluate(() => document.querySelector('.tab-btn[data-tab="dashboard"]')?.click());
   await page.waitForTimeout(600);

@@ -67,10 +67,14 @@ A v2 UI also must not call `osmograph.setDetection` or `osmograph.setTransforms`
 (they throw). The anomaly profile in `vial.json` is the program; the host arms
 it. The Vial reads live data through `window.__OSMOGRAPH_VIAL_HOST__` (the
 VialHost SDK: `getLiveReadings`, `getChannels`, `getBaseline`,
-`getRecentReadings`, `on('tick'/'data'/'connect'/'disconnect')`,
+`getRecentReadings`, `getSnapshot`, `getSeries`,
+`on('tick'/'data'/'connect'/'disconnect')`,
 `logEvent`, `getEvents`/`clearEvents`, `persist`/`retrieve`, `requestAction`,
 `exportJournal`, and the math helpers) and asks the host for actions through
-`requestAction`.
+`requestAction`. `getSeries()` returns the host-applied window, including the
+baseline-relative `response.values` the profile declares; `getSnapshot()`
+returns channel health, per-channel limits (`cv`, `dead`, `r0`), the baseline,
+and the host's detection verdict. Neither hands the Vial a way to change them.
 
 ---
 

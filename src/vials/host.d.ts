@@ -44,6 +44,66 @@ export interface VialCapabilities {
   exportData: boolean;
 }
 
+/** Per-channel evidence the host computes from the live stream. A Vial may
+ *  read these to judge a response against the channel's own noise. */
+export interface VialChannelLimit {
+  dead: boolean;
+  /** Coefficient of variation (std / |mean|) of the raw channel window. */
+  cv: number;
+  min: number;
+  max: number;
+  /** The live reference value, or null when the host has not set one. */
+  r0: number | null;
+}
+
+export interface VialDetectionVerdict {
+  active: boolean;
+  triggeredChannels: string[];
+  admissible?: boolean;
+  reason?: string | null;
+}
+
+/** The host-applied window: raw values, a settled fingerprint, and (when the
+ *  profile declares transforms) a baseline-relative response per channel. */
+export interface VialSeriesWindow {
+  source: 'live' | 'recording' | 'none';
+  label: string;
+  channels: string[];
+  time: number[];
+  timeUnit: 's' | 'sample';
+  values: Array<Array<number | null>>;
+  fingerprint: Array<number | null>;
+  evolution: { bins: number; values: Array<Array<number | null>>; maxAbs: number } | null;
+  response: {
+    baseline: 'first-n' | 'session-mean';
+    response: 'delta-over-r0' | 'relative' | 'delta';
+    conditioning: string[];
+    values: Array<Array<number | null>>;
+  } | null;
+}
+
+/** The only live state a Vial may depend on. Read-only; the host owns it. */
+export interface VialSnapshot {
+  takenAt: number;
+  source: 'live' | 'replay' | 'dataset' | 'none';
+  samplingMode: 'timeseries' | 'trial' | 'unknown';
+  channels: Array<{ id: string; label: string; kind: string; unit?: string; health?: string }>;
+  environment: { temperature: number | null; humidity: number | null } | null;
+  baseline: { state: 'none' | 'warming' | 'ready' | 'stale'; progress: number; ageSec: number | null };
+  anomaly: {
+    state: 'unknown' | 'normal' | 'warning' | 'critical';
+    score: number | null;
+    confidence: number | null;
+    alertLevel: number;
+    triggeredChannels: number;
+    consecutive: number;
+  };
+  channelLimits: Record<string, VialChannelLimit>;
+  detection: VialDetectionVerdict | null;
+  transformsApplied: string[];
+  trajectory: Array<{ at: number; values: Record<string, number> }>;
+}
+
 export interface VialHost {
   version: string;
   capabilities: VialCapabilities;
@@ -53,6 +113,12 @@ export interface VialHost {
   getChannels(): VialChannel[];
   getBaseline(): VialBaseline | null;
   getRecentReadings(count?: number): VialLiveReading[];
+  /** The full host snapshot: channel health, baseline, detection verdict,
+   *  per-channel limits, environment, and transforms. */
+  getSnapshot(): VialSnapshot | null;
+  /** The host-applied window, including the baseline-relative response the
+   *  profile declares. Null until a window exists. */
+  getSeries(): VialSeriesWindow | null;
   
   // Event subscription
   on(event: 'tick' | 'data' | 'connect' | 'disconnect', callback: (data: any) => void): () => void;
