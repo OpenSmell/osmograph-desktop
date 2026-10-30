@@ -173,5 +173,19 @@ test('action envelope clamps resize and truncates toast text', () => {
   assert.equal(toast?.vialAction.message.length, 400);
 });
 
+test('action envelope accepts host requests with null params', () => {
+  const parsed = runtime.parseVialActionEnvelope({
+    nonce: 'n',
+    vialAction: { type: 'host-request', requestId: 'r1', request: 'action', action: 'journal-events', params: null },
+  });
+  assert.equal(parsed?.vialAction.type, 'host-request');
+  assert.equal(parsed?.vialAction.action, 'journal-events');
+  const bad = runtime.parseVialActionEnvelope({
+    nonce: 'n',
+    vialAction: { type: 'host-request', requestId: 'r2', request: 'action', action: 'journal-events', params: 'x' },
+  });
+  assert.equal(bad, null);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

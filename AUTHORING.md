@@ -80,6 +80,114 @@ and the host's detection verdict. Neither hands the Vial a way to change them.
 
 ---
 
+## The live-data and logging contract
+
+The host does the signal math; the Vial reads the result. Never recompute a
+baseline or a response from `getLiveReadings()` when `getSeries()` already
+carries one — the profile is the single source of truth, and a second hidden
+baseline will disagree with the detector.
+
+### `getSeries()` — the window the profile produced
+
+```js
+{
+  source: 'live' | 'recording',   // change calls only when 'live'
+  timeUnit: 's',                  // seconds from the start of the window
+  time: [0, 0.1, 0.2, ...],
+  channels: ['MQ-135', ...],
+  values:   [[2100, 2104, ...], ...],   // conditioned raw
+  response: {                     // present when the profile declares it
+    kind: 'delta-over-r0',
+    values: [[0.001, 0.004, ...], ...]
+  },
+  fingerprint: [0.02, -0.01, ...], // latest per-channel response
+  label: 'live'
+}
+```
+
+- `time` is **seconds**, including when the link is live. It is not a sample
+  index. `timeUnit` is explicit; test it rather than assuming.
+- `response.values[i]` is already `(value − R0) / R0` as declared by the
+  profile. Plot it as a fraction, not a concentration.
+- `source === 'recording'` means a stored buffer. You may inspect it; you must
+  withhold any "changed now" call.
+- A missing/`null` value is not zero. Skip it.
+
+### `getSnapshot()` — health, limits, and the host verdict
+
+```js
+{
+  channels: [{ id: 'ch0', label: 'MQ-135', health: 'ok' }, ...],
+  channelLimits: {
+    ch0: { cv: 0.012, dead: false, r0: 2100 }
+  },
+  baseline: { state: 'warming' | 'ready' | 'none', progress: 0.4 },
+  detection: { active: false, admissible: true, reason: '' },
+  environment: { temperature: 22.4, humidity: 41.0 }
+}
+```
+
+`cv` is `std / |mean|` of that channel's raw window. The honest noise band is
+`max(0.005, 2 * cv)`; the 0.5 % floor stops a suspiciously quiet window from
+turning sensor noise into an event. A channel is out of service when
+`channelLimits[id].dead` or `health` is `stuck`/`saturated`; exclude it rather
+than reading it as a flat line.
+
+A defensible change call is: the response stays beyond the band for **at least
+60 % of the recent 30 %** of samples, on a live source with a ready baseline.
+A single excursion is handling, a door, or a draft. Withhold the call when the
+enclosure moved (both examples use 1.5 °C / 5 %RH for a plant and 2 °C / 8 %RH
+for a vessel) or when `detection.admissible === false`.
+
+### Journal, export, and persistence
+
+- `logEvent(type, message, data)` writes one JSON event. Types are free-form;
+  the shipped examples use `care`, `context`, `session`, `phase`, `array-phase`,
+  `disagreement`, `reference`, and `batch`.
+- `getEvents(limit)` reads the journal (newest last). On a fresh page the local
+  cache is empty, so it asks the host; this works with no params.
+- `exportJournal('csv' | 'json')` returns text. For a real file, prefer
+  `requestAction('journal-download', { format: 'csv' })`; the host creates the
+  download and names it from the pack id.
+- `persist(key, value)` / `retrieve(key)` store JSON per Vial (16 KB per value)
+  in the app data directory, with a localStorage fallback. They survive a UI
+  reload and a UI update. There is no cross-Vial store.
+- The journal survives a reload (disk on the desktop, localStorage in the
+  browser/dev build). It is capped at 2000 events.
+
+### `requestAction` — the host actions a Vial can ask for
+
+`get-source`, `get-sources`, `open-dashboard`, `open-datasets`, `open-smells`,
+`open-gallery`, `open-vials`, `open-workspace`, `open-check`, `export-log`,
+`toast`, `journal-events`, `journal-export`, `journal-download`.
+
+`requestAction(name)` with no params is valid (`params` defaults to `null`).
+Declare `action:request` in `capabilities` or the call throws.
+
+### Patterns worth copying
+
+- **Reference snapshot** (`fermentation-lab`): capture
+  `{ level, noise, phase, channels, at }` from a clean live window, store it
+  with `persist('reference', …)`, and refuse the comparison when the live
+  channel set no longer matches. A reference is this array's own past response,
+  not a lab blank and not comparable across rigs.
+- **Batch lifecycle** (`fermentation-lab`): a `status` field
+  (`active` / `completed` / `archived`) stored via `save-field`. Closing a
+  batch blocks new readings, stops phase journaling, and keeps the log and
+  export readable. Reopening is an explicit status change, logged as an event.
+- **Diurnal comparison** (`plant-respiration`): save sessions with the clock
+  hour and per-channel response, then compare only against sessions within
+  ±2 h of the current time and older than 5 minutes. A different time of day is
+  a different measurement.
+- **Unified journal**: `getEvents()` is the record; render it with a type
+  filter and export the same rows. Do not keep a second private log.
+
+`node scripts/vial-e2e.mjs` is the reference proof: it drives both example
+Vials through add-reading, reference, close-batch, care, session, export, and
+reload, asserting the journal and persisted state survive.
+
+---
+
 ## The profile
 
 The `anomaly` block is the program. At minimum:
@@ -116,6 +224,50 @@ persistence lever; `hysteresis` keeps a state from chattering around a limit.
 refuses to arm when the baseline is not ready, channel coverage is below
 `minCoverage`, or fewer than `minChannels` declared channels are live and
 non-dead. A dead channel is a refusal, not a zero.
+
+### What each lever does
+
+| Field | Range | Meaning |
+|---|---|---|
+| `baseline.protocol` | `first-n`, `session-mean` | How R0 is chosen. `first-n` uses the early clean window; `session-mean` uses a recorded session mean. |
+| `baseline.warmupS` | 0.5–86400 s | Clean time before the host trusts a baseline. Too short turns switch-on drift into an event. |
+| `baseline.r0WindowS` | 0.5–3600 s | Early samples averaged into R0. Must not exceed `warmupS`. |
+| `transforms.conditioning` | `["median3"]` | The only supported filter. Use it for a spiky MOX channel; leave it empty when you need raw timing. |
+| `transforms.response` | `delta-over-r0`, `relative`, `delta` | The response the UI receives. `delta-over-r0` is a fraction of the reference; `delta` keeps raw counts. |
+| `detection.sensitivity` | 0.1–10 | Higher flags smaller deviations. Above ~2 a quiet array starts calling sensor noise. |
+| `detection.minChannels` | 1–32 | Corroboration. For a multi-channel array, 2 is the honest minimum; 3 is better. |
+| `detection.levelBudget` | 0–12 σ | Level-anchored threshold in calibrated sigma. `0` disables the level leg and leaves only the change leg. |
+| `detection.levelRefS` | 0–86400 s | Rolling reference for the level leg. Requires `levelBudget > 0`. |
+| `detection.alertThreshold` | 0–1 | Confidence floor for a channel-level alert. |
+| `detection.perChannelLimits` | `{"ch0": 0.03, …}` | Absolute response limit per channel, in transformed units. Leave it empty **only** when the UI judges against its own `2 × cv` band, as both examples do. |
+| `detection.hysteresis` | 0–0.95 | How far the signal must fall below its peak before clearing. Stops chatter at the limit. |
+| `escalation.warningS` / `criticalS` / `emergencyS` | seconds, ascending | How long the condition must persist for each rung. These are latency promises, not decoration. |
+| `escalation.resetNormalS` | seconds | Quiet time required to return to normal. |
+| `detection.farTargetPerMonth` | `null` or a number | Your deployment false-alarm budget. `null` is honest when you have not measured it; it also means the profile claims no budget. |
+| `admissibility.requireBaseline` | `ready`, `any` | `ready` refuses to arm during warm-up. |
+| `admissibility.minCoverage` | 0–1 | Fraction of declared channels that must be live and non-dead. |
+
+Two rules follow from this:
+
+1. **A channel's noise is not the same as the process noise.** Measure `cv` on
+   the actual rig, in the actual enclosure. A profile copied from another array
+   has not been measured on yours.
+2. **Persistence is part of the claim.** A one-second excursion and a
+   sixty-second one are different findings. If you set `warningS` below a
+   second, say so in the Vial's limits.
+
+### Ungated and Gated
+
+A v2 Vial without an `evidence` block installs as **Ungated**. It runs, it
+keeps its log, and it must not claim a measured false-alarm rate. Both shipped
+examples are deliberately Ungated: no measured held-out numbers exist yet, and
+inventing them is forbidden.
+
+**Gated** (and eligible for listing) needs all critical policy checks, at least
+one declarative fixture, real measured `evidence.metrics`, a real
+`evidence.reportUrl`, and manual approval through `/admin`. Approval is human;
+the app never converts a grade into a safety permission. Payments are deferred;
+nothing is charged for a listing.
 
 ---
 

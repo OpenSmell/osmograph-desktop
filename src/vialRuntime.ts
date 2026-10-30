@@ -259,7 +259,7 @@ export function parseVialActionEnvelope(value: unknown): VialActionEnvelope | nu
     if (request === 'action') {
       const action = typeof raw.action === 'string' ? raw.action.trim() : '';
       if (!safeActionKey(action)) return null;
-      if (raw.params !== undefined && !isRecord(raw.params) && !Array.isArray(raw.params)) return null;
+      if (raw.params !== undefined && raw.params !== null && !isRecord(raw.params) && !Array.isArray(raw.params)) return null;
       let serialized = '';
       try { serialized = JSON.stringify(raw.params ?? null); } catch { return null; }
       if (serialized.length > 8_192) return null;

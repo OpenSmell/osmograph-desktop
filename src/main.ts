@@ -8276,23 +8276,26 @@ async function vialJournalClear(vialId: string): Promise<void> {
 
 async function vialJournalExport(vialId: string, format: 'json' | 'csv'): Promise<string> {
   try {
-    return await invoke<string>('vial_export_journal', { vialId, format });
-  } catch {
-    const events = await vialJournalEvents(vialId, 5000);
-    if (format === 'csv') {
-      const cell = (value: unknown) => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
-      const rows = ['id,type,message,timestamp,data'];
-      for (const raw of events) {
-        const event = raw as Record<string, unknown>;
-        rows.push([
-          cell(event.id), cell(event.type), cell(event.message), cell(event.timestamp),
-          cell(JSON.stringify(event.data ?? null)),
-        ].join(','));
-      }
-      return rows.join('\n');
+    const text = await invoke<string>('vial_export_journal', { vialId, format });
+    // A browser/mock bridge resolves the command as null instead of throwing.
+    // Only trust a non-empty string; otherwise build the export from the
+    // journal we can read, so "Export" never downloads an empty file.
+    if (typeof text === 'string' && text.length > 0) return text;
+  } catch { /* fall through */ }
+  const events = await vialJournalEvents(vialId, 5000);
+  if (format === 'csv') {
+    const cell = (value: unknown) => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+    const rows = ['id,type,message,timestamp,data'];
+    for (const raw of events) {
+      const event = raw as Record<string, unknown>;
+      rows.push([
+        cell(event.id), cell(event.type), cell(event.message), cell(event.timestamp),
+        cell(JSON.stringify(event.data ?? null)),
+      ].join(','));
     }
-    return JSON.stringify(events, null, 2);
+    return rows.join('\n');
   }
+  return JSON.stringify(events, null, 2);
 }
 
 function vialPersistGet(vialId: string): Record<string, unknown> {
