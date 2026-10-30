@@ -229,6 +229,9 @@ async function waitForFrameValue(frame, fn, predicate, timeout = 6000) {
       check('fermentation export contains the batch status event', /Batch status|completed/i.test(text), text.slice(0, 120).replace(/\n/g, ' | '));
     }
     await shot('fermentation-workspace');
+    await frame.evaluate(() => document.getElementById('refStamp')?.scrollIntoView({ block: 'start' })).catch(() => {});
+    await page.waitForTimeout(400);
+    await shot('fermentation-reference-and-history');
   }
 }
 
@@ -333,6 +336,9 @@ await page.waitForTimeout(700);
       check('plant export contains care and session rows', /care/i.test(text) && /session/i.test(text), text.slice(0, 120).replace(/\n/g, ' | '));
     }
     await shot('plant-workspace');
+    await frame.evaluate(() => document.getElementById('journalList')?.scrollIntoView({ block: 'center' })).catch(() => {});
+    await page.waitForTimeout(400);
+    await shot('plant-journal');
   }
 }
 
