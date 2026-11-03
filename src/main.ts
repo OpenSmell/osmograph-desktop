@@ -15644,78 +15644,526 @@ async function fitWindowToScreen() {
 fitWindowToScreen();
 
 // === Updates ===
-// Policy is localStorage-persisted like every other setting. The Rust backend
-// enforces the actual check cadence and ETag caching; this just wires the UI.
+// The Rust backend owns cadence, ETag caching and channel filtering. This
+// layer only renders what it returns and persists the user's two choices.
 const UPD_POLICY_KEY = 'osmograph.updatePolicy';
+const UPD_CHANNEL_KEY = 'osmograph.updateChannel';
+const UPD_NOTIFIED_KEY = 'osmograph.updateNotified';
+const UPD_SKIPPED_KEY = 'osmograph.updateSkipped';
 
-function loadUpdatePolicy(): string {
-  try { return localStorage.getItem(UPD_POLICY_KEY) || 'daily'; } catch { return 'daily'; }
+type UpdatePolicy = 'auto' | 'manual' | 'never';
+type UpdateChannel = 'stable' | 'beta';
+
+function readUpdatePolicy(): UpdatePolicy {
+  let raw = 'auto';
+  try { raw = (localStorage.getItem(UPD_POLICY_KEY) || 'auto').trim(); } catch { /* ignore */ }
+  // Migrate the 0.1.x names so an update never silently turns checks off.
+  if (raw === 'daily' || raw === 'on-launch') {
+    writeUpdatePolicy('auto');
+    return 'auto';
+  }
+  return raw === 'manual' || raw === 'never' ? raw : 'auto';
 }
-function saveUpdatePolicy(v: string) {
+function writeUpdatePolicy(v: UpdatePolicy) {
   try { localStorage.setItem(UPD_POLICY_KEY, v); } catch { /* ignore */ }
 }
-
-type UpdateCheckResult = {
-  available: boolean;
-  latest_version: string;
-  current_version: string;
-  release_notes: string;
-  download_url: string;
-  published_at: string;
-  policy: string;
-  last_checked: number | null;
-  checked: boolean;
-};
-
-function renderUpdateStatus(msg: string, cls?: string) {
-  const el = document.getElementById('updateStatus')!;
-  el.textContent = msg;
-  el.className = cls || '';
-}
-
-function renderUpdateNotes(notes: string, url: string) {
-  const el = document.getElementById('updateNotes')!;
-  if (!notes && !url) { el.style.display = 'none'; return; }
-  el.textContent = notes || '';
-  el.style.display = 'block';
-}
-
-async function runUpdateCheck(force: boolean) {
-  const btn = document.getElementById('updateCheckBtn') as HTMLButtonElement;
-  btn.disabled = true;
-  renderUpdateStatus('Checking…', '');
-  // Insert the spinner via a DOM node so prefers-reduced-motion CSS applies.
-  const spinner = document.createElement('span');
-  spinner.className = 'update-spinner';
-  document.getElementById('updateStatus')!.prepend(spinner);
+function readUpdateChannel(): UpdateChannel | null {
   try {
-    const policy = (document.querySelector('input[name="updPol"]:checked') as HTMLInputElement)?.value || 'daily';
-    const res = await invoke<UpdateCheckResult>('check_for_updates', { policy, force });
-    if (res.available) {
-      renderUpdateStatus(`Update available: v${res.latest_version}`, 'update-avail');
-      renderUpdateNotes(res.release_notes, res.download_url);
-      // Wire the release-page open once, so repeated checks don't stack handlers.
-      const openBtn = document.getElementById('updateOpenBtn') ||
-        (() => {
-          const b = document.createElement('button');
-          b.id = 'updateOpenBtn';
-          b.textContent = 'Open download page';
-          b.addEventListener('click', () => invoke('open_https_url', { url: res.download_url }));
-          document.getElementById('updateStatus')!.after(b);
-          return b;
-        })();
-      (openBtn as HTMLButtonElement).onclick = () => invoke('open_https_url', { url: res.download_url });
-    } else {
-      renderUpdateStatus('Up to date', 'update-ok');
-      renderUpdateNotes('', '');
-    }
-  } catch (e) {
-    // Offline or rate-limited: non-alarming, the user can retry.
-    renderUpdateStatus('Could not check (offline?)', '');
-  } finally {
-    btn.disabled = false;
+    const v = localStorage.getItem(UPD_CHANNEL_KEY);
+    return v === 'stable' || v === 'beta' ? v : null;
+  } catch { return null; }
+}
+function writeUpdateChannel(v: UpdateChannel) {
+  try { localStorage.setItem(UPD_CHANNEL_KEY, v); } catch { /* ignore */ }
+}
+function readSkippedVersion(): string {
+  try { return (localStorage.getItem(UPD_SKIPPED_KEY) || '').trim(); } catch { return ''; }
+}
+function writeSkippedVersion(v: string) {
+  try {
+    if (v) localStorage.setItem(UPD_SKIPPED_KEY, v);
+    else localStorage.removeItem(UPD_SKIPPED_KEY);
+  } catch { /* ignore */ }
+}
+function readNotifiedVersion(): string {
+  try { return (localStorage.getItem(UPD_NOTIFIED_KEY) || '').trim(); } catch { return ''; }
+}
+function writeNotifiedVersion(v: string) {
+  try { localStorage.setItem(UPD_NOTIFIED_KEY, v); } catch { /* ignore */ }
+}
+
+function normalizeVersion(v: string): string {
+  return v.trim().replace(/^v/i, '');
+}
+
+type UpdateStage = 'alpha' | 'beta' | 'rc' | 'prerelease' | 'release';
+
+/** The stage is derived from the version tag itself — never a label we
+ *  maintain by hand, so it cannot drift from what was built. */
+function stageOf(version: string): UpdateStage {
+  const m = version.match(/^\d+\.\d+\.\d+[-.](alpha|beta|rc)(?:[-.]|$)/i);
+  if (m) return m[1].toLowerCase() as UpdateStage;
+  return /^\d+\.\d+\.\d+-/.test(version) ? 'prerelease' : 'release';
+}
+function stageLabel(stage: UpdateStage): string {
+  switch (stage) {
+    case 'alpha': return 'Alpha';
+    case 'beta': return 'Beta';
+    case 'rc': return 'Release candidate';
+    case 'prerelease': return 'Prerelease';
+    default: return 'Release';
   }
 }
+function stageNote(stage: UpdateStage): string {
+  switch (stage) {
+    case 'alpha':
+      return 'Alpha: expect breakage. Export any recording you care about before updating.';
+    case 'beta':
+      return 'Beta: features and file formats can still change. Export any recording you care about before a major update.';
+    case 'rc':
+      return 'Release candidate: final testing before a stable release.';
+    default:
+      return '';
+  }
+}
+
+type UpdateAsset = {
+  name: string;
+  url: string;
+  size: number;
+  kind: string;
+  recommended: boolean;
+};
+type NoteSection = { kind: string; title: string; body: string };
+type UpdateRelease = {
+  version: string;
+  name: string;
+  notes: string;
+  sections: NoteSection[];
+  html_url: string;
+  published_at: string;
+  prerelease: boolean;
+  recommended_url: string;
+  recommended_name: string;
+  assets: UpdateAsset[];
+};
+type UpdateCheckResult = {
+  available: boolean;
+  current_version: string;
+  stage: UpdateStage;
+  channel: UpdateChannel;
+  policy: string;
+  checked: boolean;
+  last_checked: number | null;
+  latest: UpdateRelease | null;
+  notice: string;
+  error: string | null;
+};
+
+let currentVersion = 'dev';
+let updateBusy = false;
+let dismissedVersion: string | null = null;
+let seenUpdateVersion: string | null = null;
+let lastResult: UpdateCheckResult | null = null;
+
+function setUpdateStatus(text: string, cls = '', spinner = false) {
+  const el = document.getElementById('updateStatus');
+  if (!el) return;
+  el.textContent = text;
+  el.className = cls;
+  if (spinner) {
+    const s = document.createElement('span');
+    s.className = 'update-spinner';
+    el.prepend(s);
+  }
+}
+
+function relativeWhen(unix: number | null): string {
+  if (!unix) return '';
+  const then = new Date(unix * 1000);
+  if (Number.isNaN(then.getTime())) return '';
+  const diff = Date.now() - then.getTime();
+  if (diff < 60_000) return 'just now';
+  if (diff < 3_600_000) return `${Math.max(1, Math.round(diff / 60_000))} min ago`;
+  if (diff < 86_400_000) return `${Math.max(1, Math.round(diff / 3_600_000))} h ago`;
+  return then.toLocaleString();
+}
+
+function releaseDate(iso: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+function formatBytes(bytes: number): string {
+  if (!bytes || bytes < 0) return '';
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function assetKindLabel(kind: string): string {
+  switch (kind) {
+    case 'appimage': return 'AppImage';
+    case 'deb': return 'Debian package';
+    case 'rpm': return 'RPM package';
+    case 'msi': return 'MSI installer';
+    case 'exe': return 'Windows installer';
+    case 'dmg': return 'macOS disk image';
+    case 'app': return 'macOS app archive';
+    case 'tarball': return 'archive';
+    default: return 'file';
+  }
+}
+
+function openUpdateUrl(url: string) {
+  if (!url) return;
+  invoke('open_https_url', { url }).catch((e) => showToast(`Could not open the browser: ${e}`));
+}
+
+function syncUpdateVersionChrome(version: string, stage: UpdateStage) {
+  const isDev = !version || version === 'dev';
+  const versionText = isDev ? 'dev' : `v${version}`;
+  const label = isDev ? '' : stageLabel(stage);
+
+  const footerVersion = document.getElementById('footerVersion');
+  if (footerVersion) footerVersion.textContent = versionText;
+  const footerStage = document.getElementById('footerStage');
+  if (footerStage) {
+    footerStage.textContent = label;
+    footerStage.hidden = isDev || stage === 'release';
+  }
+
+  const aboutVersion = document.getElementById('aboutVersion');
+  if (aboutVersion) aboutVersion.textContent = isDev ? 'Osmograph dev' : `Osmograph ${versionText}`;
+  const aboutStage = document.getElementById('aboutStage');
+  if (aboutStage) {
+    aboutStage.textContent = label;
+    aboutStage.hidden = isDev || stage === 'release';
+  }
+  const aboutNote = document.getElementById('aboutStageNote');
+  if (aboutNote) {
+    const preOne = !isDev && /^0\./.test(version)
+      ? 'Pre-1.0: core workflows are usable, but data formats can still change between minor versions.'
+      : '';
+    aboutNote.textContent = isDev
+      ? 'Development build — update checks run against GitHub releases.'
+      : (stageNote(stage) || preOne);
+    aboutNote.hidden = !aboutNote.textContent;
+  }
+
+  const updateCurrent = document.getElementById('updateCurrent');
+  if (updateCurrent) updateCurrent.textContent = isDev ? 'Osmograph dev' : `Osmograph ${versionText}`;
+  const updateStage = document.getElementById('updateStage');
+  if (updateStage) {
+    updateStage.textContent = label;
+    updateStage.hidden = isDev || stage === 'release';
+  }
+}
+
+function setUpdateChannelRadio(channel: UpdateChannel) {
+  const radio = document.querySelector(`input[name="updChan"][value="${channel}"]`) as HTMLInputElement | null;
+  if (radio) radio.checked = true;
+  const hint = document.getElementById('updateChannelHint');
+  if (hint) {
+    hint.textContent = channel === 'beta'
+      ? 'Beta includes prereleases such as 0.2.0-beta.1. They change more often and may still break.'
+      : 'Stable only shows published releases without a prerelease tag.';
+  }
+}
+
+function selectedUpdateChannel(): UpdateChannel | null {
+  const checked = document.querySelector('input[name="updChan"]:checked') as HTMLInputElement | null;
+  return checked?.value === 'beta' ? 'beta' : checked?.value === 'stable' ? 'stable' : null;
+}
+
+function selectedUpdatePolicy(): UpdatePolicy {
+  const checked = document.querySelector('input[name="updPol"]:checked') as HTMLInputElement | null;
+  const v = checked?.value;
+  return v === 'manual' || v === 'never' ? v : 'auto';
+}
+
+function setNavBadge(show: boolean) {
+  const badge = document.getElementById('updatesNavBadge');
+  if (badge) badge.hidden = !show;
+}
+
+function makeButton(label: string, onClick: () => void, cls?: string): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = label;
+  if (cls) b.className = cls;
+  b.addEventListener('click', onClick);
+  return b;
+}
+
+function renderReleaseCard(res: UpdateCheckResult, skipped: boolean) {
+  const host = document.getElementById('updateNotes');
+  if (!host) return;
+  host.replaceChildren();
+  const latest = res.latest;
+  if (!latest || !res.available || dismissedVersion === latest.version) {
+    host.style.display = 'none';
+    return;
+  }
+  host.style.display = 'block';
+
+  const head = document.createElement('div');
+  head.className = 'update-release-head';
+  const title = document.createElement('div');
+  title.className = 'update-release-title';
+  title.textContent = latest.name || `Osmograph ${latest.version}`;
+  const meta = document.createElement('div');
+  meta.className = 'update-release-meta';
+  meta.textContent = [
+    `v${latest.version}`,
+    latest.prerelease ? 'beta' : 'stable',
+    releaseDate(latest.published_at),
+  ].filter(Boolean).join(' · ');
+  head.append(title, meta);
+  host.append(head);
+
+  if (skipped) {
+    const p = document.createElement('p');
+    p.className = 'update-notice';
+    p.textContent = 'This version is skipped on this device. It will stay visible here, but it will not prompt you again.';
+    host.append(p);
+  }
+
+  const sections = latest.sections || [];
+  if (sections.length === 0) {
+    const p = document.createElement('p');
+    p.className = 'update-notice';
+    p.textContent = 'This release has no notes.';
+    host.append(p);
+  } else {
+    for (const section of sections) {
+      const wrap = document.createElement('section');
+      wrap.className = 'update-section';
+      const h = document.createElement('h4');
+      h.textContent = section.title;
+      const body = document.createElement('div');
+      body.className = 'update-section-body';
+      body.textContent = section.body;
+      wrap.append(h, body);
+      host.append(wrap);
+    }
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'update-actions';
+  if (latest.recommended_url) {
+    const recommended = latest.assets.find((a) => a.recommended);
+    const label = recommended
+      ? `Download ${assetKindLabel(recommended.kind)}${recommended.size ? ` (${formatBytes(recommended.size)})` : ''}`
+      : latest.recommended_name && latest.recommended_name !== 'release page'
+        ? `Download ${latest.recommended_name}`
+        : 'Open release page';
+    actions.append(makeButton(label, () => openUpdateUrl(latest.recommended_url)));
+  }
+  if (latest.html_url && latest.html_url !== latest.recommended_url) {
+    actions.append(makeButton('Release notes on GitHub', () => openUpdateUrl(latest.html_url)));
+  }
+  if (skipped) {
+    actions.append(makeButton('Unskip this version', () => {
+      writeSkippedVersion('');
+      if (lastResult) applyUpdateResult(lastResult);
+    }));
+  } else {
+    actions.append(makeButton('Skip this version', () => {
+      writeSkippedVersion(latest.version);
+      writeNotifiedVersion(latest.version);
+      if (lastResult) applyUpdateResult(lastResult);
+    }));
+    actions.append(makeButton('Remind me later', () => {
+      dismissedVersion = latest.version;
+      if (lastResult) renderReleaseCard(lastResult, false);
+      setNavBadge(false);
+    }));
+  }
+  host.append(actions);
+
+  if (latest.assets.length > 0) {
+    const details = document.createElement('details');
+    details.className = 'update-assets';
+    const summary = document.createElement('summary');
+    summary.textContent = `All downloads (${latest.assets.length})`;
+    const list = document.createElement('div');
+    list.className = 'update-asset-list';
+    for (const asset of latest.assets) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'update-asset';
+      const name = document.createElement('span');
+      name.textContent = `${asset.recommended ? '→ ' : ''}${asset.name}`;
+      const size = document.createElement('small');
+      size.textContent = formatBytes(asset.size);
+      row.append(name, size);
+      row.addEventListener('click', () => openUpdateUrl(asset.url));
+      list.append(row);
+    }
+    details.append(summary, list);
+    host.append(details);
+  }
+}
+
+function applyUpdateResult(res: UpdateCheckResult) {
+  lastResult = res;
+  currentVersion = res.current_version || currentVersion;
+  syncUpdateVersionChrome(res.current_version || currentVersion, res.stage || stageOf(res.current_version || currentVersion));
+  if (!readUpdateChannel() && (res.channel === 'stable' || res.channel === 'beta')) {
+    setUpdateChannelRadio(res.channel);
+  }
+
+  const latest = res.latest;
+  const latestVersion = latest ? normalizeVersion(latest.version) : '';
+  const skipped = !!latestVersion && readSkippedVersion() === latestVersion;
+  const notified = !!latestVersion && readNotifiedVersion() === latestVersion;
+
+  if (res.error) {
+    setUpdateStatus(`Couldn’t check: ${res.error}`, 'update-dim');
+  } else if (res.available && latest && skipped) {
+    setUpdateStatus(`v${latest.version} is available · skipped on this device`, 'update-dim');
+  } else if (res.available && latest) {
+    setUpdateStatus(`Update available: v${latest.version}`, 'update-avail');
+  } else if (latest && res.notice) {
+    setUpdateStatus(`No newer release · latest is v${latest.version}`, 'update-dim');
+  } else if (latest) {
+    setUpdateStatus(`Up to date · v${latest.version} is the latest ${res.channel} release`, 'update-ok');
+  } else {
+    setUpdateStatus(res.notice || 'Not checked yet.', 'update-dim');
+  }
+
+  const last = document.getElementById('updateLastChecked');
+  if (last) {
+    if (res.last_checked) {
+      last.textContent = `Last checked ${relativeWhen(res.last_checked)}.`;
+    } else if (res.checked) {
+      last.textContent = 'Checked just now — no successful check yet.';
+    } else {
+      last.textContent = 'Not checked yet.';
+    }
+  }
+
+  if (latest && res.notice && !res.error) {
+    const existing = document.getElementById('updateNoticeLine');
+    const notice = existing || document.createElement('p');
+    notice.id = 'updateNoticeLine';
+    notice.className = 'update-notice';
+    notice.textContent = res.notice;
+    document.getElementById('updateLastChecked')?.after(notice);
+  } else {
+    document.getElementById('updateNoticeLine')?.remove();
+  }
+
+  renderReleaseCard(res, skipped);
+  setNavBadge(!!res.available && !skipped && latestVersion !== seenUpdateVersion);
+
+  if (res.available && latest && !skipped && !notified) {
+    writeNotifiedVersion(latest.version);
+    showToast(`Osmograph ${latest.version} is available — see Settings › Updates for what changed.`, 6500);
+  }
+}
+
+async function runUpdateCheck(force: boolean, quiet = false): Promise<void> {
+  if (updateBusy) return;
+  if (force) dismissedVersion = null;
+  updateBusy = true;
+  const btn = document.getElementById('updateCheckBtn') as HTMLButtonElement | null;
+  if (btn) btn.disabled = true;
+  if (!quiet) setUpdateStatus('Checking…', '', true);
+
+  try {
+    const policy = selectedUpdatePolicy();
+    const channel = selectedUpdateChannel();
+    const res = await invoke<UpdateCheckResult>('check_for_updates', {
+      policy,
+      channel,
+      force,
+    });
+    applyUpdateResult(res);
+  } catch (e) {
+    setUpdateStatus(`Couldn’t check: ${e}`, 'update-dim');
+  } finally {
+    updateBusy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function initVersionChrome(): Promise<void> {
+  try {
+    currentVersion = await getVersion();
+  } catch {
+    currentVersion = 'dev';
+  }
+  const stage = stageOf(currentVersion);
+  syncUpdateVersionChrome(currentVersion, stage);
+
+  // Put the stage in the window title too, so a beta build says so at a glance.
+  if (currentVersion !== 'dev' && stage !== 'release') {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      await getCurrentWindow().setTitle(`Osmograph ${stageLabel(stage)} — the software for smell`);
+    } catch { /* title is cosmetic; never block startup */ }
+  }
+
+  const stored = readUpdateChannel();
+  const derived: UpdateChannel = stage === 'beta' || stage === 'alpha' || stage === 'rc' ? 'beta' : 'stable';
+  setUpdateChannelRadio(stored || derived);
+}
+
+// Restore the persisted policy before the first auto check reads it.
+(function initUpdatePolicy() {
+  const saved = readUpdatePolicy();
+  const radio = document.querySelector(`input[name="updPol"][value="${saved}"]`) as HTMLInputElement | null;
+  if (radio) radio.checked = true;
+})();
+
+// Opening the panel acknowledges the badge, but never hides the update itself.
+document.querySelector('.sys-nav-item[data-sys="updates"]')?.addEventListener('click', () => {
+  if (lastResult?.latest && lastResult.available) seenUpdateVersion = normalizeVersion(lastResult.latest.version);
+  setNavBadge(false);
+});
+
+document.getElementById('updatePolicy')!.addEventListener('change', (e) => {
+  const v = (e.target as HTMLInputElement).value;
+  const policy: UpdatePolicy = v === 'manual' || v === 'never' ? v : 'auto';
+  writeUpdatePolicy(policy);
+  if (policy === 'auto') void runUpdateCheck(false);
+  else if (policy === 'never') setUpdateStatus('Automatic checks are off.', 'update-dim');
+  else setUpdateStatus('Manual checks only.', 'update-dim');
+});
+
+document.getElementById('updateChannel')!.addEventListener('change', (e) => {
+  const v = (e.target as HTMLInputElement).value;
+  const channel: UpdateChannel = v === 'beta' ? 'beta' : 'stable';
+  writeUpdateChannel(channel);
+  setUpdateChannelRadio(channel);
+  void runUpdateCheck(true);
+});
+
+document.getElementById('updateCheckBtn')!.addEventListener('click', () => runUpdateCheck(true));
+
+// Check on launch when automatic, then hourly while the window stays open —
+// the backend's 24h gate and 15-minute failure back-off do the real pacing.
+(async () => {
+  await initVersionChrome();
+  if (readUpdatePolicy() !== 'auto') {
+    setUpdateStatus(readUpdatePolicy() === 'manual' ? 'Manual checks only.' : 'Automatic checks are off.', 'update-dim');
+    return;
+  }
+  await runUpdateCheck(false, true);
+})();
+
+setInterval(() => {
+  if (readUpdatePolicy() === 'auto' && !document.hidden) void runUpdateCheck(false, true);
+}, 30 * 60 * 1000);
+
+window.addEventListener('focus', () => {
+  if (readUpdatePolicy() === 'auto' && !document.hidden) void runUpdateCheck(false, true);
+});
+
 
 // === Feedback: a prefilled issue the user reviews before anything leaves ===
 // Memory only. The last few failures are quoted back to the person reporting
@@ -15839,32 +16287,3 @@ async function reportVialIssue(pack: Domain.DomainPack): Promise<void> {
     showToast(`Could not open the browser: ${e}`);
   }
 }
-
-// Restore persisted policy onto the radios.
-(function initUpdatePolicy() {
-  const saved = loadUpdatePolicy();
-  const radio = document.querySelector(`input[name="updPol"][value="${saved}"]`) as HTMLInputElement | null;
-  if (radio) radio.checked = true;
-})();
-
-document.getElementById('updatePolicy')!.addEventListener('change', (e) => {
-  const v = (e.target as HTMLInputElement).value;
-  saveUpdatePolicy(v);
-});
-
-document.getElementById('updateCheckBtn')!.addEventListener('click', () => runUpdateCheck(true));
-
-// Silent on-launch check, gated by the persisted policy and last-check time.
-// The backend enforces the 24h cooldown, so this fires on every launch and the
-// decision happens server-side — one code path for both auto and manual.
-(async () => {
-  const policy = loadUpdatePolicy();
-  if (policy === 'never' || policy === 'manual') return;
-  try {
-    const res = await invoke<UpdateCheckResult>('check_for_updates', { policy, force: false });
-    if (res.available) {
-      renderUpdateStatus(`Update available: v${res.latest_version}`, 'update-avail');
-      renderUpdateNotes(res.release_notes, res.download_url);
-    }
-  } catch { /* silent: launch checks must never block or alarm */ }
-})();

@@ -76,9 +76,13 @@ npm run validate:vial -- examples/example-coffee-roast.vial.json
 ```
 
 Stage 1 includes direct HTTPS install of a manifest and its optional sandboxed `ui.html`/`home.html`. It does
-**not** include a hosted marketplace, a signed registry feed, revocation, automatic updates, signed
-code bundles, per-Vial permissions, or cross-rig calibration. Those are separate design problems;
-the authoring and submission limits are documented in [`AUTHORING.md`](AUTHORING.md).
+**not** include a hosted marketplace, a signed registry feed, revocation, signed code bundles, per-Vial
+permissions, or cross-rig calibration. Those are separate design problems; the authoring and submission
+limits are documented in [`AUTHORING.md`](AUTHORING.md).
+
+App updates are metadata checks against GitHub Releases with automatic, manual, and never policies,
+Stable/Beta channels, and release notes in the Updates panel. The app opens the chosen installer in the
+browser; it does not silently install or self-modify. See [`RELEASING.md`](RELEASING.md).
 
 ## Layout
 
@@ -99,6 +103,9 @@ npm run dev        # Vite dev server
 npm run build      # production frontend bundle
 cargo test -p osmograph-desktop --lib   # backend unit tests
 ```
+
+Cutting a release, channels, and release notes: see [`RELEASING.md`](RELEASING.md). Use
+`npm run set-version -- <version>` so the tag, Cargo, and Tauri versions cannot drift.
 
 ## Production / Windows build
 

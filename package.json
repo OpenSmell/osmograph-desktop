@@ -1,6 +1,6 @@
 {
   "name": "osmograph-desktop",
-  "version": "0.1.2-beta.1",
+  "version": "0.1.2-beta.2",
   "description": "OpenSmell Desktop — Real-time MOX sensor monitoring with adaptive learning",
   "private": true,
   "type": "module",
@@ -10,8 +10,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "validate:vial": "node scripts/validate-vial.mjs",
+    "set-version": "node scripts/set-version.mjs",
+    "check:versions": "node scripts/set-version.mjs --check",
     "test:vial-host": "node scripts/test-vial-host.mjs",
-    "test:vial-runtime": "node --experimental-strip-types scripts/test-vial-runtime.mjs"
+    "test:vial-runtime": "node --experimental-strip-types scripts/test-vial-runtime.mjs",
+    "test:updates-ui": "node scripts/test-updates-ui.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

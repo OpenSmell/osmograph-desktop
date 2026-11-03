@@ -74,6 +74,11 @@ jobs:
         working-directory: osmograph-desktop
         run: npm ci
 
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/v')
+        working-directory: osmograph-desktop
+        run: npm run check:versions -- "${{ github.ref_name }}"
+
       - name: Build Tauri app
         working-directory: osmograph-desktop
         run: |
@@ -128,7 +133,12 @@ jobs:
             alias_one "$BUNDLE_DIR/rpm/*.rpm" "Osmograph-linux-x86_64.rpm"
           elif [ "${{ matrix.os }}" = "macos" ]; then
             cp "$BUNDLE_DIR"/dmg/*.dmg "$ART/" 2>/dev/null || true
-            alias_one "$BUNDLE_DIR/dmg/*.dmg" "Osmograph-macos-aarch64.dmg"
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              arm64) ARCH=aarch64 ;;
+              x86_64) ARCH=x86_64 ;;
+            esac
+            alias_one "$BUNDLE_DIR/dmg/*.dmg" "Osmograph-macos-${ARCH}.dmg"
           fi
 
           (

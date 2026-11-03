@@ -72,7 +72,7 @@ export const MOCK = String.raw`
         listeners.get(a.event)?.delete(a.handler);
         return ok(null);
       }
-      case 'plugin:app|version': return ok('0.1.1');
+      case 'plugin:app|version': return ok('0.1.2-beta.2');
       case 'plugin:os|platform': return ok('linux');
       case 'get_data_dir': return ok('/tmp/opencode/ui/data');
       case 'get_recordings_dir': return ok('/tmp/opencode/ui/data/recordings');
@@ -101,7 +101,37 @@ export const MOCK = String.raw`
       case 'get_phase_recorder_state': return ok({ active: false, phase: 'idle', phase_name: '', elapsed_sec: 0, remaining_sec: 0, sample_count: 0, phases: [] });
       case 'load_live_classifier': return ok(null);
       case 'list_classifiers': return ok([]);
-      case 'check_for_updates': return ok({ available: false });
+      case 'check_for_updates': {
+        (window.__MOCK_UPDATE_CALLS = window.__MOCK_UPDATE_CALLS || []).push({ policy: a.policy, channel: a.channel, force: a.force });
+        const scenario = window.__MOCK_UPDATE_SCENARIO || 'current';
+        const channel = a.channel === 'stable' ? 'stable' : 'beta';
+        const nowSec = Math.floor(Date.now() / 1000);
+        const assets = [
+          { name: 'Osmograph-linux-x86_64.AppImage', url: 'https://example.test/Osmograph-linux-x86_64.AppImage', size: 92_000_000, kind: 'appimage', recommended: true },
+          { name: 'Osmograph-linux-amd64.deb', url: 'https://example.test/Osmograph-linux-amd64.deb', size: 12_000_000, kind: 'deb', recommended: false },
+        ];
+        const base = { current_version: '0.1.2-beta.2', stage: 'beta', channel, policy: a.policy || 'auto', checked: true, last_checked: nowSec, latest: null, notice: '', error: null };
+        const current = {
+          version: '0.1.2-beta.2', name: 'Osmograph 0.1.2-beta.2', notes: '', sections: [],
+          html_url: 'https://example.test/v0.1.2-beta.2', published_at: '2026-02-01T10:00:00Z', prerelease: true,
+          recommended_url: assets[0].url, recommended_name: assets[0].name, assets,
+        };
+        const latest = {
+          version: '0.1.3-beta.1', name: 'Osmograph 0.1.3-beta.1',
+          notes: "## What's new\n- Faster live charts\n\n## Bug fixes\n- Fixed empty export",
+          sections: [
+            { kind: 'features', title: "What's new", body: '• Faster live charts' },
+            { kind: 'fixes', title: 'Bug fixes', body: '• Fixed empty export' },
+          ],
+          html_url: 'https://example.test/v0.1.3-beta.1', published_at: '2026-03-01T10:00:00Z', prerelease: true,
+          recommended_url: assets[0].url, recommended_name: assets[0].name, assets,
+        };
+        // A failed check keeps the release the user was already shown.
+        if (scenario === 'error') return ok({ ...base, checked: false, last_checked: null, available: true, latest, error: 'Could not reach GitHub (offline).' });
+        if (scenario === 'none') return ok({ ...base, available: false, notice: channel === 'stable' ? 'No stable release has been published yet. Switch to the Beta channel for early builds.' : 'No releases have been published yet.' });
+        if (scenario === 'current') return ok({ ...base, available: false, latest: current });
+        return ok({ ...base, available: true, latest });
+      }
       case 'fleet_scan': return ok({ devices: [] });
       case 'hub_list': return ok([]);
       case 'hf_has_token': return ok(false);

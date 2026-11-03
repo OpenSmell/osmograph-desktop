@@ -1,5 +1,21 @@
 # Osmograph Changelog
 
+## v0.1.2-beta.2 — update delivery
+- Updates check automatically by default: once on launch, then at most once a day while the app stays
+  open. Manual and Never remain available, and the 15-minute failure back-off stops offline launches
+  from hammering GitHub.
+- Stable/Beta channels. Beta builds follow prereleases, stable builds ignore them, and either can be
+  changed in Settings → Updates. This also fixes beta-only releases never appearing: the checker now
+  reads the release list instead of `releases/latest`, which excludes prereleases.
+- The Updates panel shows the release name, date, version, what's new, bug fixes, and the installer for
+  this platform. Auto-generated GitHub notes are grouped into "What's new" and "Bug fixes".
+- Skip this version / Remind me later, a NEW badge on the Updates tab, honest offline/rate-limit
+  messages, and cached release details that survive a failed check.
+- The version and its stage (Alpha/Beta/Release candidate/Release) are shown in the footer and About,
+  derived from the tag. `npm run set-version -- <version>` keeps every version field in sync, and CI
+  refuses a tag that disagrees with the binary.
+- Release downloads still open in the browser; no silent self-install is claimed.
+
 ## v0.1.2-beta.1 — public beta
 - First public beta for hands-on feedback; this is a pre-release, not the stable channel.
 - Selecting a Vial in Fleet now opens its full Home workspace, with host-owned rig and data status.

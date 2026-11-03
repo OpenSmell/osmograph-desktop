@@ -3161,9 +3161,33 @@
       background: var(--bg-2);
     }
     /* === Updates === */
-    .update-policy { display: flex; flex-direction: column; gap: 4px; }
+    .update-version-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap;
+    }
+    .update-version { display: flex; align-items: center; gap: 7px; min-width: 0; }
+    .update-current {
+      font-family: var(--font-mono); font-size: 12px; color: var(--text-0);
+      letter-spacing: 0.02em;
+    }
+    .stage-badge {
+      display: inline-block; padding: 1px 5px; border: 1px solid var(--border-strong);
+      font-family: var(--font-mono); font-size: 9px; line-height: 1.4;
+      text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-1);
+      border-radius: 0; vertical-align: middle;
+    }
+    .update-channel { display: flex; align-items: center; gap: 12px; }
+    .update-channel label {
+      display: flex; align-items: center; gap: 5px; font-size: 11px;
+      color: var(--text-2); cursor: pointer; white-space: nowrap;
+    }
+    .update-channel input[type="radio"] {
+      flex: 0 0 auto; max-width: none; width: auto;
+      accent-color: var(--green); cursor: pointer; margin: 0;
+    }
+    .update-policy { display: flex; flex-direction: column; gap: 5px; margin-top: 10px; }
     .update-policy label {
-      display: flex; align-items: center; gap: 8px;
+      display: flex; align-items: baseline; gap: 8px;
       font-size: 11px; color: var(--text-2); cursor: pointer;
       min-width: 0;
     }
@@ -3171,10 +3195,11 @@
       flex: 0 0 auto; max-width: none; width: auto;
       accent-color: var(--green); cursor: pointer; margin: 0;
     }
+    .update-policy-note { color: var(--text-3); font-size: 10px; }
     .update-spinner {
       width: 12px; height: 12px; flex: 0 0 auto;
       border: 2px solid var(--border-strong);
-      border-top-color: var(--green);
+      border-top-color: var(--text-0);
       border-radius: 50%;
       animation: updateSpin 0.8s linear infinite;
     }
@@ -3182,12 +3207,58 @@
     @media (prefers-reduced-motion: reduce) {
       .update-spinner { animation: none; opacity: 0.6; }
     }
-    .update-ok { color: var(--green); }
+    .update-ok { color: var(--text-1); }
     .update-avail { color: var(--text-0); font-weight: 600; }
+    .update-dim { color: var(--text-3); }
+    .update-last { margin-top: 4px; font-size: 10px; color: var(--text-3); }
     .update-notes {
-      margin-top: 6px; padding: 8px; background: var(--bg-1);
+      margin-top: 10px; padding: 10px; background: var(--bg-1);
       border: 1px solid var(--border); font-size: 10px; color: var(--text-2);
-      white-space: pre-wrap; max-height: 160px; overflow: auto;
+      max-height: 420px; overflow: auto;
+    }
+    .update-release-head {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 10px; flex-wrap: wrap; border-bottom: 1px solid var(--border);
+      padding-bottom: 6px; margin-bottom: 8px;
+    }
+    .update-release-title {
+      font-size: 12px; font-weight: 600; color: var(--text-0); min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .update-release-meta {
+      font-family: var(--font-mono); font-size: 9px; color: var(--text-3);
+      white-space: nowrap;
+    }
+    .update-section { margin: 10px 0 0 0; }
+    .update-section:first-of-type { margin-top: 0; }
+    .update-section h4 {
+      margin: 0 0 4px 0; font-size: 10px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.09em; color: var(--text-1);
+    }
+    .update-section-body {
+      white-space: pre-wrap; line-height: 1.55; color: var(--text-2);
+      overflow-wrap: anywhere;
+    }
+    .update-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .update-assets { margin-top: 8px; }
+    .update-assets summary {
+      cursor: pointer; font-size: 10px; color: var(--text-3);
+      user-select: none;
+    }
+    .update-asset-list { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+    .update-asset {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; border: 1px solid var(--border); padding: 4px 6px;
+      background: transparent; color: var(--text-2); cursor: pointer;
+      font-family: var(--font-mono); font-size: 9px; text-align: left;
+    }
+    .update-asset:hover { border-color: var(--border-strong); color: var(--text-0); }
+    .update-asset small { color: var(--text-3); font-size: 9px; white-space: nowrap; }
+    .update-notice { font-size: 10px; color: var(--text-3); margin-top: 6px; }
+    .nav-badge {
+      margin-left: 7px; padding: 0 4px; border: 1px solid var(--border-strong);
+      font-family: var(--font-mono); font-size: 8px; letter-spacing: 0.1em;
+      color: var(--text-1); vertical-align: middle;
     }
     .sys-panel {
       display: none;
@@ -4836,7 +4907,7 @@
             <div class="sys-nav-item" data-sys="firmware">Firmware</div>
             <div class="sys-nav-item" data-sys="burnin">Burn-In</div>
             <div class="sys-nav-item" data-sys="data">Data Storage</div>
-            <div class="sys-nav-item" data-sys="updates">Updates</div>
+            <div class="sys-nav-item" data-sys="updates">Updates<span class="nav-badge" id="updatesNavBadge" hidden>NEW</span></div>
             <div class="sys-nav-item" data-sys="about">About</div>
           </div>
 
@@ -5044,7 +5115,7 @@
                 </select>
               </div>
               <div class="oled-preview" id="oledPreview">
-OSMOGRAPH v0.1.1
+OSMOGRAPH BETA
 ─────────────────
 CH1: MQ-135  1523 Ω
 CH2: MQ-3    1187 Ω
@@ -5337,17 +5408,30 @@ Confidence: 97.3%</div>
           <div class="sys-panel" id="sys-updates">
             <h2>Updates</h2>
             <div class="card">
-              <p class="hint">Checking fetches a small release listing from GitHub — a few hundred bytes, and nothing is downloaded until you choose to update.</p>
-              <div class="update-policy" id="updatePolicy">
-                <label><input type="radio" name="updPol" value="never" /> Never check</label>
-                <label><input type="radio" name="updPol" value="manual" /> Manual only</label>
-                <label><input type="radio" name="updPol" value="on-launch" /> On launch</label>
-                <label><input type="radio" name="updPol" value="daily" checked /> Daily</label>
+              <div class="update-version-row">
+                <div class="update-version">
+                  <span class="update-current" id="updateCurrent">Osmograph</span>
+                  <span class="stage-badge" id="updateStage" hidden></span>
+                </div>
+                <div class="update-channel" id="updateChannel">
+                  <label><input type="radio" name="updChan" value="stable" /> Stable</label>
+                  <label><input type="radio" name="updChan" value="beta" /> Beta</label>
+                </div>
               </div>
+              <p class="hint" id="updateChannelHint" style="margin-top:4px">Beta builds include prereleases and change more often.</p>
+
+              <div class="update-policy" id="updatePolicy">
+                <label><input type="radio" name="updPol" value="auto" checked /> Automatic <span class="update-policy-note">check on launch, then at most once a day</span></label>
+                <label><input type="radio" name="updPol" value="manual" /> Manual <span class="update-policy-note">only when you press Check now</span></label>
+                <label><input type="radio" name="updPol" value="never" /> Never <span class="update-policy-note">no update requests</span></label>
+              </div>
+
               <div class="form-row" style="margin-top:10px">
                 <button id="updateCheckBtn">Check now</button>
-                <span id="updateStatus" style="font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px"></span>
+                <span id="updateStatus" style="font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px;flex:1;min-width:0"></span>
               </div>
+              <div id="updateLastChecked" class="update-last"></div>
+              <p class="hint" style="margin-top:6px">Checking fetches the GitHub release listing — tens of KB at most, and a repeat check is a few hundred bytes. Nothing is downloaded until you choose a build.</p>
               <div id="updateNotes" class="update-notes" style="display:none"></div>
             </div>
           </div>
@@ -5355,7 +5439,14 @@ Confidence: 97.3%</div>
           <div class="sys-panel" id="sys-about">
             <h2>About Osmograph</h2>
             <div class="card">
-              <p class="hint">Osmograph is the software for smell. Connect your gas-sensor rig — or open a recording — and monitor, record and study what it senses. Everything stays on your device.</p>
+              <div class="update-version-row">
+                <div class="update-version">
+                  <span class="update-current" id="aboutVersion">Osmograph</span>
+                  <span class="stage-badge" id="aboutStage" hidden></span>
+                </div>
+              </div>
+              <p class="hint" style="margin-top:6px">Osmograph is the software for smell. Connect your gas-sensor rig — or open a recording — and monitor, record and study what it senses. Everything stays on your device.</p>
+              <p class="hint update-dim" id="aboutStageNote" style="margin-top:6px"></p>
             </div>
             <div class="card">
               <h3>Report a problem</h3>
@@ -5413,7 +5504,7 @@ Confidence: 97.3%</div>
       <div class="sep"></div>
       <div class="footer-stat">Rec: <strong id="fRec">—</strong></div>
       <div style="flex:1"></div>
-      <div class="footer-stat" style="color:var(--text-3)">OpenSmell v0.1.1</div>
+      <div class="footer-stat" style="color:var(--text-3)">Osmograph <span id="footerVersion">dev</span> <span class="stage-badge" id="footerStage" hidden></span></div>
     </footer>
   </div>
 

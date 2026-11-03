@@ -55,6 +55,10 @@ jobs:
         working-directory: osmograph-desktop
         run: npm ci
 
+      - name: Check version fields agree
+        working-directory: osmograph-desktop
+        run: npm run check:versions
+
       - name: Build frontend
         working-directory: osmograph-desktop
         run: npm run build

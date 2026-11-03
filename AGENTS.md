@@ -34,4 +34,6 @@ and include `~/.local/share/opensmell-schemas` on `XDG_DATA_DIRS`.
 - `src/datasets.ts` — public dataset catalog + licence metadata.
 - `src-tauri/src/data/` — import/export, `.osmell` bundles, hub download.
 - `src-tauri/src/plugins.rs` — plugin discovery.
-- `src-tauri/src/updates.rs` — self-update and `open_release_page` (generic URL opener).
+- `src-tauri/src/updates.rs` — release checks, policies, channels, and `open_release_page` (generic URL opener).
+- `scripts/set-version.mjs` — sets/checks `package.json`, lockfiles, Cargo, and Tauri versions together.
+- `RELEASING.md` — tag → build → channel → release-notes process.
