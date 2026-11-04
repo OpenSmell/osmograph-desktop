@@ -144,6 +144,38 @@ check('selecting Stable forces a stable check', stable.channel === 'stable', Str
 check('no-stable-release state is explained', /No stable release/.test(stable.status + ' ' + stable.notice), stable.status || stable.notice);
 check('channel hint explains the difference', /prerelease/i.test(stable.hint));
 
+// Signed in-place install: only offered when the release publishes a manifest
+// and the running package type can replace itself.
+await page.evaluate(() => { window.__MOCK_UPDATE_SCENARIO = 'available'; });
+await page.click('#updateCheckBtn');
+await page.waitForFunction(
+  () => [...document.querySelectorAll('#updateNotes button')].some((b) => b.textContent === 'Install update'),
+  undefined,
+  { timeout: 8000 },
+).catch(() => {});
+const installVisible = await page.evaluate(
+  () => [...document.querySelectorAll('#updateNotes button')].some((b) => b.textContent === 'Install update'),
+);
+check('release card offers signed in-place install', installVisible);
+
+await page.evaluate(() => {
+  [...document.querySelectorAll('#updateNotes button')]
+    .find((b) => b.textContent === 'Install update')
+    ?.click();
+});
+await page.waitForFunction(() => window.__MOCK_RESTARTED === true, undefined, { timeout: 6000 }).catch(() => {});
+const installed = await page.evaluate(() => ({
+  status: document.getElementById('updateStatus')?.textContent || '',
+  urls: window.__MOCK_INSTALLS || [],
+  restarted: window.__MOCK_RESTARTED === true,
+}));
+check(
+  'in-place install uses the release manifest',
+  installed.urls.some((u) => u.endsWith('/latest.json')),
+  installed.urls.join(', '),
+);
+check('in-place install reports success and restarts', installed.restarted && /Installed/i.test(installed.status), installed.status);
+
 // The panel still renders in a real browser without layout escapes.
 await page.screenshot({ path: `${OUT}.png`, fullPage: false });
 

@@ -10,6 +10,8 @@ A Tauri v2 desktop app: Rust core in `src-tauri/`, TypeScript UI in `src/` + `in
 - **Rust tests:** `cargo test` (inside `src-tauri/`). Run them with a **separate
   `CARGO_TARGET_DIR`** from a live `tauri dev` (or stop dev first) — sharing the target
   dir relinks the running binary and kills the app.
+- **Update manifest tests:** `npm run test:latest-json`.
+- **Update UI probe:** start `npm run dev -- --port 5173`, then `npm run test:updates-ui`.
 - **Release build:** `npm run tauri -- build`.
 
 ## Conventions
@@ -34,6 +36,9 @@ and include `~/.local/share/opensmell-schemas` on `XDG_DATA_DIRS`.
 - `src/datasets.ts` — public dataset catalog + licence metadata.
 - `src-tauri/src/data/` — import/export, `.osmell` bundles, hub download.
 - `src-tauri/src/plugins.rs` — plugin discovery.
-- `src-tauri/src/updates.rs` — release checks, policies, channels, and `open_release_page` (generic URL opener).
+- `src-tauri/src/updates.rs` — release checks, policies, channels, signed in-place install, and restart.
 - `scripts/set-version.mjs` — sets/checks `package.json`, lockfiles, Cargo, and Tauri versions together.
+- `scripts/setup-updater-keys.mjs` — generates the update signing keypair and patches the public key.
+- `scripts/make-latest-json.mjs` — builds the signed `latest.json` updater manifest from release assets.
+- `docs/UPDATES.md` — update architecture, trust model, platform matrix, signing and release operations.
 - `RELEASING.md` — tag → build → channel → release-notes process.

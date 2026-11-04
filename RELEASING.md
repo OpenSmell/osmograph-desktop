@@ -26,6 +26,34 @@ A build whose version contains a prerelease suffix starts on the **Beta** channe
 A plain `x.y.z` build starts on **Stable**. Either can be changed in
 **Settings → Updates**.
 
+## First-time signing setup
+
+Silent in-place updates need a minisign keypair. The public half is compiled
+into the app; the private half signs release artifacts in CI and never enters
+the repository.
+
+```bash
+npm run setup:updater-keys
+```
+
+The script writes the keypair under `~/.config/osmograph/` (mode 600) and puts
+the public key into `src-tauri/tauri.conf.json`. Add both repository secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — contents of `~/.config/osmograph/updater.key`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — contents of
+  `~/.config/osmograph/updater.key.password`
+
+Back both up. If they are lost, installed builds will not accept future
+updates. Do not rotate the key casually: a build trusts the key it was compiled
+with. Ship a bridge release signed with the old key before switching.
+
+The first updater-capable build must be downloaded manually once: the build it
+replaces does not have the public key yet. After that, signed updates install in
+place.
+
+The full architecture, manifest schema, and failure matrix are in
+[`docs/UPDATES.md`](docs/UPDATES.md).
+
 ## Cut a release
 
 1. Pick the next version. Example: `0.1.2-beta.2`.
@@ -43,6 +71,7 @@ A plain `x.y.z` build starts on **Stable**. Either can be changed in
    ```bash
    npx tsc --noEmit
    npm run build
+   npm run test:latest-json
    (cd src-tauri && cargo test)
    ```
 
@@ -55,13 +84,16 @@ A plain `x.y.z` build starts on **Stable**. Either can be changed in
    git push origin master --tags
    ```
 
-6. `.github/workflows/release.yml` builds Linux (deb + rpm), Windows (NSIS + MSI)
-   and macOS (dmg). A tag containing `-` is published as a **prerelease**; a plain
-   tag also becomes GitHub's `latest`. The workflow refuses to build if the tag
-   does not match the version files.
-7. After the workflow finishes, open **Settings → Updates** in an installed build
-   and press **Check now**. Beta builds should see the new prerelease; stable
-   builds see only plain releases.
+6. `.github/workflows/release.yml` builds Linux (deb + rpm, AppImage best
+   effort), Windows (NSIS + MSI) and macOS (dmg + `.app.tar.gz`), signs the
+   updater artifacts it builds, and publishes `latest.json`. A tag containing `-` is published as a
+   **prerelease**; a plain tag also becomes GitHub's `latest`. The workflow
+   refuses to build if the tag does not match the version files, or if a tagged
+   build has no signing key.
+7. After the workflow finishes, open **Settings → Updates** in an installed
+   build and press **Check now**. Beta builds should see the new prerelease;
+   stable builds see only plain releases. Press **Install update** to verify the
+   full download → signature verification → install → restart path.
 
 ## Release notes users actually see
 
@@ -112,15 +144,24 @@ runaway changelog cannot bloat the check payload.
 
 ## Downloads and installation
 
-The check downloads **no installer**. The panel lists the assets on the release and
-marks the best fit for the current OS/architecture; choosing one opens the GitHub
-download URL in the browser. `SHA256SUMS.txt` is published with every release but
-is not offered as an installer.
+The metadata check downloads **no installer**. The panel lists the assets on the
+release and marks the best fit for the current OS/architecture. If the release
+published a signed `latest.json`, the panel also offers **Install update**:
 
-In-place self-update is not implemented. Doing it properly requires a Tauri updater
-public key in `tauri.conf.json`, the matching private key in CI, a `latest.json`
-manifest per platform, and signed bundles. Until that exists, the app will not
-claim to install updates itself.
+- The app fetches the manifest and the platform bundle from GitHub.
+- The Tauri updater verifies the bundle's minisign signature against the public
+  key compiled into the app **before** installing.
+- Linux AppImages replace themselves without a password. `.deb`/`.rpm` installs
+  use the system package manager and may ask for the password. Windows runs the
+  NSIS/MSI installer quietly. macOS replaces the app in Applications.
+- The app restarts into the new version. On Windows the installer does the
+  restart.
+- A release without `latest.json`, a development/portable build, or a copy
+  running from a DMG gets the browser download only, with the reason shown.
+
+`SHA256SUMS.txt` is published with every release but is not offered as an
+installer. See [`docs/UPDATES.md`](docs/UPDATES.md) for the manifest schema,
+trust model, and signing-key operations.
 
 ## If updates do not appear
 
@@ -130,3 +171,13 @@ claim to install updates itself.
 4. Delete the update cache and press **Check now**.
 5. A 403 in the panel means GitHub's rate limit; the message includes the reset
    time. Wait, or use a different network.
+6. **No Install update button:** confirm the release has a `latest.json` asset
+   and signed artifacts. The build must not be a dev, portable, or DMG copy.
+7. **Signature verification failed:** the app's embedded public key and the CI
+   signing key do not match. Rebuild from the same key; do not rotate keys
+   without a bridge release.
+8. **Linux password prompt:** expected for `.deb`/`.rpm`. An AppImage does not
+   need one. A cancelled prompt leaves the install untouched.
+9. **`latest.json` missing from the release:** the publish job refused to
+   generate it because an artifact was unsigned or no updater artifacts were
+   found. Check the signing secrets and the build logs.

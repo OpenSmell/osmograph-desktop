@@ -2,6 +2,9 @@ node_modules/
 dist/
 target/
 *.log
+# Updater signing material must never enter git; keep it in ~/.config/osmograph.
+*.key
+*.key.password
 .DS_Store
 Thumbs.db
 .vscode/

@@ -3240,6 +3240,24 @@
       overflow-wrap: anywhere;
     }
     .update-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .update-install { border-color: var(--green); color: var(--text-0); font-weight: 600; }
+    .update-install:disabled { opacity: 0.55; cursor: not-allowed; }
+    .update-install-progress { margin-top: 9px; }
+    .update-progress-track {
+      height: 4px; border: 1px solid var(--border); background: var(--bg-0);
+      overflow: hidden; border-radius: 0;
+    }
+    .update-progress-fill {
+      height: 100%; width: 0; background: var(--green);
+      transition: width 0.2s linear;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .update-progress-fill { transition: none; }
+    }
+    .update-progress-label {
+      margin-top: 4px; font-family: var(--font-mono); font-size: 9px;
+      color: var(--text-3);
+    }
     .update-assets { margin-top: 8px; }
     .update-assets summary {
       cursor: pointer; font-size: 10px; color: var(--text-3);
@@ -5431,7 +5449,7 @@ Confidence: 97.3%</div>
                 <span id="updateStatus" style="font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px;flex:1;min-width:0"></span>
               </div>
               <div id="updateLastChecked" class="update-last"></div>
-              <p class="hint" style="margin-top:6px">Checking fetches the GitHub release listing — tens of KB at most, and a repeat check is a few hundred bytes. Nothing is downloaded until you choose a build.</p>
+              <p class="hint" style="margin-top:6px">Checking fetches the GitHub release listing — tens of KB at most, and a repeat check is a few hundred bytes. The metadata check downloads no installer. An in-place install downloads the signed update from GitHub, verifies it, installs it, and restarts; Linux packages may ask for your password.</p>
               <div id="updateNotes" class="update-notes" style="display:none"></div>
             </div>
           </div>

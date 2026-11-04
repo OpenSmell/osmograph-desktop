@@ -14,7 +14,16 @@
 - The version and its stage (Alpha/Beta/Release candidate/Release) are shown in the footer and About,
   derived from the tag. `npm run set-version -- <version>` keeps every version field in sync, and CI
   refuses a tag that disagrees with the binary.
-- Release downloads still open in the browser; no silent self-install is claimed.
+- Signed in-place updates. When a release publishes `latest.json`, **Install update** downloads the
+  platform bundle from GitHub, verifies its minisign signature against the public key compiled into the
+  app, installs it, and restarts. A failed install leaves the installed app untouched and offers the
+  browser download. Development/portable builds and releases without a signed manifest never show the
+  button.
+- Release CI now signs the updater artifacts it builds (`.sig`), publishes `latest.json`, and refuses
+  tagged builds without the signing key. `npm run setup:updater-keys` creates the keypair and patches the public key;
+  see `docs/UPDATES.md` for the architecture, platform matrix, and key operations.
+- This is the first build that trusts the update key. Earlier builds (including beta.1) must download
+  `0.1.2-beta.2` manually once; from this build onward, signed updates can install in place.
 
 ## v0.1.2-beta.1 — public beta
 - First public beta for hands-on feedback; this is a pre-release, not the stable channel.

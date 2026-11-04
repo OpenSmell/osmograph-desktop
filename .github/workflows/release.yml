@@ -79,17 +79,71 @@ jobs:
         working-directory: osmograph-desktop
         run: npm run check:versions -- "${{ github.ref_name }}"
 
-      - name: Build Tauri app
+      - name: Require updater signing on tagged releases
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
         working-directory: osmograph-desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Tagged releases must be signed so installed builds can verify updates."
+            echo "Run: npm run setup:updater-keys"
+            echo "Then add TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD as repository secrets."
+            exit 1
+          fi
+          node -e '
+            const c = require("./src-tauri/tauri.conf.json");
+            if (!c.plugins?.updater?.pubkey) {
+              console.error("::error::tauri.conf.json has no updater public key; run npm run setup:updater-keys.");
+              process.exit(1);
+            }
+          '
+
+      - name: Build Tauri app (Linux packages)
+        if: matrix.os == 'linux'
+        working-directory: osmograph-desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -o pipefail
-          if [ "${{ matrix.os }}" = "linux" ]; then
-            # deb + rpm build reliably; AppImage bundling needs a working
-            # linuxdeploy AppImage runtime and is treated as a follow-up.
-            npx tauri build --bundles deb rpm 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
-          else
-            npx tauri build 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
+          EXTRA=""
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            EXTRA="--config src-tauri/tauri.updater.conf.json"
           fi
+          npx tauri build --bundles deb rpm $EXTRA 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
+        shell: bash
+
+      - name: Build AppImage (best effort)
+        if: matrix.os == 'linux'
+        working-directory: osmograph-desktop
+        continue-on-error: true
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -o pipefail
+          EXTRA=""
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            EXTRA="--config src-tauri/tauri.updater.conf.json"
+          fi
+          npx tauri build --bundles appimage $EXTRA 2>&1 | tee "${{ github.workspace }}/build-appimage.log"
+        shell: bash
+
+      - name: Build Tauri app (Windows/macOS)
+        if: matrix.os != 'linux'
+        working-directory: osmograph-desktop
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -o pipefail
+          EXTRA=""
+          if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            EXTRA="--config src-tauri/tauri.updater.conf.json"
+          fi
+          npx tauri build $EXTRA 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
         shell: bash
 
       - name: Upload build log on failure
@@ -97,7 +151,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log-${{ matrix.os }}
-          path: build-${{ matrix.os }}.log
+          path: |
+            build-${{ matrix.os }}.log
+            build-appimage.log
           if-no-files-found: warn
 
       - name: Collect bundle assets
@@ -110,35 +166,44 @@ jobs:
           ART="$GITHUB_WORKSPACE/dist-artifacts"
           mkdir -p "$ART"
 
-          alias_one() {
-            local f
-            f=$(ls $1 2>/dev/null | head -n1 || true)
-            if [ -n "$f" ]; then
-              cp "$f" "$ART/$2"
+          pick() {
+            ls $1 2>/dev/null | head -n1 || true
+          }
+          # Keep the friendly alias and its updater signature together. The
+          # signature covers the bytes, not the filename, so pairing matters.
+          # Updater payloads are skipped when unsigned so a partial bundle from
+          # a failed step can never be advertised as installable.
+          copy_pair() {
+            local f="$1" dest="$2" require_sig="${3:-no}"
+            if [ -n "$f" ] && [ -f "$f" ]; then
+              if [ "$require_sig" = "yes" ] && [ ! -f "$f.sig" ]; then
+                echo "::warning::Skipping unsigned $f"
+                return
+              fi
+              cp "$f" "$ART/$dest"
+              if [ -f "$f.sig" ]; then
+                cp "$f.sig" "$ART/$dest.sig"
+              fi
             fi
           }
 
           if [ "${{ matrix.os }}" = "windows" ]; then
-            cp "$BUNDLE_DIR"/nsis/*.exe "$ART/" 2>/dev/null || true
-            cp "$BUNDLE_DIR"/msi/*.msi "$ART/" 2>/dev/null || true
-            alias_one "$BUNDLE_DIR/nsis/*setup*.exe" "Osmograph-setup.exe"
-            alias_one "$BUNDLE_DIR/nsis/*.exe" "Osmograph-setup.exe"
-            alias_one "$BUNDLE_DIR/msi/*.msi" "Osmograph.msi"
+            NSIS="$(pick "$BUNDLE_DIR/nsis/*setup*.exe")"
+            if [ -z "$NSIS" ]; then NSIS="$(pick "$BUNDLE_DIR/nsis/*.exe")"; fi
+            copy_pair "$NSIS" "Osmograph-setup.exe" yes
+            copy_pair "$(pick "$BUNDLE_DIR/msi/*.msi")" "Osmograph.msi" yes
           elif [ "${{ matrix.os }}" = "linux" ]; then
-            cp "$BUNDLE_DIR"/deb/*.deb "$ART/" 2>/dev/null || true
-            cp "$BUNDLE_DIR"/appimage/*.AppImage "$ART/" 2>/dev/null || true
-            cp "$BUNDLE_DIR"/rpm/*.rpm "$ART/" 2>/dev/null || true
-            alias_one "$BUNDLE_DIR/deb/*.deb" "Osmograph-linux-amd64.deb"
-            alias_one "$BUNDLE_DIR/appimage/*.AppImage" "Osmograph-linux-x86_64.AppImage"
-            alias_one "$BUNDLE_DIR/rpm/*.rpm" "Osmograph-linux-x86_64.rpm"
+            copy_pair "$(pick "$BUNDLE_DIR/deb/*.deb")" "Osmograph-linux-amd64.deb" yes
+            copy_pair "$(pick "$BUNDLE_DIR/appimage/*.AppImage")" "Osmograph-linux-x86_64.AppImage" yes
+            copy_pair "$(pick "$BUNDLE_DIR/rpm/*.rpm")" "Osmograph-linux-x86_64.rpm" yes
           elif [ "${{ matrix.os }}" = "macos" ]; then
-            cp "$BUNDLE_DIR"/dmg/*.dmg "$ART/" 2>/dev/null || true
             ARCH=$(uname -m)
             case "$ARCH" in
               arm64) ARCH=aarch64 ;;
               x86_64) ARCH=x86_64 ;;
             esac
-            alias_one "$BUNDLE_DIR/dmg/*.dmg" "Osmograph-macos-${ARCH}.dmg"
+            copy_pair "$(pick "$BUNDLE_DIR/dmg/*.dmg")" "Osmograph-macos-${ARCH}.dmg"
+            copy_pair "$(pick "$BUNDLE_DIR/macos/*.app.tar.gz")" "Osmograph-macos-${ARCH}.app.tar.gz" yes
           fi
 
           (
@@ -167,11 +232,30 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout osmograph-desktop
+        uses: actions/checkout@v4
+        with:
+          path: osmograph-desktop
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
+
+      - name: Generate signed updater manifest
+        working-directory: osmograph-desktop
+        run: |
+          node scripts/make-latest-json.mjs \
+            --dir "${{ github.workspace }}/release-assets" \
+            --tag "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --out "${{ github.workspace }}/release-assets/latest.json"
 
       - name: Inspect assets
         run: ls -laR release-assets

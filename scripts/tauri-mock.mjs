@@ -114,7 +114,7 @@ export const MOCK = String.raw`
         const current = {
           version: '0.1.2-beta.2', name: 'Osmograph 0.1.2-beta.2', notes: '', sections: [],
           html_url: 'https://example.test/v0.1.2-beta.2', published_at: '2026-02-01T10:00:00Z', prerelease: true,
-          recommended_url: assets[0].url, recommended_name: assets[0].name, assets,
+          recommended_url: assets[0].url, recommended_name: assets[0].name, assets, updater_url: null,
         };
         const latest = {
           version: '0.1.3-beta.1', name: 'Osmograph 0.1.3-beta.1',
@@ -125,12 +125,37 @@ export const MOCK = String.raw`
           ],
           html_url: 'https://example.test/v0.1.3-beta.1', published_at: '2026-03-01T10:00:00Z', prerelease: true,
           recommended_url: assets[0].url, recommended_name: assets[0].name, assets,
+          updater_url: 'https://github.com/OpenSmell/osmograph-desktop/releases/download/v0.1.3-beta.1/latest.json',
         };
         // A failed check keeps the release the user was already shown.
         if (scenario === 'error') return ok({ ...base, checked: false, last_checked: null, available: true, latest, error: 'Could not reach GitHub (offline).' });
         if (scenario === 'none') return ok({ ...base, available: false, notice: channel === 'stable' ? 'No stable release has been published yet. Switch to the Beta channel for early builds.' : 'No releases have been published yet.' });
         if (scenario === 'current') return ok({ ...base, available: false, latest: current });
         return ok({ ...base, available: true, latest });
+      }
+      case 'update_install_support': {
+        const supported = window.__MOCK_INSTALL_SUPPORT !== false;
+        return ok({
+          supported,
+          bundle: supported ? 'appimage' : 'unknown',
+          reason: supported
+            ? 'The running AppImage is replaced in place, then Osmograph restarts.'
+            : 'This copy isn’t running from an installed package, so it can’t replace itself.',
+        });
+      }
+      case 'install_update': {
+        (window.__MOCK_INSTALLS = window.__MOCK_INSTALLS || []).push(a.url);
+        emit('update-progress', { phase: 'downloading', downloaded: 40, total: 100 });
+        setTimeout(() => emit('update-progress', { phase: 'installing', downloaded: 100, total: 100 }), 20);
+        return new Promise((resolve) => setTimeout(() => resolve({
+          version: '0.1.3-beta.1',
+          target: 'linux-x86_64-appimage',
+          download_url: 'https://example.test/Osmograph-linux-x86_64.AppImage',
+        }), 40));
+      }
+      case 'restart_app': {
+        window.__MOCK_RESTARTED = true;
+        return ok(null);
       }
       case 'fleet_scan': return ok({ devices: [] });
       case 'hub_list': return ok([]);

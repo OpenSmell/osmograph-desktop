@@ -1,19 +1,24 @@
-//! Release checks.
+//! Release checks and signed in-place installation.
 //!
-//! Design constraints: tiny bandwidth, low RAM, no in-place self-update. We
+//! Design constraints: tiny bandwidth, low RAM, and no unsigned downloads. We
 //! fetch the release list once per channel, keep an ETag so a repeat check is a
 //! ~300-byte `304 Not Modified`, and enforce the cadence locally. The list
 //! endpoint (not `releases/latest`) is deliberate: GitHub's `latest` excludes
 //! prereleases, so beta builds would never see a beta update.
 //!
-//! Nothing is downloaded here. `recommended_url` and the asset list are URLs we
-//! open in the user's browser only after they choose to.
+//! The metadata check never downloads an installer. When the user asks to
+//! install, the Tauri updater plugin fetches the release's `latest.json`, checks
+//! it against the public key compiled into the app, downloads the platform
+//! artifact, verifies its minisign signature, and only then installs it. See
+//! `docs/UPDATES.md` for the full trust model and release pipeline.
 
 use std::fs;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tauri::Emitter;
+use tauri_plugin_updater::UpdaterExt;
 
 /// Public repository that hosts desktop releases (matches `git remote -v`).
 const RELEASES_API: &str =
@@ -390,6 +395,10 @@ pub struct UpdateRelease {
     pub recommended_url: String,
     pub recommended_name: String,
     pub assets: Vec<UpdateAsset>,
+    /// The release's `latest.json`, when the release published one. Its presence
+    /// means this release was built with signed updater artifacts and can be
+    /// installed in place. `null` means browser download only.
+    pub updater_url: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -522,6 +531,8 @@ fn asset_kind(name: &str) -> &'static str {
         "app"
     } else if n.ends_with(".tar.gz") {
         "tarball"
+    } else if n.ends_with("latest.json") {
+        "manifest"
     } else if n.ends_with("sha256sums.txt") || n.ends_with(".sig") {
         "checksums"
     } else {
@@ -591,7 +602,7 @@ fn build_release(release: &CachedRelease, os: &str, arch: &str) -> UpdateRelease
         .assets
         .iter()
         .filter(|a| !a.url.is_empty())
-        .filter(|a| !matches!(asset_kind(&a.name), "checksums" | "other"))
+        .filter(|a| !matches!(asset_kind(&a.name), "checksums" | "manifest" | "other"))
         .map(|a| (asset_rank(os, arch, &a.name).unwrap_or(90), a))
         .collect();
     ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.name.cmp(&b.1.name)));
@@ -612,6 +623,12 @@ fn build_release(release: &CachedRelease, os: &str, arch: &str) -> UpdateRelease
         })
         .collect();
 
+    let updater_url = release
+        .assets
+        .iter()
+        .find(|a| a.name.eq_ignore_ascii_case("latest.json") && !a.url.is_empty())
+        .map(|a| a.url.clone());
+
     UpdateRelease {
         version: release.version.clone(),
         name: release.name.clone(),
@@ -627,6 +644,7 @@ fn build_release(release: &CachedRelease, os: &str, arch: &str) -> UpdateRelease
             .map(|a| a.name.clone())
             .unwrap_or_else(|| "release page".to_string()),
         assets,
+        updater_url,
     }
 }
 
@@ -839,7 +857,8 @@ pub fn check(
 }
 
 /// Check for a newer release. Metadata only — never downloads an installer.
-#[tauri::command]
+/// `async` keeps the blocking GitHub request off the UI thread.
+#[tauri::command(async)]
 pub fn check_for_updates(
     policy: Option<String>,
     channel: Option<String>,
@@ -858,6 +877,282 @@ pub fn check_for_updates(
         force.unwrap_or(false),
         chrono::Utc::now().timestamp(),
     ))
+}
+
+// === Signed in-place installation ===
+
+/// What the current installation can do. This is deliberately explicit: a
+/// development build, a portable binary, or a bundle type the updater cannot
+/// replace must say so instead of pretending an install will work.
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallSupport {
+    pub supported: bool,
+    pub bundle: String,
+    pub reason: String,
+}
+
+fn install_support_for(
+    bundle: Option<tauri::utils::config::BundleType>,
+    debug: bool,
+) -> InstallSupport {
+    use tauri::utils::config::BundleType;
+
+    if debug {
+        return InstallSupport {
+            supported: false,
+            bundle: "dev".to_string(),
+            reason: "Development builds don't install over themselves. Run an installed release build to use in-place updates.".to_string(),
+        };
+    }
+
+    let supported = !matches!(bundle, None | Some(BundleType::Dmg));
+    let (bundle_name, reason) = match bundle {
+        Some(BundleType::AppImage) => (
+            "appimage",
+            "The running AppImage is replaced in place, then Osmograph restarts.",
+        ),
+        Some(BundleType::Deb) => (
+            "deb",
+            "Your system may ask for your password so the package manager can install the new .deb.",
+        ),
+        Some(BundleType::Rpm) => (
+            "rpm",
+            "Your system may ask for your password so the package manager can install the new .rpm.",
+        ),
+        Some(BundleType::Msi) => (
+            "msi",
+            "The signed MSI is installed quietly and Osmograph restarts.",
+        ),
+        Some(BundleType::Nsis) => (
+            "nsis",
+            "The signed installer runs quietly and Osmograph restarts.",
+        ),
+        Some(BundleType::App) => (
+            "app",
+            "The app in Applications is replaced in place, then Osmograph restarts.",
+        ),
+        Some(BundleType::Dmg) => (
+            "dmg",
+            "This copy is running from a disk image. Move Osmograph to Applications before updating in place.",
+        ),
+        None => (
+            "unknown",
+            "This copy isn't running from an installed package, so it can't replace itself. Download the installer instead.",
+        ),
+    };
+
+    InstallSupport {
+        supported,
+        bundle: bundle_name.to_string(),
+        reason: reason.to_string(),
+    }
+}
+
+fn current_install_support() -> InstallSupport {
+    // On macOS the binary lives inside the .app, so `bundle_type()` is `App`
+    // even when the .app is mounted read-only from a DMG. Detect that case
+    // instead of promising an install that cannot write to the volume.
+    #[cfg(target_os = "macos")]
+    {
+        let from_dmg = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.to_str().map(|s| s.starts_with("/Volumes/")))
+            .unwrap_or(false);
+        if from_dmg {
+            return InstallSupport {
+                supported: false,
+                bundle: "dmg".to_string(),
+                reason: "This copy is running from a disk image. Move Osmograph to Applications before updating in place.".to_string(),
+            };
+        }
+    }
+
+    install_support_for(
+        tauri::utils::platform::bundle_type(),
+        cfg!(debug_assertions),
+    )
+}
+
+#[tauri::command]
+pub fn update_install_support() -> InstallSupport {
+    current_install_support()
+}
+
+/// Restart into the newly installed binary. Kept separate from
+/// `install_update` so the frontend can finish its own state update first.
+#[tauri::command]
+pub fn restart_app(app: tauri::AppHandle) -> Result<(), String> {
+    app.restart();
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct InstallOutcome {
+    pub version: String,
+    pub target: String,
+    pub download_url: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct UpdateProgress {
+    phase: String,
+    downloaded: u64,
+    total: Option<u64>,
+}
+
+/// The manifest URL must be the release asset for this repository. The frontend
+/// gets it from the GitHub API, but a compromised renderer must not be able to
+/// point the updater at an arbitrary server.
+fn validate_manifest_url(raw: &str) -> Result<url::Url, String> {
+    const PREFIX: &str = "/OpenSmell/osmograph-desktop/releases/download/";
+    let url = url::Url::parse(raw).map_err(|e| format!("Invalid update manifest URL: {e}"))?;
+    if url.scheme() != "https"
+        || url.host_str() != Some("github.com")
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || !url.path().starts_with(PREFIX)
+        || !url.path().ends_with("/latest.json")
+    {
+        return Err("The update manifest URL is not an Osmograph GitHub release asset.".to_string());
+    }
+    Ok(url)
+}
+
+fn friendly_install_error(error: tauri_plugin_updater::Error) -> String {
+    use tauri_plugin_updater::Error as E;
+
+    match &error {
+        E::TargetsNotFound(targets) => format!(
+            "This release has no installer for this platform ({}). Download the installer from the release page instead.",
+            targets.join(", ")
+        ),
+        E::TargetNotFound(target) => format!(
+            "This release has no installer for {target}. Download the installer from the release page instead."
+        ),
+        E::ReleaseNotFound => {
+            "GitHub did not return an updater manifest for this release. Download the installer from the release page instead.".to_string()
+        }
+        E::Minisign(_)
+        | E::SignatureUtf8(_)
+        | E::Base64(_)
+        | E::SignedVersionMismatch { .. }
+        | E::MissingSignedVersion => {
+            "The downloaded update failed signature verification. Nothing was installed.".to_string()
+        }
+        E::Reqwest(_) => {
+            "Could not download the update. Check your connection and try again, or download the installer from the release page.".to_string()
+        }
+        E::AuthenticationFailed => {
+            "The install was cancelled at the password prompt. Nothing was installed.".to_string()
+        }
+        E::PackageInstallFailed | E::DebInstallFailed => {
+            "The package manager could not install the update. Download the installer from the release page instead.".to_string()
+        }
+        E::TempDirNotOnSameMountPoint => {
+            "The update couldn't be staged on the same disk as the app. Download the installer from the release page instead.".to_string()
+        }
+        E::InvalidUpdaterFormat | E::BinaryNotFoundInArchive => {
+            "The downloaded file isn't an installer this app can apply. Download it from the release page instead.".to_string()
+        }
+        E::InsecureTransportProtocol => {
+            "The update endpoint is not HTTPS. Refusing to download it.".to_string()
+        }
+        _ => format!("The update could not be installed: {error}"),
+    }
+}
+
+/// Download, verify, and install the signed updater artifact for this platform.
+///
+/// The Tauri updater plugin verifies the minisign signature against the public
+/// key compiled into this build before touching the installed app. A failure
+/// leaves the current installation untouched.
+#[tauri::command]
+pub async fn install_update(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<InstallOutcome, String> {
+    let endpoint = validate_manifest_url(&url)?;
+    let support = current_install_support();
+    if !support.supported {
+        return Err(support.reason);
+    }
+
+    let updater = app
+        .updater_builder()
+        .endpoints(vec![endpoint])
+        .map_err(|e| format!("Could not prepare the updater: {e}"))?
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(friendly_install_error)?;
+
+    let Some(update) = updater.check().await.map_err(friendly_install_error)? else {
+        return Err("This build is already up to date, or the release has no update for this package.".to_string());
+    };
+
+    let version = update.version.clone();
+    let target = update.target.clone();
+    let download_url = update.download_url.to_string();
+
+    let progress_app = app.clone();
+    let finish_app = app.clone();
+    let mut downloaded: u64 = 0;
+    let mut last_emit = Instant::now();
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgress {
+            phase: "downloading".to_string(),
+            downloaded: 0,
+            total: None,
+        },
+    );
+
+    update
+        .download_and_install(
+            move |chunk, total| {
+                downloaded = downloaded.saturating_add(chunk as u64);
+                if last_emit.elapsed() >= Duration::from_millis(200)
+                    || total.is_some_and(|t| downloaded >= t)
+                {
+                    let _ = progress_app.emit(
+                        "update-progress",
+                        UpdateProgress {
+                            phase: "downloading".to_string(),
+                            downloaded,
+                            total,
+                        },
+                    );
+                    last_emit = Instant::now();
+                }
+            },
+            move || {
+                let _ = finish_app.emit(
+                    "update-progress",
+                    UpdateProgress {
+                        phase: "installing".to_string(),
+                        downloaded: 0,
+                        total: None,
+                    },
+                );
+            },
+        )
+        .await
+        .map_err(friendly_install_error)?;
+
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgress {
+            phase: "installed".to_string(),
+            downloaded: 0,
+            total: None,
+        },
+    );
+
+    Ok(InstallOutcome {
+        version,
+        target,
+        download_url,
+    })
 }
 
 #[cfg(test)]
@@ -1233,5 +1528,102 @@ mod tests {
         assert!(msg.contains("1 minute."));
         let msg = rate_limit_message(None, now);
         assert!(msg.contains("Try again"));
+    }
+
+    #[test]
+    fn install_support_is_honest_about_the_bundle() {
+        use tauri::utils::config::BundleType;
+
+        let dev = install_support_for(Some(BundleType::AppImage), true);
+        assert!(!dev.supported);
+        assert_eq!(dev.bundle, "dev");
+
+        for bundle in [
+            BundleType::AppImage,
+            BundleType::Deb,
+            BundleType::Rpm,
+            BundleType::Msi,
+            BundleType::Nsis,
+            BundleType::App,
+        ] {
+            let label = format!("{bundle:?}");
+            let support = install_support_for(Some(bundle), false);
+            assert!(support.supported, "{label} should be updatable");
+            assert!(!support.reason.is_empty());
+        }
+
+        let dmg = install_support_for(Some(BundleType::Dmg), false);
+        assert!(!dmg.supported);
+        assert!(dmg.reason.contains("Applications"));
+
+        let portable = install_support_for(None, false);
+        assert!(!portable.supported);
+        assert!(portable.reason.contains("Download"));
+    }
+
+    #[test]
+    fn manifest_url_is_repository_bound() {
+        let good = "https://github.com/OpenSmell/osmograph-desktop/releases/download/v0.1.2-beta.2/latest.json";
+        assert_eq!(
+            validate_manifest_url(good).unwrap().as_str(),
+            good
+        );
+
+        for bad in [
+            "http://github.com/OpenSmell/osmograph-desktop/releases/download/v1/latest.json",
+            "https://example.com/OpenSmell/osmograph-desktop/releases/download/v1/latest.json",
+            "https://github.com/attacker/osmograph-desktop/releases/download/v1/latest.json",
+            "https://github.com/OpenSmell/osmograph-desktop/releases/download/v1/manifest.json",
+            "https://github.com/OpenSmell/osmograph-desktop/releases/download/v1/latest.json?x=1",
+            "https://user:pass@github.com/OpenSmell/osmograph-desktop/releases/download/v1/latest.json",
+        ] {
+            assert!(validate_manifest_url(bad).is_err(), "{bad} should be rejected");
+        }
+    }
+
+    #[test]
+    fn latest_json_is_never_listed_as_a_download() {
+        let release = CachedRelease {
+            version: "0.2.0".to_string(),
+            name: "Osmograph 0.2.0".to_string(),
+            notes: String::new(),
+            html_url: "https://example.test/release".to_string(),
+            published_at: String::new(),
+            prerelease: false,
+            assets: vec![
+                CachedAsset {
+                    name: "latest.json".to_string(),
+                    url: "https://example.test/latest.json".to_string(),
+                    size: 100,
+                },
+                CachedAsset {
+                    name: "Osmograph-linux-x86_64.AppImage".to_string(),
+                    url: "https://example.test/a.AppImage".to_string(),
+                    size: 10,
+                },
+            ],
+        };
+        let out = build_release(&release, "linux", "x86_64");
+        assert_eq!(out.updater_url.as_deref(), Some("https://example.test/latest.json"));
+        assert!(out.assets.iter().all(|a| a.name != "latest.json"));
+    }
+
+    #[test]
+    fn a_release_without_a_manifest_has_no_in_place_install() {
+        let release = CachedRelease {
+            version: "0.2.0".to_string(),
+            name: "Osmograph 0.2.0".to_string(),
+            notes: String::new(),
+            html_url: "https://example.test/release".to_string(),
+            published_at: String::new(),
+            prerelease: false,
+            assets: vec![CachedAsset {
+                name: "Osmograph-linux-x86_64.AppImage".to_string(),
+                url: "https://example.test/a.AppImage".to_string(),
+                size: 10,
+            }],
+        };
+        let out = build_release(&release, "linux", "x86_64");
+        assert!(out.updater_url.is_none());
     }
 }

@@ -4151,6 +4151,7 @@ pub fn run() {    env_logger::init();
             }
         }))
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             list_serial_ports,
@@ -4264,6 +4265,9 @@ pub fn run() {    env_logger::init();
             live::get_live_classification,
             phenotype::compute_phenotype,
             updates::check_for_updates,
+            updates::update_install_support,
+            updates::install_update,
+            updates::restart_app,
             vial_log_event,
             vial_get_journal,
             vial_clear_journal,

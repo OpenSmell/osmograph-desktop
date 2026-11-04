@@ -12,6 +12,9 @@
     "validate:vial": "node scripts/validate-vial.mjs",
     "set-version": "node scripts/set-version.mjs",
     "check:versions": "node scripts/set-version.mjs --check",
+    "setup:updater-keys": "node scripts/setup-updater-keys.mjs",
+    "make:latest-json": "node scripts/make-latest-json.mjs",
+    "test:latest-json": "node scripts/test-latest-json.mjs",
     "test:vial-host": "node scripts/test-vial-host.mjs",
     "test:vial-runtime": "node --experimental-strip-types scripts/test-vial-runtime.mjs",
     "test:updates-ui": "node scripts/test-updates-ui.mjs"

@@ -15746,6 +15746,18 @@ type UpdateRelease = {
   recommended_url: string;
   recommended_name: string;
   assets: UpdateAsset[];
+  /** Present only when the release published a signed updater manifest. */
+  updater_url: string | null;
+};
+type UpdateInstallSupport = {
+  supported: boolean;
+  bundle: string;
+  reason: string;
+};
+type UpdateProgress = {
+  phase: 'downloading' | 'installing' | 'installed' | string;
+  downloaded: number;
+  total: number | null;
 };
 type UpdateCheckResult = {
   available: boolean;
@@ -15762,6 +15774,13 @@ type UpdateCheckResult = {
 
 let currentVersion = 'dev';
 let updateBusy = false;
+let installingUpdate = false;
+let installProgress: UpdateProgress | null = null;
+let installSupport: UpdateInstallSupport = {
+  supported: false,
+  bundle: 'unknown',
+  reason: 'Checking whether this build can install updates in place…',
+};
 let dismissedVersion: string | null = null;
 let seenUpdateVersion: string | null = null;
 let lastResult: UpdateCheckResult | null = null;
@@ -15898,6 +15917,91 @@ function makeButton(label: string, onClick: () => void, cls?: string): HTMLButto
   return b;
 }
 
+function installProgressText(progress: UpdateProgress | null): { label: string; pct: number | null } {
+  if (!progress) return { label: '', pct: null };
+  if (progress.phase === 'downloading') {
+    if (progress.total && progress.total > 0) {
+      const pct = Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
+      const got = formatBytes(progress.downloaded) || '0 KB';
+      const total = formatBytes(progress.total) || `${progress.total} B`;
+      return {
+        label: `Downloading ${pct}% · ${got} of ${total}`,
+        pct,
+      };
+    }
+    return {
+      label: progress.downloaded > 0
+        ? `Downloading ${formatBytes(progress.downloaded)}`
+        : 'Downloading…',
+      pct: null,
+    };
+  }
+  if (progress.phase === 'installing') return { label: 'Verifying signature and installing…', pct: 100 };
+  if (progress.phase === 'installed') return { label: 'Installed — restarting…', pct: 100 };
+  return { label: 'Preparing…', pct: 0 };
+}
+
+function updateInstallProgressUI() {
+  const host = document.getElementById('updateInstallProgress');
+  if (!host) return;
+  host.hidden = !installingUpdate;
+  const fill = host.querySelector<HTMLElement>('.update-progress-fill');
+  const label = host.querySelector<HTMLElement>('.update-progress-label');
+  const { label: text, pct } = installProgressText(installProgress);
+  if (label) label.textContent = text;
+  if (fill) fill.style.width = pct === null ? '0%' : `${pct}%`;
+}
+
+async function installUpdate(latest: UpdateRelease) {
+  if (installingUpdate) return;
+  if (!latest.updater_url) {
+    showToast('This release has no signed updater manifest. Use the download button instead.');
+    return;
+  }
+  if (!installSupport.supported) {
+    showToast(`This build can’t install in place. ${installSupport.reason}`);
+    return;
+  }
+  if (recPhaseActive) {
+    showToast('Stop the current recording before installing an update.');
+    return;
+  }
+
+  installingUpdate = true;
+  installProgress = { phase: 'starting', downloaded: 0, total: null };
+  if (lastResult) {
+    const skipped = !!lastResult.latest
+      && readSkippedVersion() === normalizeVersion(lastResult.latest.version);
+    renderReleaseCard(lastResult, skipped);
+  }
+  setUpdateStatus('Downloading update…', '', true);
+
+  try {
+    const outcome = await invoke<{ version: string; target: string; download_url: string }>(
+      'install_update',
+      { url: latest.updater_url },
+    );
+    installProgress = { phase: 'installed', downloaded: 0, total: null };
+    updateInstallProgressUI();
+    setUpdateStatus(`Installed v${outcome.version}. Restarting…`, 'update-ok');
+    showToast(`Osmograph ${outcome.version} installed. Restarting…`, 4000);
+    window.setTimeout(() => {
+      invoke('restart_app').catch((e) => {
+        installingUpdate = false;
+        setUpdateStatus(`Installed. Close and reopen Osmograph to finish (${e}).`, 'update-dim');
+        if (lastResult) renderReleaseCard(lastResult, false);
+      });
+    }, 1200);
+  } catch (e) {
+    installingUpdate = false;
+    installProgress = null;
+    const message = String(e);
+    setUpdateStatus(`Install failed: ${message}`, 'update-dim');
+    showToast(`Couldn’t install the update: ${message} Use the download button instead.`, 9000);
+    if (lastResult) renderReleaseCard(lastResult, false);
+  }
+}
+
 function renderReleaseCard(res: UpdateCheckResult, skipped: boolean) {
   const host = document.getElementById('updateNotes');
   if (!host) return;
@@ -15953,6 +16057,17 @@ function renderReleaseCard(res: UpdateCheckResult, skipped: boolean) {
 
   const actions = document.createElement('div');
   actions.className = 'update-actions';
+  const canInstall = res.available && !!latest.updater_url && installSupport.supported;
+  if (canInstall && !skipped) {
+    const installBtn = makeButton(
+      installingUpdate ? 'Installing…' : 'Install update',
+      () => { void installUpdate(latest); },
+      'update-install',
+    );
+    installBtn.disabled = installingUpdate || recPhaseActive;
+    if (recPhaseActive) installBtn.title = 'Stop the current recording before installing an update.';
+    actions.append(installBtn);
+  }
   if (latest.recommended_url) {
     const recommended = latest.assets.find((a) => a.recommended);
     const label = recommended
@@ -15982,7 +16097,41 @@ function renderReleaseCard(res: UpdateCheckResult, skipped: boolean) {
       setNavBadge(false);
     }));
   }
+  if (installingUpdate) {
+    for (const button of actions.querySelectorAll<HTMLButtonElement>('button')) {
+      button.disabled = true;
+    }
+  }
   host.append(actions);
+
+  if (latest.updater_url && !installSupport.supported && !skipped) {
+    const p = document.createElement('p');
+    p.className = 'update-notice';
+    p.textContent = `In-place install isn’t available for this build. ${installSupport.reason}`;
+    host.append(p);
+  } else if (canInstall && recPhaseActive && !skipped) {
+    const p = document.createElement('p');
+    p.className = 'update-notice';
+    p.textContent = 'A recording is in progress. Stop and save it before installing.';
+    host.append(p);
+  }
+
+  if (canInstall && !skipped) {
+    const progress = document.createElement('div');
+    progress.id = 'updateInstallProgress';
+    progress.className = 'update-install-progress';
+    progress.hidden = !installingUpdate;
+    const track = document.createElement('div');
+    track.className = 'update-progress-track';
+    const fill = document.createElement('div');
+    fill.className = 'update-progress-fill';
+    track.append(fill);
+    const label = document.createElement('div');
+    label.className = 'update-progress-label';
+    progress.append(track, label);
+    host.append(progress);
+    updateInstallProgressUI();
+  }
 
   if (latest.assets.length > 0) {
     const details = document.createElement('details');
@@ -16067,7 +16216,7 @@ function applyUpdateResult(res: UpdateCheckResult) {
 }
 
 async function runUpdateCheck(force: boolean, quiet = false): Promise<void> {
-  if (updateBusy) return;
+  if (updateBusy || installingUpdate) return;
   if (force) dismissedVersion = null;
   updateBusy = true;
   const btn = document.getElementById('updateCheckBtn') as HTMLButtonElement | null;
@@ -16092,6 +16241,15 @@ async function runUpdateCheck(force: boolean, quiet = false): Promise<void> {
 }
 
 async function initVersionChrome(): Promise<void> {
+  try {
+    installSupport = await invoke<UpdateInstallSupport>('update_install_support');
+  } catch {
+    installSupport = {
+      supported: false,
+      bundle: 'unknown',
+      reason: 'This build couldn’t determine how it was installed. Download the installer instead.',
+    };
+  }
   try {
     currentVersion = await getVersion();
   } catch {
@@ -16144,6 +16302,27 @@ document.getElementById('updateChannel')!.addEventListener('change', (e) => {
 });
 
 document.getElementById('updateCheckBtn')!.addEventListener('click', () => runUpdateCheck(true));
+
+void listen<UpdateProgress>('update-progress', (event) => {
+  if (!installingUpdate) return;
+  installProgress = event.payload;
+  updateInstallProgressUI();
+  const progress = event.payload;
+  if (progress.phase === 'downloading') {
+    const pct = progress.total && progress.total > 0
+      ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100))
+      : null;
+    setUpdateStatus(
+      pct === null ? `Downloading… ${formatBytes(progress.downloaded)}` : `Downloading… ${pct}%`,
+      '',
+      true,
+    );
+  } else if (progress.phase === 'installing') {
+    setUpdateStatus('Verifying and installing…', '', true);
+  } else if (progress.phase === 'installed') {
+    setUpdateStatus('Installed — restarting…', 'update-ok');
+  }
+}).catch(() => { /* browser-only preview: no Tauri event bridge */ });
 
 // Check on launch when automatic, then hourly while the window stays open —
 // the backend's 24h gate and 15-minute failure back-off do the real pacing.

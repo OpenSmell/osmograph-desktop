@@ -41,5 +41,15 @@
       "icons/icon.ico"
     ]
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDZEQzZGQkQ3QjAwRUExNDYKUldSR29RNncxL3ZHYlJncWxQeHpDYWJLSGo2bi9EZFhEUE9JK3lRc0IrQXdNU08rek1uWFlGWm0K",
+      "endpoints": [
+        "https://github.com/OpenSmell/osmograph-desktop/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "quiet"
+      }
+    }
+  }
 }

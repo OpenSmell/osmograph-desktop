@@ -80,9 +80,13 @@ Stage 1 includes direct HTTPS install of a manifest and its optional sandboxed `
 permissions, or cross-rig calibration. Those are separate design problems; the authoring and submission
 limits are documented in [`AUTHORING.md`](AUTHORING.md).
 
-App updates are metadata checks against GitHub Releases with automatic, manual, and never policies,
-Stable/Beta channels, and release notes in the Updates panel. The app opens the chosen installer in the
-browser; it does not silently install or self-modify. See [`RELEASING.md`](RELEASING.md).
+App updates check GitHub Releases automatically (once on launch, then at most once a day), with Stable
+and Beta channels and release notes in the Updates panel. When a release publishes a signed
+`latest.json`, **Install update** downloads it from GitHub, verifies the minisign signature against the
+public key compiled into the app, installs it in place, and restarts. Development/portable builds and
+releases without a signed manifest fall back to the browser download. See
+[`docs/UPDATES.md`](docs/UPDATES.md) for the architecture, trust model, signing-key setup, and failure
+matrix, and [`RELEASING.md`](RELEASING.md) for the release checklist.
 
 ## Layout
 
