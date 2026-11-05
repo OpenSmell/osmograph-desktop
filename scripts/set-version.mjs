@@ -60,7 +60,11 @@ function currentVersions() {
 }
 
 function check(expectedArg) {
-  const expected = (expectedArg || process.env.GITHUB_REF_NAME || '').replace(/^v/, '').trim();
+  // CI sets GITHUB_REF_NAME to the branch (e.g. "master") on branch pushes.
+  // Only treat it as an expected version when it actually looks like a tag.
+  const ref = process.env.GITHUB_REF_NAME || '';
+  const candidate = expectedArg || (/^v?\d+\.\d+\.\d+/.test(ref) ? ref : '');
+  const expected = candidate.replace(/^v/, '').trim();
   const versions = currentVersions();
   let bad = false;
   for (const [file, version] of Object.entries(versions)) {
