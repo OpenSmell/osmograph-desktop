@@ -143,7 +143,16 @@ jobs:
           if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             EXTRA="--config src-tauri/tauri.updater.conf.json"
           fi
-          npx tauri build $EXTRA 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
+          # WiX/MSI only accepts numeric prerelease identifiers, so a tag like
+          # v0.1.2-beta.2 must ship the NSIS installer (which supports semver).
+          BUNDLES=""
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            VERSION="$(node -p "require('./package.json').version")"
+            case "$VERSION" in
+              *-*) BUNDLES="--bundles nsis" ;;
+            esac
+          fi
+          npx tauri build $BUNDLES $EXTRA 2>&1 | tee "${{ github.workspace }}/build-${{ matrix.os }}.log"
         shell: bash
 
       - name: Upload build log on failure
