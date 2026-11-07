@@ -94,6 +94,9 @@ interface VialDetectorResult {
 }
 const vialDetectorResults = new Map<string, VialDetectorResult>();
 const vialDetectorResets = new Map<string, Promise<unknown>>();
+// Wall-clock when this Vial's own profile completed warming. Kept separately
+// from the base detector so baseline.ageSec is observed, not borrowed.
+const vialBaselineReadyAt = new Map<string, number>();
 
 /** Compile a Vial's declared profile into its own Rust detector. The base
  *  app's detection config is read once for the legacy fields and never
@@ -101,6 +104,7 @@ const vialDetectorResets = new Map<string, Promise<unknown>>();
 async function syncVialDetector(pack: Domain.DomainPack, reset = false): Promise<void> {
   if (!pack.anomaly) {
     vialDetectorResults.delete(pack.id);
+    vialBaselineReadyAt.delete(pack.id);
     return;
   }
   try {
@@ -149,6 +153,9 @@ async function feedVialDetector(pack: Domain.DomainPack, reading: number[]): Pro
       reading,
     });
     vialDetectorResults.set(pack.id, result);
+    if (!result.warming_up && !vialBaselineReadyAt.has(pack.id)) {
+      vialBaselineReadyAt.set(pack.id, Date.now());
+    }
   } catch (error) {
     if (import.meta.env.DEV) console.error('vial_detection_ingest failed', error);
   }
@@ -4508,15 +4515,19 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
   const anomalyTriggered = profileOffLive ? 0 : vialResult ? vialResult.triggered_channels.length : lastAnomalyReading.triggeredChannels;
   const anomalyConsecutive = profileOffLive ? 0 : vialResult ? vialResult.consecutive_anomalies : lastAnomalyReading.consecutive;
   const baselineProgress = profileOffLive ? 0 : vialResult ? vialResult.baseline_progress : lastAnomalyReading.baselineProgress;
+  const source: VialHost.HostSource = runtime
+    ? (runtime.source === 'live' && connected ? 'live' : 'replay')
+    : (connected ? 'live' : 'none');
+  const profileReadyAt = runtime ? vialBaselineReadyAt.get(runtime.pack.id) ?? null : null;
   return {
     schema: VialHost.VIAL_HOST_SCHEMA,
     takenAt: Date.now(),
-    // 'live' only when a rig streams; the contract's other values (replay,
-    // dataset) belong to explicitly chosen sources, which Home never is.
-    source: connected ? 'live' : 'none',
-    // True for this host by construction: every source feeds an ordered
-    // array; there is no trial-discrete mode in Osmograph today.
-    samplingMode: 'timeseries',
+    // A connected live runtime is 'live'; a selected recording or the captured
+    // buffer is 'replay'. Home has no runtime, so it is live only when a rig is.
+    source,
+    // Every source is an ordered sample stream today. 'unknown' is honest when
+    // there is no source at all; a discrete trial mode does not exist yet.
+    samplingMode: source === 'none' ? 'unknown' : 'timeseries',
     channels: chNames.map((name, i) => ({
       id: `ch${i}`,
       label: name,
@@ -4529,10 +4540,11 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
     baseline: {
       state: warming ? 'warming' : anomalyState === 'unknown' ? 'none' : 'ready',
       progress: baselineProgress,
-      // Age only when observed in this session; null is honest elsewhere.
-      ageSec: !vialResult && baselineReadyAt !== null
-        ? Math.max(0, Math.round((Date.now() - baselineReadyAt) / 1000))
-        : null,
+      // Age only when this surface's detector was observed ready in this
+      // session; null is honest for an unseen baseline.
+      ageSec: vialResult
+        ? (profileReadyAt !== null ? Math.max(0, Math.round((Date.now() - profileReadyAt) / 1000)) : null)
+        : (baselineReadyAt !== null ? Math.max(0, Math.round((Date.now() - baselineReadyAt) / 1000)) : null),
     },
     anomaly: {
       state: anomalyState,
@@ -7878,6 +7890,7 @@ function destroyRuntime(runtime: ActiveVialRuntime | null, clearFrame = true): v
 
 function resetVialDetector(id: string): Promise<unknown> {
   vialDetectorResults.delete(id);
+  vialBaselineReadyAt.delete(id);
   const reset = invoke('vial_detection_reset', { vialId: id }).catch((error) => {
     if (import.meta.env.DEV) console.error('vial_detection_reset failed', error);
   });
