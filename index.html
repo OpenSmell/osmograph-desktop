@@ -492,18 +492,7 @@
     .tab-panel.active { display: flex; }
 
     /* === Dashboard Tab === */
-    .wizard{position:fixed;inset:0;z-index:200;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55)}
-    .wizard-card{width:440px;max-width:92vw;border:1px solid var(--border);border-radius:12px;background:var(--bg,#0f1115);padding:18px}
-    .wizard-dots{display:flex;gap:6px;margin-bottom:10px}
-    .wdot{width:6px;height:6px;border-radius:50%;background:var(--border)}
-    .wdot.active{background:var(--green)}
-    .wslide{display:none}
-    .wslide.active{display:block}
-    .wslide h2{font-size:16px;margin:0 0 6px}
-    .wslide p{color:var(--text-2);font-size:13px;margin:0}
-    .wizard-actions{display:flex;align-items:center;gap:8px;margin-top:16px}
-    .wizard-fill{flex:1}
-        /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
+    /* The dashboard grid (traces + right rail) grows to fill; the rail stays pinned right. */
     #panel-dashboard.tab-panel { flex-direction: column; }
     /* The library tab stacks the session-library grid and the replay strip vertically. */
     #panel-library.tab-panel { flex-direction: column; }
@@ -698,6 +687,7 @@
     .canvas-empty-card b { display: block; font-size: 14px; color: var(--text-0); margin-bottom: 4px; }
     .canvas-empty-card p { font-size: 11px; line-height: 1.45; color: var(--text-2); margin: 0 0 10px; }
     .canvas-empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+    .canvas-empty-note { margin-top: 10px; font-size: 10px; color: var(--text-3); }
 
     /* Subtle retro-scanline texture — cyberpunk HUD layer kept barely-there so
        the warm paper reads clearly underneath. */
@@ -1408,6 +1398,7 @@
       border-radius: 8px; text-align: center; color: var(--text-3); font-size: 12px;
     }
     .smells-empty b { display: block; margin-bottom: 4px; color: var(--text-1); font-size: 13px; }
+    .smells-empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; margin-top: 10px; }
     .smells-grid {
       display: grid; gap: 12px;
       grid-template-columns: repeat(auto-fill, minmax(204px, 1fr));
@@ -4195,12 +4186,16 @@
               <canvas id="traces"></canvas>
               <div class="canvas-empty" id="dashboardEmpty">
                 <div class="canvas-empty-card">
-                  <b>No rig connected.</b>
-                  <p>Replay a real SmellNet recording, browse the smell library, or connect a rig for live readings.</p>
+                  <b id="dashboardEmptyTitle">Start with something real.</b>
+                  <p id="dashboardEmptyCopy">No hardware needed. Replay a real recording, download a public dataset, import a CSV, or connect your own e-nose.</p>
                   <div class="canvas-empty-actions">
-                    <button class="mini-btn primary" id="dashPlayground" type="button">Replay sample</button>
-                    <button class="mini-btn" id="dashExplore" type="button">Browse Gallery</button>
-                    <button class="mini-btn" id="dashConnect" type="button">Connect rig</button>
+                    <button class="mini-btn primary" id="dashPlayground" type="button">Replay a sample</button>
+                    <button class="mini-btn" id="dashGetData" type="button">Download data</button>
+                    <button class="mini-btn" id="dashImport" type="button">Import a file</button>
+                    <button class="mini-btn" id="dashConnect" type="button">Connect a rig</button>
+                  </div>
+                  <div class="canvas-empty-note" id="dashLibraryNote" hidden>
+                    <button class="text-link" id="dashLibrary" type="button">Open your recordings →</button>
                   </div>
                 </div>
               </div>
@@ -5739,25 +5734,6 @@ Confidence: 97.3%</div>
         <button id="sdCheck" class="mini-btn" type="button">Separability with…</button>
         <button id="sdCompare" class="mini-btn" type="button">Compare replicates</button>
         <button id="sdCard" class="mini-btn primary" type="button">Save card</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="wizard" class="wizard" style="display:none">
-    <div class="wizard-card">
-      <div class="wizard-dots">
-        <span class="wdot active"></span><span class="wdot"></span><span class="wdot"></span>
-      </div>
-      <div class="wizard-body">
-        <div class="wslide active"><h2>Welcome to Osmograph</h2><p>Turn smells into data you can trust — and share. No lab required.</p></div>
-        <div class="wslide"><h2>1 · Start with real smells</h2><p>Nothing is preloaded. Open <strong>Explore → Datasets</strong> to fetch a real corpus from its source, or connect your own e-nose.</p></div>
-        <div class="wslide"><h2>2 · Compare, train, or watch live</h2><p>Pick two substances and compare their fingerprints, teach the app to tell them apart, or plug in your own e-nose and watch it live.</p></div>
-      </div>
-      <div class="wizard-actions">
-        <button id="wizardSkip" class="mini">Skip</button>
-        <span class="wizard-fill"></span>
-        <button id="wizardBack" class="mini" style="display:none">Back</button>
-        <button id="wizardNext" class="green">Next</button>
       </div>
     </div>
   </div>

@@ -38,7 +38,6 @@ for (const v of loaded) {
   if (v.home) uiSeed[v.manifest.id + '::home'] = { version: v.manifest.version, html: v.home, fetchedAt: Date.now() };
 }
 const SEED = `try {
-  localStorage.setItem('osmograph.wizard.seen.v1', '1');
   localStorage.setItem('osmograph.domain.packs.v1', ${JSON.stringify(JSON.stringify(packs))});
   localStorage.setItem('osmograph.domain.installed.v1', ${JSON.stringify(JSON.stringify(packs.map((p) => p.id)))});
   localStorage.setItem('osmograph.domain.ui.v1', ${JSON.stringify(JSON.stringify(uiSeed))});

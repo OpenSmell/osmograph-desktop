@@ -30,7 +30,6 @@ page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
 await page.addInitScript({ content: MOCK });
 await page.addInitScript({
   content: `try {
-    localStorage.setItem('osmograph.wizard.seen.v1', '1');
     localStorage.removeItem('osmograph.updatePolicy');
     localStorage.removeItem('osmograph.updateChannel');
     localStorage.removeItem('osmograph.updateSkipped');

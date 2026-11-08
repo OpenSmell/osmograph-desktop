@@ -37,7 +37,6 @@ if (!homeHtml) {
 const pack = { ...manifest, sourceUrl: `https://raw.githubusercontent.com/praisejamesx/${manifest.id.split('.')[1]}/main/vial.json` };
 const seedUi = { [manifest.id + '::home']: { version: manifest.version, html: homeHtml, fetchedAt: Date.now() } };
 const SEED = `try {
-  localStorage.setItem('osmograph.wizard.seen.v1', '1');
   localStorage.setItem('osmograph.domain.packs.v1', ${JSON.stringify(JSON.stringify([pack]))});
   localStorage.setItem('osmograph.domain.installed.v1', ${JSON.stringify(JSON.stringify([manifest.id]))});
   localStorage.setItem('osmograph.domain.ui.v1', ${JSON.stringify(JSON.stringify(seedUi))});

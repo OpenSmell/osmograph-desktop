@@ -1,5 +1,11 @@
 # Osmograph Changelog
 
+## Unreleased
+- Removed the dark first-run wizard. Osmograph now lands on Home with an inline start card:
+  replay a sample, download a public corpus, import a recording, or connect a rig.
+- A fresh install no longer opens the empty Gallery. Explore defaults to Datasets until there is
+  something in the library, and the Gallery's empty state now offers the same starting paths.
+
 ## v0.1.2-beta.2 — update delivery
 - Updates check automatically by default: once on launch, then at most once a day while the app stays
   open. Manual and Never remain available, and the 15-minute failure back-off stops offline launches

@@ -28,9 +28,9 @@ not a universal smell identifier, a concentration meter, or a safety instrument.
 - **Vial Home handoff**: choosing a Home Vial in Fleet opens its sandboxed domain view in place of
   the core dashboard and restores that choice on launch. Instrument link, baseline, and change state
   remain host-rendered; Exit returns to the core Home.
-- **No-hardware first run**: Explore ships 22 real, labelled SmellNet smells. Home's
-  **Try a comparison** selects the starter pair and opens Analyse → Compare without pretending a
-  rig is connected.
+- **No-hardware first run**: Home starts with an inline card — replay a real SmellNet recording,
+  download a public corpus, import a CSV, or connect a rig. No modal, no preloaded data, and no
+  empty Gallery as the first screen.
 - **Transforms + trim**: source → named steps → preview → Save `.osmell`. Use `trim.range` to cut a
   recording, smooth/filter, baseline, normalize, and add the derived result back to the library
   without overwriting the original.

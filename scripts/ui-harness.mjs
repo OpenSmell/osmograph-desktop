@@ -50,7 +50,6 @@ for (const v of seeded) {
   if (v.home) seedUi[v.manifest.id + '::home'] = { version: v.manifest.version, html: v.home, fetchedAt: Date.now() };
 }
 const SEED = `try {
-  localStorage.setItem('osmograph.wizard.seen.v1', '1');
   localStorage.setItem('osmograph.domain.packs.v1', ${JSON.stringify(JSON.stringify(seedPacks))});
   localStorage.setItem('osmograph.domain.installed.v1', ${JSON.stringify(JSON.stringify(seedInstalled))});
   localStorage.setItem('osmograph.domain.ui.v1', ${JSON.stringify(JSON.stringify(seedUi))});
@@ -72,7 +71,7 @@ page.on('console', m => {
 page.on('pageerror', e => errors.push('pageerror: ' + (e.stack || e.message)));
 
 await page.addInitScript({ content: MOCK });
-// Onboarding + the published vials are installed before the app boots.
+// Published vials are installed before the app boots.
 await page.addInitScript({ content: SEED });
 await page.setDefaultTimeout(6000);
 await page.goto(URL_, { waitUntil: 'domcontentloaded' });
@@ -89,22 +88,24 @@ const shot = async (name) => {
 
 await shot('01-boot');
 
-// No-hardware first run: the dashboard offers the Playground (a real
-// recording, replayed) so the app has value on a machine that has never seen a
-// rig. The empty state is only on screen while no link exists, which can race
-// boot auto-connect — assert the control exists and is inside that state, and
-// exercise the full flow through the command palette at the end.
-const pgEntry = await page.evaluate(() => {
-  const button = document.getElementById('dashPlayground');
+// No-hardware first run: land on Home, not a modal or an empty Gallery. The
+// inline card must offer the real starting paths (sample, data, import, rig).
+const firstRun = await page.evaluate(() => {
   const empty = document.getElementById('dashboardEmpty');
+  const ids = ['dashPlayground', 'dashGetData', 'dashImport', 'dashConnect'];
   return {
-    present: !!button,
-    inEmptyState: !!button && !!empty && empty.contains(button),
+    wizard: !!document.getElementById('wizard'),
+    dashboardActive: document.getElementById('panel-dashboard')?.classList.contains('active') || false,
+    exploreActive: document.getElementById('panel-explore')?.classList.contains('active') || false,
     emptyVisible: !!empty && empty.getBoundingClientRect().height > 0,
+    controls: ids.map(id => !!document.getElementById(id)),
   };
 });
-console.log('playground entry:', JSON.stringify(pgEntry));
-if (!pgEntry.inEmptyState) errors.push('the no-rig dashboard does not offer the Playground');
+console.log('first run:', JSON.stringify(firstRun));
+if (firstRun.wizard) errors.push('the first-run wizard still exists');
+if (!firstRun.dashboardActive || firstRun.exploreActive) errors.push('first run did not land on Home');
+if (!firstRun.emptyVisible) errors.push('the no-rig Home start card is not visible');
+if (firstRun.controls.some(v => !v)) errors.push('the Home start card is missing a starting path');
 
 // Connect the synthetic rig through the real Connect button path.
 await page.evaluate(() => {

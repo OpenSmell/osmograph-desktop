@@ -682,7 +682,10 @@ function showWorkspaceDefault(ws: WorkspaceKey): void {
     activateWorkspace(ws);
     return;
   }
-  showWorkspaceView(workspaceLastView[ws] || WORKSPACE_DEFAULT[ws]);
+  // A fresh install has no gallery. Open the corpus shelf instead of an empty
+  // grid so the first Explore click has something to act on.
+  const fallback = ws === 'explore' && !sessions.length ? 'datasets' : WORKSPACE_DEFAULT[ws];
+  showWorkspaceView(workspaceLastView[ws] || fallback);
 }
 
 installWorkspaceShell();
@@ -740,37 +743,6 @@ document.getElementById('exportTracesPng')?.addEventListener('click', () =>
   exportCanvasPng(document.getElementById('traces') as HTMLCanvasElement, 'osmograph-traces.png'));
 document.getElementById('exportFingerprintPng')?.addEventListener('click', () =>
   exportCanvasPng(document.getElementById('fingerprint') as HTMLCanvasElement, 'osmograph-fingerprint.png'));
-
-// === First-run wizard (shown once, dismissed forever) ===
-(function initFirstRunWizard() {
-  const KEY = 'osmograph.wizard.seen.v1';
-  const wiz = document.getElementById('wizard');
-  if (!wiz) return;
-  try { if (localStorage.getItem(KEY) === '1') return; } catch { return; }
-  const slides = wiz.querySelectorAll('.wslide');
-  const dots = wiz.querySelectorAll('.wdot');
-  const back = document.getElementById('wizardBack') as HTMLButtonElement;
-  const next = document.getElementById('wizardNext') as HTMLButtonElement;
-  let step = 0;
-  const draw = () => {
-    slides.forEach((s, i) => s.classList.toggle('active', i === step));
-    dots.forEach((d, i) => d.classList.toggle('active', i === step));
-    back.style.display = step > 0 ? '' : 'none';
-    next.textContent = step === slides.length - 1 ? 'Get started' : 'Next';
-  };
-  const close = () => {
-    wiz.style.display = 'none';
-    try { localStorage.setItem(KEY, '1'); } catch { /* ignore */ }
-  };
-  document.getElementById('wizardSkip')?.addEventListener('click', close);
-  next.addEventListener('click', () => {
-    if (step < slides.length - 1) { step++; draw(); }
-    else { close(); void showWorkspaceView('smells'); }
-  });
-  back.addEventListener('click', () => { if (step > 0) { step--; draw(); } });
-  draw();
-  wiz.style.display = 'flex';
-})();
 
 // === Canvas: Traces ===
 const tracesCanvas = document.getElementById('traces') as HTMLCanvasElement;
@@ -2001,9 +1973,24 @@ function setPlotLink(on: boolean) {
   el.classList.toggle('on', on);
   document.body.classList.toggle('no-rig', !on);
   document.getElementById('dashboardEmpty')?.classList.toggle('show', !on);
+  updateDashboardEmptyActions();
   if (!on) clearAnomalyForNoRig();
   renderVialHome();
   renderSysPorts();
+}
+
+function updateDashboardEmptyActions(): void {
+  const hasData = sessions.length > 0;
+  const title = document.getElementById('dashboardEmptyTitle');
+  const copy = document.getElementById('dashboardEmptyCopy');
+  const note = document.getElementById('dashLibraryNote');
+  if (title) title.textContent = hasData ? 'No rig connected.' : 'Start with something real.';
+  if (copy) {
+    copy.textContent = hasData
+      ? 'Your saved recordings are still here. Replay one, open the library, or connect a rig for live readings.'
+      : 'No hardware needed. Replay a real recording, download a public dataset, import a CSV, or connect your own e-nose.';
+  }
+  if (note) note.hidden = !hasData;
 }
 
 function clearAnomalyForNoRig(): void {
@@ -2603,8 +2590,8 @@ async function renderRigHealth(s: SessionRecord): Promise<void> {
 function autoInspectOwnRig(): void {
   if (selectedSession != null || !sessions.length) return;
   const idx = sessions.findIndex(s => (s.path || '').includes('Osmograph_Recordings/') && !(s.path || '').includes('/SmellNet/'));
-  // Never dress the bundled starter library up as "your rig". With no own
-  // recording there is nothing to inspect yet; the gallery is the right home.
+  // Never dress a downloaded corpus up as "your rig". With no own recording
+  // there is nothing to inspect yet; leave the person on Home.
   if (idx < 0) return;
   selectedSession = idx;
   renderLibrary();
@@ -5934,12 +5921,27 @@ async function renderSmellGallery(): Promise<void> {
   if (stamp) stamp.textContent = `${visible.length} smell${visible.length === 1 ? '' : 's'}`;
 
   if (!visible.length) {
-    grid.innerHTML = `<div class="smells-empty">
-      <b>No smells match that.</b>
-      Try a shorter search, or clear the filters to see the whole library.
-      <div style="margin-top:10px"><button class="mini-btn" id="smellClearFilters" type="button">Clear search and filters</button></div>
-    </div>`;
-    document.getElementById('smellClearFilters')?.addEventListener('click', resetSmellFilters);
+    if (!sessions.length) {
+      grid.innerHTML = `<div class="smells-empty">
+        <b>Nothing in the library yet.</b>
+        Start with a real sample, download a public corpus, or import a CSV.
+        <div class="smells-empty-actions">
+          <button class="mini-btn primary" id="smellEmptyPlayground" type="button">Replay a sample</button>
+          <button class="mini-btn" id="smellEmptyGetData" type="button">Download data</button>
+          <button class="mini-btn" id="smellEmptyImport" type="button">Import a file</button>
+        </div>
+      </div>`;
+      document.getElementById('smellEmptyPlayground')?.addEventListener('click', () => { void openPlayground(); });
+      document.getElementById('smellEmptyGetData')?.addEventListener('click', () => showWorkspaceView('datasets'));
+      document.getElementById('smellEmptyImport')?.addEventListener('click', () => document.getElementById('libImport')?.click());
+    } else {
+      grid.innerHTML = `<div class="smells-empty">
+        <b>No smells match that.</b>
+        Try a shorter search, or clear the filters to see the whole library.
+        <div style="margin-top:10px"><button class="mini-btn" id="smellClearFilters" type="button">Clear search and filters</button></div>
+      </div>`;
+      document.getElementById('smellClearFilters')?.addEventListener('click', resetSmellFilters);
+    }
     updateSmellSelection();
     void renderSmellSeparation();
     return;
@@ -10468,6 +10470,7 @@ async function reloadLibrary() {
   if (document.getElementById('src-smells')?.classList.contains('active')) void renderSmellGallery();
   if (document.getElementById('src-check')?.classList.contains('active')) void renderCheckView(true);
   autoInspectOwnRig();
+  updateDashboardEmptyActions();
 }
 
 // Recover recordings that were interrupted before save (a crash left a
@@ -10522,6 +10525,12 @@ document.getElementById('libImport')!.addEventListener('click', async () => {
     await invoke('import_paths', { paths: list });
     await reloadLibrary();
     await flashStatus('libStatus', `Imported ${list.length} file(s)`);
+    showToast(`Imported ${list.length} recording${list.length === 1 ? '' : 's'}.`);
+    // Importing from the Home start card should land on the result, not leave
+    // the person staring at the same empty instrument.
+    if (document.getElementById('panel-dashboard')?.classList.contains('active')) {
+      showWorkspaceView('sessions');
+    }
   } catch (e) {
     await flashStatus('libStatus', `Import failed: ${e}`, 'var(--red)');
   }
@@ -14421,8 +14430,14 @@ function updateTransportUI() {
 }
 document.getElementById('livePlayPause')!.addEventListener('click', toggleLivePause);
 document.getElementById('liveClear')!.addEventListener('click', clearLiveView);
-document.getElementById('dashExplore')?.addEventListener('click', () => {
-  showWorkspaceView('smells');
+document.getElementById('dashGetData')?.addEventListener('click', () => {
+  showWorkspaceView('datasets');
+});
+document.getElementById('dashImport')?.addEventListener('click', () => {
+  document.getElementById('libImport')?.click();
+});
+document.getElementById('dashLibrary')?.addEventListener('click', () => {
+  showWorkspaceView('sessions');
 });
 document.getElementById('dashPlayground')?.addEventListener('click', () => {
   void openPlayground();
@@ -15618,18 +15633,11 @@ reloadLibrary()
 setTimeout(() => { refreshDataPanel().then(refreshHub).catch(() => {}); }, 200);
 checkRecoveredSessions();
 
-// Land where there is something to do. With a device link the live dashboard is
-// the right home; with no link it is an empty cockpit, so open the library —
-// which now holds the starter pack — instead of a blank instrument panel.
+// Home is the instrument and the first-run starting point. Do not auto-open
+// Explore: a fresh install has no gallery, and a returning user should see the
+// rig state before a library. Home's inline start card offers the real paths.
 function landOnWork(): void {
-  if (connected) return;
-  if (!sessions.length) {
-    // No rig and no data: show the corpus shelf, not an empty cockpit.
-    showWorkspaceView('datasets');
-    return;
-  }
-  const onDashboard = document.querySelector('.tab-btn[data-tab="dashboard"]')?.classList.contains('active');
-  if (onDashboard) showWorkspaceView('smells');
+  updateDashboardEmptyActions();
 }
 
 // Fit the window to the screen: never let it overstretch past the monitor's
