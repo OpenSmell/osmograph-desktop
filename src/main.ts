@@ -4567,6 +4567,7 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
       ? {
           enabled: runtime.pack.anomaly.detection.enabled,
           alertThreshold: runtime.pack.anomaly.detection.alertThreshold,
+          minChannels: runtime.pack.anomaly.detection.minChannels,
           perChannelLimits: runtime.pack.anomaly.detection.perChannelLimits,
         }
       : runtime?.detectionConfig || null,
@@ -7745,23 +7746,15 @@ function evaluateVialDetection(
   snapshot: VialHost.VialHostSnapshot,
   series: VialRuntime.VialSeriesWindow | null,
 ): VialHost.VialDetectionResult {
-  const triggeredChannels: string[] = [];
-  const responseValues = series?.response?.values || [];
-  for (const [channelId, limit] of Object.entries(config.perChannelLimits)) {
-    const index = snapshot.channels.findIndex(c => c.id === channelId);
-    if (index < 0) continue;
-    const latest = [...(responseValues[index] || [])]
-      .reverse()
-      .find(v => v !== null && Number.isFinite(v));
-    if (latest === undefined || latest === null) continue;
-    if (Math.abs(latest) >= limit) triggeredChannels.push(channelId);
-  }
-  const confidence = snapshot.anomaly.confidence;
-  const confidenceClears = confidence === null || confidence >= config.alertThreshold;
-  return {
-    active: config.enabled && triggeredChannels.length > 0 && confidenceClears,
-    triggeredChannels,
-  };
+  return VialProfile.evaluateBandDetection(
+    config.enabled,
+    config.alertThreshold,
+    config.minChannels ?? 1,
+    config.perChannelLimits,
+    snapshot.channels.map(channel => channel.id),
+    series?.response?.values || [],
+    snapshot.anomaly.confidence,
+  );
 }
 
 async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntime, force = false): Promise<void> {
@@ -7801,6 +7794,8 @@ async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntim
     const vialResult = vialDetectorResults.get(runtime.pack.id)!;
     const bands = profile?.detection.perChannelLimits || {};
     const bandChannels = Object.keys(bands);
+    const confidenceClears = !profile
+      || vialResult.calibrated_confidence >= profile.detection.alertThreshold;
     let result: VialHost.VialDetectionResult;
     if (bandChannels.length && runtime.detectionConfig && series?.response) {
       // The profile declares both a multivariate level budget and absolute
@@ -7808,14 +7803,13 @@ async function sendVialData(runtime: ActiveVialRuntime | null = activeVialRuntim
       // sustained multivariate change, and at least minChannels channels must
       // clear their declared band. Neither lever is decorative.
       const band = evaluateVialDetection(runtime.detectionConfig, snapshot, series);
-      const minChannels = Math.max(1, profile?.detection.minChannels || 1);
       result = {
-        active: vialResult.is_anomaly && band.triggeredChannels.length >= minChannels,
+        active: vialResult.is_anomaly && band.active && confidenceClears,
         triggeredChannels: band.triggeredChannels,
       };
     } else {
       result = {
-        active: vialResult.is_anomaly,
+        active: vialResult.is_anomaly && confidenceClears,
         triggeredChannels: vialResult.triggered_channels.map(i => snapshot.channels[i]?.id || `ch${i}`),
       };
     }

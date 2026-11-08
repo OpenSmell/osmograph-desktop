@@ -101,6 +101,75 @@ test('profile admissibility refuses a warming baseline and low coverage', () => 
   assert.match(none.reason, /coverage/i);
 });
 
+test('profile maps corroboration and persistence into the host detector', () => {
+  const profile = structuredClone(profileModule.VIAL_PROFILE_DEFAULTS);
+  profile.baseline.warmupS = 180;
+  profile.detection.minChannels = 2;
+  profile.detection.sensitivity = 1;
+  profile.detection.levelBudget = 4;
+  profile.detection.levelRefS = 0;
+  profile.detection.hysteresis = 0.25;
+  profile.detection.escalation = {
+    warningS: 90,
+    criticalS: 600,
+    emergencyS: 1800,
+    resetNormalS: 900,
+  };
+  const config = profileModule.profileToDetectorConfig(profile);
+  assert.equal(config.warmup_s, 180);
+  assert.equal(config.min_channels, 2);
+  assert.equal(config.level_budget, 4);
+  assert.equal(config.level_ref_s, 0);
+  assert.equal(config.warning_s, 90);
+  assert.equal(config.critical_s, 600);
+  assert.equal(config.emergency_s, 1800);
+  assert.equal(config.reset_normal_s, 900);
+  assert.equal(config.hysteresis, 0.25);
+});
+
+test('profile band gate requires minChannels and the confidence floor', () => {
+  const ids = ['ch0', 'ch1', 'ch2'];
+  const limits = { ch0: 0.1, ch1: 0.1, ch2: 0.1 };
+  const responses = [
+    [0.2, 0.25],
+    [0.01, 0.02],
+    [0.03, 0.04],
+  ];
+  const one = profileModule.evaluateBandDetection(true, 0.5, 2, limits, ids, responses, 0.9);
+  assert.equal(one.active, false, 'one channel must not satisfy minChannels=2');
+  assert.deepEqual(one.triggeredChannels, ['ch0']);
+
+  responses[1] = [0.0, 0.2];
+  const two = profileModule.evaluateBandDetection(true, 0.5, 2, limits, ids, responses, 0.9);
+  assert.equal(two.active, true);
+  assert.deepEqual(two.triggeredChannels, ['ch0', 'ch1']);
+
+  const lowConfidence = profileModule.evaluateBandDetection(true, 0.8, 2, limits, ids, responses, 0.4);
+  assert.equal(lowConfidence.active, false, 'confidence below the profile floor must refuse');
+
+  const disabled = profileModule.evaluateBandDetection(false, 0.5, 2, limits, ids, responses, 0.9);
+  assert.equal(disabled.active, false, 'a disabled profile must not arm');
+
+  const missing = profileModule.evaluateBandDetection(true, 0.5, 1, { ch9: 0.1 }, ids, responses, 0.9);
+  assert.equal(missing.active, false, 'a limit for an unknown channel must not invent a trigger');
+});
+
+test('profile coverage floor applies to all channels when no bands are declared', () => {
+  const profile = structuredClone(profileModule.VIAL_PROFILE_DEFAULTS);
+  profile.admissibility.minCoverage = 0.8;
+  const half = profileModule.profileAdmissibility(profile, {
+    baselineState: 'ready',
+    channelLive: { ch0: true, ch1: false },
+  });
+  assert.equal(half.admissible, false);
+  assert.match(half.reason, /coverage/i);
+  const all = profileModule.profileAdmissibility(profile, {
+    baselineState: 'ready',
+    channelLive: { ch0: true, ch1: true },
+  });
+  assert.equal(all.admissible, true);
+});
+
 test('sandbox rejects an unknown osmograph method', () => {
   assert.throws(() => runtime.assertSandboxableUi('<script>osmograph.getSnapshot()</script>'), /unknown osmograph method/i);
 });

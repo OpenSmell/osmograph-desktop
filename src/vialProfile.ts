@@ -325,10 +325,15 @@ export function profileAdmissibility(
   if (profile.admissibility.requireBaseline === 'ready' && state.baselineState !== 'ready') {
     return { admissible: false, reason: 'The baseline is not ready.' };
   }
+  // `perChannelLimits` names the channels a profile explicitly claims. When it
+  // is empty the profile still declares a coverage floor, so apply that floor
+  // to every channel the host currently knows about. Otherwise a missing
+  // channel would silently turn a coverage gate into a no-op.
   const declared = Object.keys(profile.detection.perChannelLimits);
-  if (declared.length) {
-    const live = declared.filter((id) => state.channelLive[id] === true).length;
-    const coverage = live / declared.length;
+  const coverageIds = declared.length ? declared : Object.keys(state.channelLive);
+  if (coverageIds.length) {
+    const live = coverageIds.filter((id) => state.channelLive[id] === true).length;
+    const coverage = live / coverageIds.length;
     if (coverage + 1e-9 < profile.admissibility.minCoverage) {
       return {
         admissible: false,
@@ -337,4 +342,46 @@ export function profileAdmissibility(
     }
   }
   return { admissible: true, reason: null };
+}
+
+export interface BandDetectionResult {
+  active: boolean;
+  triggeredChannels: string[];
+}
+
+/** The declared per-channel band gate. A Vial alert requires at least
+ *  `minChannels` live channels to clear their absolute response limit on the
+ *  latest finite sample, and the engine confidence to clear the profile floor.
+ *  A missing channel or a non-finite response never invents a trigger. */
+export function evaluateBandDetection(
+  enabled: boolean,
+  alertThreshold: number,
+  minChannels: number,
+  perChannelLimits: Record<string, number>,
+  channelIds: string[],
+  responseValues: Array<Array<number | null>>,
+  confidence: number | null,
+): BandDetectionResult {
+  const triggeredChannels: string[] = [];
+  for (const [channelId, limit] of Object.entries(perChannelLimits)) {
+    const index = channelIds.indexOf(channelId);
+    if (index < 0) continue;
+    const row = responseValues[index] || [];
+    let latest: number | null = null;
+    for (let i = row.length - 1; i >= 0; i--) {
+      const value = row[i];
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        latest = value;
+        break;
+      }
+    }
+    if (latest === null) continue;
+    if (Math.abs(latest) >= limit) triggeredChannels.push(channelId);
+  }
+  const required = Math.max(1, Math.floor(minChannels));
+  const confidenceClears = confidence === null || confidence >= alertThreshold;
+  return {
+    active: enabled && triggeredChannels.length >= required && confidenceClears,
+    triggeredChannels,
+  };
 }

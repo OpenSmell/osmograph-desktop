@@ -68,6 +68,7 @@ export interface ChannelLimit {
 export interface VialDetectionConfig {
   enabled: boolean;
   alertThreshold: number;   // 0..1, calibrated-confidence-equivalent floor
+  minChannels?: number;     // v2 profile corroboration floor; 1 for legacy Vials
   perChannelLimits: Record<string, number>; // channel id -> max allowed delta magnitude
 }
 
