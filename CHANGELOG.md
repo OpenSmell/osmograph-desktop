@@ -1,6 +1,19 @@
 # Osmograph Changelog
 
-## Unreleased
+## v0.1.2-beta.3 — Vial Home, transforms, and window fit
+- Home Vial switching is order-independent. The Vials page now has a Home Vial picker and a
+  per-card **Use as Home** action; the Home ribbon, Fleet dropdown, picker, and cards all use the
+  same path. Plant Respiration and Fermentation Lab can each become Home in either install order.
+- The Vials page leads with domain, licence, and source, and labels Home-capable, sandboxed, and
+  Ungated Vials. Card metadata is legible without zooming.
+- Plant Respiration and Fermentation Lab 0.6.1 distinguish a pending profile from a quiet window.
+  Fermentation withholds its array phase until the batch has started, and validates the start date.
+- The desktop window opens inside the monitor work area at the display's scale factor. The default
+  is 1100×700, the minimum is 640×360, and the window is hidden until it has been sized, so a
+  scaled Windows display no longer flashes or opens oversized.
+- Transforms are self-explanatory: a three-step explainer, a worked example, per-step hints,
+  **Preview result**, and **Save pipeline**. A transform pipeline binds one source recording,
+  previews the derived result, and never overwrites the original.
 - Removed the dark first-run wizard. Osmograph now lands on Home with an inline start card:
   replay a sample, download a public corpus, import a recording, or connect a rig.
 - A fresh install no longer opens the empty Gallery. Explore defaults to Datasets until there is

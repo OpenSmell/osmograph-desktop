@@ -79,8 +79,8 @@ const state = await page.evaluate(() => ({
 check('automatic policy is the default', state.policyAuto);
 check('prerelease build defaults to the Beta channel', state.channelBeta);
 check('version stage is derived from the tag', state.stage === 'Beta' && !state.stageHidden, state.stage);
-check('footer shows the real version', state.footer.includes('0.1.2-beta.2'), state.footer);
-check('about shows the real version', state.about.includes('0.1.2-beta.2'), state.about);
+check('footer shows the real version', state.footer.includes('0.1.2-beta.3'), state.footer);
+check('about shows the real version', state.about.includes('0.1.2-beta.3'), state.about);
 check('update status names the new version', state.status.includes('v0.1.3-beta.1'), state.status);
 check('release card is visible', state.notesVisible);
 check('release card shows what is new', state.notes.includes("What's new") && state.notes.includes('Faster live charts'));

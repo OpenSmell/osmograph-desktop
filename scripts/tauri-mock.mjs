@@ -72,7 +72,7 @@ export const MOCK = String.raw`
         listeners.get(a.event)?.delete(a.handler);
         return ok(null);
       }
-      case 'plugin:app|version': return ok('0.1.2-beta.2');
+      case 'plugin:app|version': return ok('0.1.2-beta.3');
       case 'plugin:os|platform': return ok('linux');
       case 'get_data_dir': return ok('/tmp/opencode/ui/data');
       case 'get_recordings_dir': return ok('/tmp/opencode/ui/data/recordings');
@@ -124,10 +124,10 @@ export const MOCK = String.raw`
           { name: 'Osmograph-linux-x86_64.AppImage', url: 'https://example.test/Osmograph-linux-x86_64.AppImage', size: 92_000_000, kind: 'appimage', recommended: true },
           { name: 'Osmograph-linux-amd64.deb', url: 'https://example.test/Osmograph-linux-amd64.deb', size: 12_000_000, kind: 'deb', recommended: false },
         ];
-        const base = { current_version: '0.1.2-beta.2', stage: 'beta', channel, policy: a.policy || 'auto', checked: true, last_checked: nowSec, latest: null, notice: '', error: null };
+        const base = { current_version: '0.1.2-beta.3', stage: 'beta', channel, policy: a.policy || 'auto', checked: true, last_checked: nowSec, latest: null, notice: '', error: null };
         const current = {
-          version: '0.1.2-beta.2', name: 'Osmograph 0.1.2-beta.2', notes: '', sections: [],
-          html_url: 'https://example.test/v0.1.2-beta.2', published_at: '2026-02-01T10:00:00Z', prerelease: true,
+          version: '0.1.2-beta.3', name: 'Osmograph 0.1.2-beta.3', notes: '', sections: [],
+          html_url: 'https://example.test/v0.1.2-beta.3', published_at: '2026-02-01T10:00:00Z', prerelease: true,
           recommended_url: assets[0].url, recommended_name: assets[0].name, assets, updater_url: null,
         };
         const latest = {

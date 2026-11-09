@@ -3021,7 +3021,7 @@ dependencies = [
 
 [[package]]
 name = "osmograph-desktop"
-version = "0.1.2-beta.2"
+version = "0.1.2-beta.3"
 dependencies = [
  "base64 0.22.1",
  "btleplug",
