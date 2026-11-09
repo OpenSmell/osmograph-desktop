@@ -92,6 +92,20 @@ export const MOCK = String.raw`
         const i = ['h1', 'h2', 'h3'].indexOf(a.fileId);
         return ok(mkSeries(1800 + (i < 0 ? 0 : i) * 150, 2.5, sessions[i]?.substance || 'coffee'));
       }
+      case 'recipe_list': return ok([]);
+      case 'recipe_ops': return ok([
+        { op: 'trim.range', intent: 'Trim to an explicit start/end second window', status: 'core', implemented: true },
+        { op: 'missing.fill', intent: 'Fill gaps (linear / LOCF) and flag them', status: 'core', implemented: true },
+        { op: 'outlier.remove', intent: 'z-score / IQR / Hampel outlier removal', status: 'core', implemented: true },
+        { op: 'smooth.ema', intent: 'Exponential moving average', status: 'core', implemented: true },
+        { op: 'smooth.movavg', intent: 'Moving average', status: 'core', implemented: true },
+        { op: 'detrend.linear', intent: 'Remove a linear/polynomial baseline roll', status: 'core', implemented: true },
+        { op: 'baseline.select', intent: 'Pick the reference window (pre-exposure / first-N / rolling)', status: 'core', implemented: true },
+        { op: 'response.ratio', intent: 'Response definition ΔR/R0', status: 'core', implemented: true },
+        { op: 'normalize.r0', intent: 'Per-channel / per-session / per-rig R0 normalization', status: 'core', implemented: true },
+        { op: 'scale.minmax', intent: 'Min–max scaling', status: 'core', implemented: true },
+        { op: 'scale.zscore', intent: 'Z-score scaling', status: 'core', implemented: true },
+      ]);
       case 'assess_recording_health': return ok(health);
       case 'get_sensor_health': return ok(health);
       case 'list_serial_ports': return ok([{ name: '/dev/ttyACM0', description: 'Harness rig (mock)', kind: 'serial', hw_type: 'usb', manufacturer: 'OpenSmell' }]);

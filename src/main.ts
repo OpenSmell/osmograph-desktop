@@ -651,6 +651,10 @@ function activateWorkspace(ws: WorkspaceKey): void {
     requestAnimationFrame(() => {
       resizeTraces();
       redrawFingerprintIfReady();
+      // The Home ribbon follows the open workspace when no Home Vial is pinned.
+      // Re-render on every entry so a Vial opened from Vials cannot leave a
+      // stale Home bar behind (and so switching Vials as Home is order-free).
+      renderVialHome();
     });
   }
 }
@@ -3504,9 +3508,7 @@ function renderFleet() {
     (b.status === 'online' ? 1 : 0) - (a.status === 'online' ? 1 : 0));
   document.getElementById('fleetBadge')!.style.display = '';
   document.getElementById('fleetBadge')!.textContent = fleetDevices.length.toString();
-  const installedHomeVials = Domain.loadInstalledIds()
-    .map(id => Domain.domainPackById(id))
-    .filter((pack): pack is Domain.DomainPack => !!pack && !!pack.home);
+  const homeVials = installedHomeVials();
   const appliedVial = selectedHomeVialId() || '';
   grid.innerHTML = sorted.map(d => {
     const statusClass = d.status;
@@ -3520,12 +3522,12 @@ function renderFleet() {
       ? d.kind.replace(/_/g, ' ').toUpperCase() : 'UNKNOWN';
     const recognizedTxt = d.is_recognized;
     const badgeHtml = `<span class="fleet-kind ${recognizedTxt ? 'recognized' : 'unknown'}">${recognizedTxt ? '●' : '○'} ${kindLabel}</span>`;
-    const vialRow = installedHomeVials.length
+    const vialRow = homeVials.length
       ? `<div class="dev-vial-row">
           <span class="dev-vial-label">Home Vial</span>
           <select class="fleet-vial-select" data-device-id="${esc(d.id)}" title="Choose the Vial for Home. A Vial with a Home view opens in place of the dashboard.">
             <option value="">None</option>
-            ${installedHomeVials.map(p => `<option value="${esc(p.id)}"${p.id === appliedVial ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
+            ${homeVials.map(p => `<option value="${esc(p.id)}"${p.id === appliedVial ? ' selected' : ''}>${esc(p.name)}</option>`).join('')}
           </select>
           <button class="mini-btn" type="button" data-fleet-live="${esc(d.id)}" title="Open the live Home view">Live →</button>
         </div>`
@@ -7009,6 +7011,62 @@ function setSelectedHomeVialId(id: string): void {
   } catch { /* ignore */ }
   renderVialHome();
 }
+
+/** Installed Vials that can contribute to Home, in install order. */
+function installedHomeVials(): Domain.DomainPack[] {
+  return Domain.loadInstalledIds()
+    .map(id => Domain.domainPackById(id))
+    .filter((pack): pack is Domain.DomainPack => !!pack && !!(pack.home || pack.homeUi));
+}
+
+/** Keep the Vials-page selector in step with Fleet and the Home ribbon. */
+function renderHomeVialPicker(): void {
+  const select = document.getElementById('homeVialSelect') as HTMLSelectElement | null;
+  const core = document.getElementById('homeVialCore') as HTMLButtonElement | null;
+  if (!select) return;
+  const vials = installedHomeVials();
+  const selected = selectedHomeVialId() || '';
+  select.innerHTML = '<option value="">Core Home (instrument)</option>' + vials.map(pack => {
+    const suffix = pack.homeUi ? ' · Home view' : ' · Home summary';
+    return `<option value="${escapeHtmlText(pack.id)}"${pack.id === selected ? ' selected' : ''}>${escapeHtmlText(pack.name)}${suffix}</option>`;
+  }).join('');
+  select.disabled = vials.length === 0;
+  if (core) core.disabled = !selected;
+}
+
+/** One path for Fleet, the Vials picker, and the card action. Returns whether
+ *  the requested Vial is now the Home Vial. */
+function setHomeVial(id: string, notify = true): boolean {
+  if (!id) {
+    clearHomeTakeover();
+    setSelectedHomeVialId('');
+    renderHomeVialPicker();
+    if (notify) showToast('Core instrument Home restored.');
+    return true;
+  }
+  const pack = Domain.domainPackById(id);
+  if (!pack || !(pack.home || pack.homeUi)) {
+    renderHomeVialPicker();
+    if (notify) showToast('That Vial is no longer installed or has no Home view.');
+    return false;
+  }
+  if (pack.homeUi) {
+    if (!resolveDomainUiHtml(pack, 'home')) {
+      renderHomeVialPicker();
+      if (notify) showToast(`${pack.name} Home view is not cached. Reinstall the Vial to fetch home.html.`);
+      return false;
+    }
+    activateHomeTakeover(pack.id);
+    renderHomeVialPicker();
+    if (notify && homeTakeoverVialId === pack.id) showToast(`${pack.name} is now Home.`);
+    return homeTakeoverVialId === pack.id;
+  }
+  clearHomeTakeover();
+  setSelectedHomeVialId(pack.id);
+  renderHomeVialPicker();
+  if (notify) showToast(`${pack.name} is set as the Home summary.`);
+  return true;
+}
 let activeDomainState: Domain.DomainState | null = null;
 let activeDomainHotspot: string | null = null;
 let domainRemoveArm: { id: string; timer: number; button: HTMLButtonElement } | null = null;
@@ -7282,13 +7340,20 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
   const sourceHref = domainSourceHref(pack);
   const sourceHost = domainSourceHost(sourceHref);
   const gate = Domain.validateDomainPack(pack, true);
-  const gateStatus = pack.schema === 'osmograph.domain-pack/2'
-    ? (gate.gated ? ' · Gated' : ' · Ungated · add a fixture')
-    : ' · legacy · Ungated';
+  const gateLabel = pack.schema === 'osmograph.domain-pack/2'
+    ? (gate.gated ? 'Gated' : 'Ungated')
+    : 'Legacy';
+  const gateTitle = gate.gated
+    ? 'Gated: the local gate passed and a held-out evidence block is present.'
+    : 'Ungated: the local gate passed, but no held-out evidence block is published. Read the limits before relying on it.';
   const state = installed ? 'installed' : 'source';
-  const cockpit = pack.ui ? ' · sandboxed UI' : '';
+  const isHome = installed && selectedHomeVialId() === pack.id;
+  const homeAction = installed && (pack.home || pack.homeUi)
+    ? `<button class="mini-btn" type="button" data-domain-home="${escapeHtmlText(pack.id)}"${isHome ? ' disabled' : ''} title="${isHome ? 'This Vial owns Home' : 'Put this Vial’s compact view on Home'}">${isHome ? 'Home ✓' : 'Use as Home'}</button>`
+    : '';
   const actions = installed
     ? `<button class="mini-btn primary" type="button" data-domain-open="${escapeHtmlText(pack.id)}">Open</button>
+       ${homeAction}
        ${sourceHref ? `<a class="text-link domain-source" href="${escapeHtmlText(sourceHref)}" target="_blank" rel="noopener noreferrer" title="Manifest source">Source ↗</a>` : ''}
        <details class="ds-row-menu domain-menu">
          <summary title="More actions">⋯</summary>
@@ -7313,7 +7378,12 @@ function domainCardHtml(pack: Domain.DomainPack, installed: boolean): string {
       <span class="domain-card-state ${state}">${state}</span>
     </div>
     <div class="domain-card-tagline">${escapeHtmlText(pack.tagline)}</div>
-    <div class="domain-card-meta">${escapeHtmlText(pack.domain)} · ${escapeHtmlText(pack.license)} · ${gate.checks.filter(c => c.passed).length}/${gate.checks.length} gate${cockpit}${gateStatus}${sourceHost ? ` · ${escapeHtmlText(sourceHost)}` : ''}</div>
+    <div class="domain-card-meta">${escapeHtmlText(pack.domain)} · ${escapeHtmlText(pack.license)}${sourceHost ? ` · ${escapeHtmlText(sourceHost)}` : ''}</div>
+    <div class="domain-card-tags">
+      <span class="domain-card-tag ${gate.gated ? 'gated' : 'ungated'}" title="${escapeHtmlText(gateTitle)}">${gateLabel}</span>
+      ${pack.ui ? '<span class="domain-card-tag">Sandboxed UI</span>' : ''}
+      ${pack.homeUi ? '<span class="domain-card-tag home">Home view</span>' : pack.home ? '<span class="domain-card-tag home">Home summary</span>' : ''}
+    </div>
     <div class="domain-card-actions">${actions}</div>
   </div>`;
 }
@@ -8087,9 +8157,10 @@ function activateHomeTakeover(id: string): void {
     showToast('This Vial’s Home view is not cached. Reinstall it to fetch home.html.');
     return;
   }
-  activateWorkspace('dashboard');
   homeTakeoverVialId = id;
   setSelectedHomeVialId(id);
+  activateWorkspace('dashboard');
+  renderHomeVialPicker();
   document.getElementById('vialTakeoverExit')?.focus();
 }
 
@@ -9011,12 +9082,21 @@ document.addEventListener('keydown', (ev) => {
 });
 
 document.getElementById('domainBack')?.addEventListener('click', closeDomainWorkspace);
+document.getElementById('homeVialSelect')?.addEventListener('change', (ev) => {
+  const select = ev.target as HTMLSelectElement;
+  if (!setHomeVial(select.value)) select.value = selectedHomeVialId() || '';
+});
+document.getElementById('homeVialCore')?.addEventListener('click', () => {
+  setHomeVial('');
+});
 document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   const target = ev.target as HTMLElement;
   const tab = target.closest<HTMLElement>('[data-vials-tab]');
   if (tab?.dataset.vialsTab) { setVialsTab(tab.dataset.vialsTab); return; }
   const tabGo = target.closest<HTMLElement>('[data-vials-tab-go]');
   if (tabGo?.dataset.vialsTabGo) { setVialsTab(tabGo.dataset.vialsTabGo); return; }
+  const home = target.closest<HTMLElement>('[data-domain-home]');
+  if (home?.dataset.domainHome) { setHomeVial(home.dataset.domainHome); return; }
   const registryInstall = target.closest<HTMLButtonElement>('[data-registry-install]');
   if (registryInstall?.dataset.registryInstall) {
     let assets: Record<string, string> = {};
@@ -9186,6 +9266,7 @@ function renderVials(): void {
   const aromatory = document.getElementById('vialsAromatoryCount');
   if (workspaces) workspaces.textContent = String(installed);
   if (aromatory) aromatory.textContent = String(allDomain.length);
+  renderHomeVialPicker();
   renderDomainArea();
   syncVialsTabs();
 }
@@ -11066,31 +11147,7 @@ document.getElementById('fleetGrid')?.addEventListener('click', (ev) => {
 document.getElementById('fleetGrid')?.addEventListener('change', (ev) => {
   const select = (ev.target as HTMLElement).closest<HTMLSelectElement>('.fleet-vial-select');
   if (!select) return;
-  if (!select.value) {
-    clearHomeTakeover();
-    setSelectedHomeVialId('');
-    showToast('Core instrument Home restored.');
-    return;
-  }
-  const pack = Domain.domainPackById(select.value);
-  if (!pack?.home) {
-    select.value = selectedHomeVialId() || '';
-    showToast('That Home Vial is no longer installed.');
-    return;
-  }
-  if (pack.homeUi) {
-    if (!resolveDomainUiHtml(pack, 'home')) {
-      select.value = selectedHomeVialId() || '';
-      showToast(`${pack.name} Home view is not cached. Reinstall the Vial to fetch it.`);
-      return;
-    }
-    activateHomeTakeover(pack.id);
-    if (homeTakeoverVialId === pack.id) showToast(`${pack.name} is now Home.`);
-    return;
-  }
-  clearHomeTakeover();
-  setSelectedHomeVialId(pack.id);
-  showToast(`${pack.name} is set as the Home summary.`);
+  if (!setHomeVial(select.value)) select.value = selectedHomeVialId() || '';
 });
 
 // OLED + Buzzer: conditional (only if the user actually has the peripheral
@@ -12719,20 +12776,35 @@ function recipeSlug(name: string): string {
 }
 
 function recipeStepRow(op = '', channel: number | string = '', params = ''): string {
-  const initial = op || recipeOpsCache.find((o) => o.implemented)?.op || '';
-  const opts = recipeOpsCache
+  const ops = Array.isArray(recipeOpsCache) ? recipeOpsCache : [];
+  const initial = op || ops.find((o) => o.implemented)?.op || '';
+  const opts = ops
     .map((o) => {
       const selected = o.op === initial ? ' selected' : '';
       const disabled = o.implemented ? '' : ' disabled';
       return `<option value="${esc(o.op)}"${selected}${disabled}>${esc(o.op)}${o.implemented ? '' : ' (planned)'}</option>`;
     })
     .join('');
+  const info = ops.find((o) => o.op === initial);
+  const hint = info ? `${info.intent}${initial === 'trim.range' ? ' Example: start=0,end=30.' : ''}` : 'Choose a runnable step.';
   return `<div class="rec-step">
     <select class="stepOp" title="Named transform">${opts}</select>
     <input class="stepChannel" type="number" min="0" placeholder="ch" title="Target channel; blank = all" value="${channel}" />
     <input class="stepParams" placeholder="window=5" title="Parameters" value="${esc(params)}" />
     <button class="mini-btn stepDel" type="button">&times;</button>
+    <div class="rec-step-hint">${esc(hint)}</div>
   </div>`;
+}
+
+function updateRecipeStepHint(row: HTMLElement | null): void {
+  if (!row) return;
+  const op = (row.querySelector('.stepOp') as HTMLSelectElement | null)?.value || '';
+  const hint = row.querySelector<HTMLElement>('.rec-step-hint');
+  if (!hint) return;
+  const info = (Array.isArray(recipeOpsCache) ? recipeOpsCache : []).find((o) => o.op === op);
+  hint.textContent = info
+    ? `${info.intent}${op === 'trim.range' ? ' Example: start=0,end=30.' : ''}`
+    : 'Choose a runnable step.';
 }
 
 function renderRecipeList(list: Recipe[]) {
@@ -12740,7 +12812,7 @@ function renderRecipeList(list: Recipe[]) {
   if (!el) return;
   el.classList.add('recipe-list');
   if (!list.length) {
-    el.innerHTML = '<div class="hint">No saved recipes yet — create one above.</div>';
+    el.innerHTML = '<div class="hint">No saved pipelines yet — create one above. A pipeline is reusable; the derived recording is a separate file.</div>';
     return;
   }
   el.innerHTML = list
@@ -12773,10 +12845,15 @@ function renderRecipeOps(ops: OpInfo[]) {
 
 async function refreshRecipes() {
   try {
-    const [list, ops] = await Promise.all([
+    const [listRaw, opsRaw] = await Promise.all([
       invoke<Recipe[]>('recipe_list'),
-      recipeOpsCache.length ? Promise.resolve(recipeOpsCache) : invoke<OpInfo[]>('recipe_ops'),
+      Array.isArray(recipeOpsCache) && recipeOpsCache.length ? Promise.resolve(recipeOpsCache) : invoke<OpInfo[]>('recipe_ops'),
     ]);
+    // The Tauri mock in the browser harness resolves an unknown command as
+    // null. Keep the catalog an array so the editor can still open and explain
+    // that no runnable steps are available instead of throwing on `.length`.
+    const list = Array.isArray(listRaw) ? listRaw : [];
+    const ops = Array.isArray(opsRaw) ? opsRaw : [];
     recipeOpsCache = ops;
     renderRecipeList(list);
     renderRecipeOps(ops);
@@ -12810,7 +12887,7 @@ function populateRecipeSources(selected?: string) {
 }
 
 async function ensureRecipeOps() {
-  if (!recipeOpsCache.length) await refreshRecipes();
+  if (!Array.isArray(recipeOpsCache) || !recipeOpsCache.length) await refreshRecipes();
 }
 
 function openRecipeEditor(r?: Recipe) {
@@ -12840,9 +12917,12 @@ function openRecipeEditor(r?: Recipe) {
   currentEditingId = r?.id || null;
   const msg = document.getElementById('recMsg')!;
   msg.style.color = 'var(--text-3)';
+  const hasSource = sessions.some((s) => !!s.file_id);
   msg.textContent = r
-    ? `Editing ${r.id}`
-    : 'New recipe — source and two steps are prefilled. Press Run.';
+    ? `Editing ${r.id}. Preview the result before saving.`
+    : hasSource
+      ? 'New pipeline — source and two steps are prefilled. Preview the result, then save the pipeline or the derived .osmell.'
+      : 'No indexed recording yet. Import a CSV or .osmell in Explore → Recordings, then return here.';
 }
 
 function collectSteps(): RecipeStep[] {
@@ -13018,7 +13098,8 @@ function recipeRunInput(): { fileId: string; steps: RecipeStep[] } | null {
     msg.textContent = 'Add at least one step.';
     return null;
   }
-  const planned = steps.filter((s) => !recipeOpsCache.find((o) => o.op === s.op)?.implemented);
+  const ops = Array.isArray(recipeOpsCache) ? recipeOpsCache : [];
+  const planned = steps.filter((s) => !ops.find((o) => o.op === s.op)?.implemented);
   if (planned.length) {
     msg.style.color = 'var(--red)';
     msg.textContent = `Not runnable yet: ${planned.map((s) => s.op).join(', ')}. Replace with a runnable op.`;
@@ -13083,6 +13164,11 @@ async function saveRecipeResult() {
 function initRecipes() {
   refreshRecipes();
   document.getElementById('recipeNew')?.addEventListener('click', async () => {
+    if (!sessions.some((s) => !!s.file_id)) {
+      showToast('Transforms needs a source recording. Import one in Explore → Recordings.');
+      showWorkspaceView('sessions');
+      return;
+    }
     await ensureRecipeOps();
     openRecipeEditor();
   });
@@ -13097,7 +13183,7 @@ function initRecipes() {
     const msg = document.getElementById('recMsg');
     if (msg) {
       msg.style.color = 'var(--text-3)';
-      msg.textContent = 'Trim step added. Set start/end seconds, then Run.';
+      msg.textContent = 'Trim step added. Set start/end seconds, then Preview result.';
     }
   });
   document.getElementById('recRun')?.addEventListener('click', runRecipe);
@@ -13105,6 +13191,10 @@ function initRecipes() {
   document.getElementById('recSave')?.addEventListener('click', saveRecipe);
   document.getElementById('recSourceSel')?.addEventListener('change', hideRecipeResult);
   document.getElementById('recSteps')?.addEventListener('input', hideRecipeResult);
+  document.getElementById('recSteps')?.addEventListener('change', (ev) => {
+    const select = (ev.target as HTMLElement).closest<HTMLSelectElement>('.stepOp');
+    if (select) updateRecipeStepHint(select.closest('.rec-step') as HTMLElement);
+  });
   document.getElementById('recCancel')?.addEventListener('click', () => {
     document.getElementById('recipeEditor')!.style.display = 'none';
     hideRecipeResult();
@@ -15641,7 +15731,11 @@ function landOnWork(): void {
 }
 
 // Fit the window to the screen: never let it overstretch past the monitor's
-// work area. Degrades silently when the core doesn't grant window sizing.
+// work area. Monitor sizes are physical pixels; Tauri's setSize is logical, so
+// convert with the monitor scale factor first. On a 1366×768 Windows laptop at
+// 125%, a raw 1366×768 LogicalSize becomes 1707×960 physical and runs off the
+// screen. The Rust setup does the same calculation before the window is shown;
+// this is the fallback for browser/dev and display changes.
 async function fitWindowToScreen() {
   try {
     const { getCurrentWindow, currentMonitor } = await import('@tauri-apps/api/window');
@@ -15649,9 +15743,10 @@ async function fitWindowToScreen() {
     const win = getCurrentWindow();
     const mon = await currentMonitor();
     if (!mon) return;
-    const work = mon.size;
-    const w = Math.min(1320, Math.max(720, work.width - 48));
-    const h = Math.min(880, Math.max(560, work.height - 96));
+    const work = (mon.workArea?.size ?? mon.size).toLogical(mon.scaleFactor);
+    const w = Math.min(1320, Math.max(640, Math.floor(work.width - 32)));
+    const h = Math.min(880, Math.max(400, Math.floor(work.height - 64)));
+    await win.setMinSize(new LogicalSize(Math.min(820, w), Math.min(480, h)));
     await win.setSize(new LogicalSize(w, h));
     await win.center();
   } catch { /* not granted in this build — keep the configured window */ }

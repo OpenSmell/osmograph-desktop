@@ -415,6 +415,57 @@ if (takeoverBtn) {
     }));
     if (exited.active || exited.selected) errors.push('exiting a restored Home Vial did not return to core Home');
   }
+
+  // Vials-page Home picker: every installed Vial with a Home view is selectable
+  // regardless of install order. This is the direct path the Home ribbon
+  // previously lacked, and it is the regression that made the second Vial
+  // impossible to use as Home.
+  if (seedPacks.length >= 2) {
+    const first = seedPacks[0];
+    const second = seedPacks[1];
+    await page.click('.tab-btn[data-tab="vials"]');
+    await page.waitForTimeout(400);
+    const picker = await page.evaluate(() => {
+      const sel = document.getElementById('homeVialSelect');
+      return sel ? { exists: true, options: [...sel.options].map(o => o.value) } : { exists: false, options: [] };
+    });
+    console.log('home vial picker:', JSON.stringify(picker));
+    if (!picker.exists) errors.push('Vials page: Home Vial picker missing');
+    if (!picker.options.includes(first.id) || !picker.options.includes(second.id)) {
+      errors.push('Vials page: Home Vial picker did not list both installed Vials');
+    }
+    await page.selectOption('#homeVialSelect', second.id);
+    await page.waitForTimeout(900);
+    const switched = await page.evaluate(() => ({
+      active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+      name: document.getElementById('vialTakeoverName')?.textContent || '',
+      selected: localStorage.getItem('osmograph.homeVial.v1') || '',
+    }));
+    console.log('home vial switched:', JSON.stringify(switched));
+    if (!switched.active || switched.selected !== second.id) errors.push('Vials page: selecting the second Vial did not activate it as Home');
+    if (switched.name !== second.name) errors.push(`Vials page: Home takeover shows ${switched.name}, expected ${second.name}`);
+    await page.click('#vialTakeoverExit').catch(() => errors.push('Vials picker: exit takeover was not clickable'));
+    await page.waitForTimeout(300);
+
+    await page.click('.tab-btn[data-tab="vials"]');
+    await page.waitForTimeout(400);
+    const card = await page.$(`[data-domain-home="${first.id}"]`);
+    if (!card) errors.push('Vials page: card Use as Home action missing');
+    else {
+      await card.click();
+      await page.waitForTimeout(900);
+      const viaCard = await page.evaluate(() => ({
+        active: document.getElementById('panel-dashboard')?.classList.contains('vial-takeover') || false,
+        name: document.getElementById('vialTakeoverName')?.textContent || '',
+        selected: localStorage.getItem('osmograph.homeVial.v1') || '',
+      }));
+      console.log('home vial via card:', JSON.stringify(viaCard));
+      if (!viaCard.active || viaCard.selected !== first.id) errors.push('Vials page: card Use as Home did not activate the Vial');
+      if (viaCard.name !== first.name) errors.push(`Vials page: card takeover shows ${viaCard.name}, expected ${first.name}`);
+      await page.click('#vialTakeoverExit').catch(() => errors.push('Vials card: exit takeover was not clickable'));
+      await page.waitForTimeout(300);
+    }
+  }
 } else {
   errors.push('no Vial takeover control found on Home');
 }
@@ -551,6 +602,54 @@ if (await palette.isVisible().catch(() => false)) {
   }
 } else {
   errors.push('command palette did not open');
+}
+
+// Transforms: the feature must explain itself without the guide. Check the
+// three-step explainer, the worked example, the action labels, and the
+// per-step plain-language hint after opening a pipeline.
+await page.keyboard.press('Control+k').catch(() => {});
+await page.waitForTimeout(350);
+if (await page.locator('#commandInput').isVisible().catch(() => false)) {
+  await page.locator('#commandInput').fill('Transforms');
+  await page.waitForTimeout(300);
+  const cmd = page.locator('#commandList .command-item').first();
+  if (await cmd.isVisible().catch(() => false)) {
+    await cmd.click();
+    await page.waitForTimeout(500);
+    await shot('08-transforms');
+    const transformUi = await page.evaluate(() => ({
+      steps: document.querySelectorAll('.transform-step').length,
+      example: !!document.querySelector('.transform-example'),
+      newLabel: document.getElementById('recipeNew')?.textContent || '',
+      runLabel: document.getElementById('recRun')?.textContent || '',
+      saveLabel: document.getElementById('recSave')?.textContent || '',
+    }));
+    console.log('transform ui:', JSON.stringify(transformUi));
+    if (transformUi.steps !== 3) errors.push('transforms: the three-step explainer is missing');
+    if (!transformUi.example) errors.push('transforms: the worked example is missing');
+    if (!/New pipeline/.test(transformUi.newLabel)) errors.push('transforms: the new-pipeline label is unclear');
+    if (!/Preview/.test(transformUi.runLabel)) errors.push('transforms: the preview action is not labelled as a preview');
+    if (!/Save pipeline/.test(transformUi.saveLabel)) errors.push('transforms: the pipeline save is not distinguished from the .osmell save');
+    const newBtn = page.locator('#recipeNew');
+    if (await newBtn.isVisible().catch(() => false)) {
+      await newBtn.click();
+      await page.waitForTimeout(500);
+      const editor = await page.evaluate(() => ({
+        visible: document.getElementById('recipeEditor')?.style.display !== 'none',
+        hints: [...document.querySelectorAll('#recSteps .rec-step-hint')].map(e => e.textContent || ''),
+        sources: document.getElementById('recSourceSel')?.options?.length || 0,
+      }));
+      console.log('transform editor:', JSON.stringify(editor));
+      if (!editor.visible) errors.push('transforms: New pipeline did not open the editor');
+      if (!editor.hints.length) errors.push('transforms: step rows have no plain-language hints');
+      if (editor.sources === 0) errors.push('transforms: the editor has no source selector options');
+      await shot('08b-transform-editor');
+    }
+  } else {
+    errors.push('command palette has no Transforms command');
+  }
+} else {
+  errors.push('command palette did not open for the transforms check');
 }
 
 fs.writeFileSync(path.join(OUT, 'report.json'), JSON.stringify({ errors, tabs }, null, 2));

@@ -4274,6 +4274,35 @@ pub fn run() {    env_logger::init();
             vial_export_journal,
             open_https_url,
         ])
+        .setup(|app| {
+            // Size the window to the monitor's *logical* work area before it
+            // is shown. Monitor dimensions are physical pixels; Tauri window
+            // sizes are logical. On a 1366×768 Windows laptop at 125% the
+            // configured 1100×700 logical window becomes 1375×875 physical
+            // and hangs off a 1366×768 screen. This keeps the first paint inside the
+            // usable area and leaves room for the taskbar.
+            if let Some(window) = app.get_webview_window("main") {
+                let monitor = window.current_monitor().ok().flatten()
+                    .or_else(|| app.primary_monitor().ok().flatten());
+                if let Some(monitor) = monitor {
+                    let scale = monitor.scale_factor();
+                    let work = monitor.work_area().size.to_logical::<f64>(scale);
+                    // Leave a margin for the taskbar and window chrome. The
+                    // floor is the smallest layout the app supports; the min
+                    // size follows the actual size so a small work area can
+                    // still shrink the window instead of forcing it off-screen.
+                    let width = (work.width - 32.0).max(640.0).min(1320.0);
+                    let height = (work.height - 64.0).max(400.0).min(880.0);
+                    let min_w = width.min(820.0);
+                    let min_h = height.min(480.0);
+                    let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_w, min_h)));
+                    let _ = window.set_size(tauri::LogicalSize::new(width, height));
+                    let _ = window.center();
+                }
+                let _ = window.show();
+            }
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

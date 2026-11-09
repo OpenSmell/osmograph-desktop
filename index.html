@@ -1737,6 +1737,19 @@
       line-height: 1.45; color: var(--text-2);
     }
     .vials-note b { color: var(--text-0); }
+    .vials-home-picker {
+      display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+      padding: 8px 9px; border: 1px solid var(--border); border-left: 2px solid var(--cyan);
+      background: var(--bg-1);
+    }
+    .vials-home-picker-copy { display: flex; flex-direction: column; gap: 1px; min-width: 230px; flex: 1 1 320px; }
+    .vials-home-picker-copy label {
+      font-family: var(--font-mono); font-size: 9px; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--text-2);
+    }
+    .vials-home-picker-copy .hint { margin: 0; }
+    .vials-home-picker select { min-width: 210px; max-width: 340px; flex: 0 1 340px; }
+    .vials-home-picker .mini-btn { flex: none; }
     .vials-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(310px, 1fr)); gap: 12px; align-content: start; }
     .vial-card {
       display: flex; flex-direction: column; gap: 9px; padding: 13px;
@@ -1839,7 +1852,16 @@
       display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
     .domain-card-meta { font-size: 8px; color: var(--text-3); line-height: 1.45; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .domain-card-actions { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; margin-top: auto; padding-top: 3px; }
+    .domain-card-tags { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+    .domain-card-tag {
+      font-family: var(--font-mono); font-size: 7px; line-height: 1.4; letter-spacing: .07em;
+      text-transform: uppercase; color: var(--text-3); border: 1px solid var(--border);
+      padding: 1px 5px; white-space: nowrap;
+    }
+    .domain-card-tag.home { color: var(--cyan); border-color: rgba(14, 116, 144, .35); }
+    .domain-card-tag.gated { color: var(--green); border-color: rgba(13, 107, 79, .35); }
+    .domain-card-tag.ungated { color: var(--text-3); }
+    .domain-card-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: auto; padding-top: 3px; }
     .domain-card-actions > .mini-btn.primary { margin-right: auto; }
     .domain-source { font-size: 8.5px; flex: none; }
     .domain-menu { flex: none; }
@@ -2671,9 +2693,29 @@
     .recipe-card-meta { font-family: var(--font-mono); font-size: 10px; color: var(--text-3); }
     .recipe-steps { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
     .recipe-tag { font-family: var(--font-mono); font-size: 9px; padding: 1px 6px; border-radius: 8px; background: var(--bg-3); color: var(--text-2); }
-    .rec-step { display: flex; gap: 6px; align-items: center; margin-bottom: 5px; }
-    .rec-step select { flex: 1; }
-    .rec-step input { width: 72px; }
+    .transform-steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin: 4px 0 8px; }
+    .transform-step {
+      display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 6px; align-items: start;
+      padding: 7px 8px; border: 1px solid var(--border); background: var(--bg-2);
+      font-size: 10px; line-height: 1.4; color: var(--text-2);
+    }
+    .transform-step b {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; background: var(--cyan); color: #fbf8f2;
+      font-family: var(--font-mono); font-size: 9px; font-weight: 700;
+    }
+    .transform-step strong { color: var(--text-0); font-weight: 600; }
+    .transform-example { margin: 0 0 8px; border: 1px solid var(--border); background: var(--bg-2); padding: 6px 8px; }
+    .transform-example summary { cursor: pointer; font-family: var(--font-mono); font-size: 9px; letter-spacing: .06em; text-transform: uppercase; color: var(--text-2); }
+    .transform-example p { margin: 5px 0 0; font-size: 10px; line-height: 1.5; color: var(--text-2); }
+    .transform-example code, .recipe-pane code { font-family: var(--font-mono); font-size: 9px; background: var(--bg-3); padding: 0 3px; }
+    .rec-step { display: grid; grid-template-columns: minmax(0, 1fr) 72px 120px auto; gap: 6px; align-items: center; margin-bottom: 7px; padding-bottom: 6px; border-bottom: 1px solid var(--border); }
+    .rec-step:last-child { border-bottom: 0; }
+    .rec-step select { min-width: 0; }
+    .rec-step input { width: 100%; min-width: 0; }
+    .rec-step-hint { grid-column: 1 / -1; font-size: 10px; line-height: 1.4; color: var(--text-3); margin-top: -1px; }
+    @media (max-width: 900px) { .transform-steps { grid-template-columns: 1fr; } }
+    @media (max-width: 620px) { .rec-step { grid-template-columns: minmax(0, 1fr) 64px auto; } .rec-step .stepParams { grid-column: 1 / -1; } }
     .op-catalog { display: flex; flex-direction: column; gap: 2px; max-height: 300px; overflow-y: auto; }
     .op-row { display: flex; gap: 8px; align-items: baseline; font-size: 11px; padding: 2px 0; border-bottom: 1px solid var(--border); }
     .op-name { font-family: var(--font-mono); color: var(--text-1); min-width: 150px; }
@@ -4443,7 +4485,15 @@
                   <button class="vials-switch-btn" type="button" data-vials-tab="aromatory">Aromatory <span id="vialsAromatoryCount">0</span></button>
                 </div>
                 <div id="vialsWorkspacesPane" class="vials-pane-section">
-                  <div class="vials-note"><b>Workspaces.</b> Open a protocol, keep its log, follow its stop rules.</div>
+                  <div class="vials-note"><b>Workspaces.</b> Open a protocol, keep its log, follow its stop rules. <b>Use as Home</b> puts a Vial's compact view on Home; the instrument is always one click away.</div>
+                  <div class="vials-home-picker" id="vialsHomePicker">
+                    <div class="vials-home-picker-copy">
+                      <label for="homeVialSelect">Home Vial</label>
+                      <span class="hint">Choose which installed Vial owns Home. Core Home shows the instrument.</span>
+                    </div>
+                    <select id="homeVialSelect" aria-label="Home Vial"></select>
+                    <button id="homeVialCore" class="mini-btn" type="button">Use core Home</button>
+                  </div>
                   <div id="domainInstalledList" class="domain-area"></div>
                 </div>
                 <div id="vialsAromatoryPane" class="vials-pane-section" style="display:none">
@@ -4686,13 +4736,23 @@
           </div>
           <div class="card">
             <p class="hint" style="margin-bottom:8px">
-              <b>Source → steps → result.</b> A transform pipeline trims, smooths, baselines,
-              normalizes, and exports a derived recording. Run a preview against the source;
-              Save .osmell adds the result back to Recordings. Every step is named and reproducible,
-              so a comparison or model is never built on an unexplained number.
+              <b>Make two recordings comparable.</b> A transform pipeline applies named, deterministic
+              steps to one recording: trim the same window, smooth the same way, baseline against the
+              same reference, then preview the result. <b>The source is never changed.</b> Saving creates
+              a new derived <code>.osmell</code> recording. Processing is not evidence; it makes the
+              processing reproducible.
             </p>
+            <div class="transform-steps">
+              <div class="transform-step"><b>1</b><span><strong>Pick a source.</strong> A recording from Explore → Recordings. It is read-only here.</span></div>
+              <div class="transform-step"><b>2</b><span><strong>Add steps in order.</strong> Each row is one named operation. The hint under the row says what it does.</span></div>
+              <div class="transform-step"><b>3</b><span><strong>Preview, then save.</strong> Preview runs on the source. Save .osmell writes a new recording.</span></div>
+            </div>
+            <details class="transform-example">
+              <summary>Show a worked example</summary>
+              <p>To compare two 30-second exposures: add <code>trim.range</code> with <code>start=5,end=35</code>, then <code>smooth.movavg</code> with <code>window=5</code>, then <code>response.ratio</code>. Preview each one and save the derived <code>.osmell</code>. The original recordings stay untouched.</p>
+            </details>
             <div class="form-row">
-              <button id="recipeNew" class="mini-btn">New transform</button>
+              <button id="recipeNew" class="mini-btn primary">New pipeline</button>
               <button id="recipeRefresh" class="mini-btn">Refresh</button>
             </div>
           </div>
@@ -4707,8 +4767,8 @@
             <div class="form-row">
               <button id="recAddStep" class="mini-btn">+ Step</button>
               <button id="recAddTrim" class="mini-btn" type="button">✂ Trim preset</button>
-              <button id="recRun" class="mini-btn primary">Run</button>
-              <button id="recSave" class="mini-btn">Save</button>
+              <button id="recRun" class="mini-btn primary">Preview result</button>
+              <button id="recSave" class="mini-btn">Save pipeline</button>
               <button id="recCancel" class="mini-btn">Cancel</button>
             </div>
             <div id="recMsg" class="hint" style="min-height:14px"></div>
@@ -4720,6 +4780,7 @@
               <span id="recipeResultMeta" class="hint" style="margin-left:auto"></span>
               <button id="recSaveResult" class="mini-btn" style="margin-left:8px">Save .osmell</button>
             </div>
+            <p class="hint" style="margin:0 0 4px">This preview is the transformed result. Save .osmell adds it to Recordings as a new file; the source is unchanged.</p>
             <canvas id="recipeChart" style="width:100%;height:230px;display:block;margin:8px 0"></canvas>
             <div id="recipeResultSteps" class="recipe-steps"></div>
             <div id="recipeResultWarn" class="hint" style="color:var(--yellow);margin-top:6px"></div>
@@ -4729,8 +4790,8 @@
           <div id="recipeList" class="recipe-list">Loading…</div>
 
           <div class="card">
-            <h3 style="margin-bottom:6px">Op catalog</h3>
-            <p class="hint" style="margin-bottom:8px">The v1 transform set. <b>core</b> ships now; <b>next</b>/<b>research</b> are planned.</p>
+            <h3 style="margin-bottom:6px">Available steps</h3>
+            <p class="hint" style="margin-bottom:8px">Only runnable steps are selectable. <b>core</b> ships now; planned operations are not exposed as if they work.</p>
             <div id="recipeOps" class="op-catalog">Loading…</div>
           </div>
         </div>
