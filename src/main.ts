@@ -12812,7 +12812,7 @@ function renderRecipeList(list: Recipe[]) {
   if (!el) return;
   el.classList.add('recipe-list');
   if (!list.length) {
-    el.innerHTML = '<div class="hint">No saved pipelines yet — create one above. A pipeline is reusable; the derived recording is a separate file.</div>';
+    el.innerHTML = '<div class="hint">No saved transform pipelines yet — create one above. A pipeline is reusable; the derived recording is a separate file.</div>';
     return;
   }
   el.innerHTML = list
@@ -12921,7 +12921,7 @@ function openRecipeEditor(r?: Recipe) {
   msg.textContent = r
     ? `Editing ${r.id}. Preview the result before saving.`
     : hasSource
-      ? 'New pipeline — source and two steps are prefilled. Preview the result, then save the pipeline or the derived .osmell.'
+      ? 'New transform pipeline — source and two steps are prefilled. Preview the result, then save the pipeline or the derived .osmell.'
       : 'No indexed recording yet. Import a CSV or .osmell in Explore → Recordings, then return here.';
 }
 

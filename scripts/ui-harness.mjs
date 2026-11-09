@@ -627,7 +627,7 @@ if (await page.locator('#commandInput').isVisible().catch(() => false)) {
     console.log('transform ui:', JSON.stringify(transformUi));
     if (transformUi.steps !== 3) errors.push('transforms: the three-step explainer is missing');
     if (!transformUi.example) errors.push('transforms: the worked example is missing');
-    if (!/New pipeline/.test(transformUi.newLabel)) errors.push('transforms: the new-pipeline label is unclear');
+    if (!/New transform pipeline/.test(transformUi.newLabel)) errors.push('transforms: the new-transform-pipeline label is unclear');
     if (!/Preview/.test(transformUi.runLabel)) errors.push('transforms: the preview action is not labelled as a preview');
     if (!/Save pipeline/.test(transformUi.saveLabel)) errors.push('transforms: the pipeline save is not distinguished from the .osmell save');
     const newBtn = page.locator('#recipeNew');
