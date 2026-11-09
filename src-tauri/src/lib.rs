@@ -4292,7 +4292,7 @@ pub fn run() {    env_logger::init();
                     // size follows the actual size so a small work area can
                     // still shrink the window instead of forcing it off-screen.
                     let width = (work.width - 32.0).max(640.0).min(1320.0);
-                    let height = (work.height - 64.0).max(400.0).min(880.0);
+                    let height = (work.height - 64.0).max(360.0).min(880.0);
                     let min_w = width.min(820.0);
                     let min_h = height.min(480.0);
                     let _ = window.set_min_size(Some(tauri::LogicalSize::new(min_w, min_h)));

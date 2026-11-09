@@ -15745,7 +15745,7 @@ async function fitWindowToScreen() {
     if (!mon) return;
     const work = (mon.workArea?.size ?? mon.size).toLogical(mon.scaleFactor);
     const w = Math.min(1320, Math.max(640, Math.floor(work.width - 32)));
-    const h = Math.min(880, Math.max(400, Math.floor(work.height - 64)));
+    const h = Math.min(880, Math.max(360, Math.floor(work.height - 64)));
     await win.setMinSize(new LogicalSize(Math.min(820, w), Math.min(480, h)));
     await win.setSize(new LogicalSize(w, h));
     await win.center();
