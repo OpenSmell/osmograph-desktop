@@ -680,13 +680,15 @@
     }
     .canvas-empty.show { display: flex; }
     .canvas-empty-card {
-      max-width: 360px; padding: 16px 18px; text-align: center;
+      max-width: 320px; padding: 12px 14px; text-align: center;
       background: var(--bg-0); border: 1px solid var(--border);
       box-shadow: 0 10px 40px rgba(29,26,22,0.06);
     }
-    .canvas-empty-card b { display: block; font-size: 14px; color: var(--text-0); margin-bottom: 4px; }
-    .canvas-empty-card p { font-size: 11px; line-height: 1.45; color: var(--text-2); margin: 0 0 10px; }
-    .canvas-empty-actions { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
+    .canvas-empty-head { margin-bottom: 11px; }
+    .canvas-empty-card b { display: block; font-size: 13px; color: var(--text-0); margin-bottom: 0; }
+    .canvas-empty-sub { display: block; font-size: 10px; color: var(--text-2); margin-top: 5px; line-height: 1.4; }
+    .canvas-empty-actions { display: flex; flex-direction: column; gap: 8px; align-items: center; }
+    .canvas-empty-second { display: flex; gap: 6px; justify-content: center; flex-wrap: wrap; }
     .canvas-empty-note { margin-top: 10px; font-size: 10px; color: var(--text-3); }
 
     /* Subtle retro-scanline texture — cyberpunk HUD layer kept barely-there so
@@ -4228,13 +4230,17 @@
               <canvas id="traces"></canvas>
               <div class="canvas-empty" id="dashboardEmpty">
                 <div class="canvas-empty-card">
-                  <b id="dashboardEmptyTitle">Start with something real.</b>
-                  <p id="dashboardEmptyCopy">No hardware needed. Replay a real recording, download a public dataset, import a CSV, or connect your own e-nose.</p>
+                  <div class="canvas-empty-head">
+                    <b id="dashboardEmptyTitle">Start with something real.</b>
+                    <span class="canvas-empty-sub" id="dashboardEmptySubtitle">No hardware needed. Replay a real recording, download a public dataset, import a CSV, or connect your own e-nose.</span>
+                  </div>
                   <div class="canvas-empty-actions">
-                    <button class="mini-btn primary" id="dashPlayground" type="button">Replay a sample</button>
-                    <button class="mini-btn" id="dashGetData" type="button">Download data</button>
-                    <button class="mini-btn" id="dashImport" type="button">Import a file</button>
-                    <button class="mini-btn" id="dashConnect" type="button">Connect a rig</button>
+                    <button class="mini-btn primary" id="dashConnect" type="button">Connect a rig</button>
+                    <div class="canvas-empty-second">
+                      <button class="mini-btn" id="dashPlayground" type="button">Replay a sample</button>
+                      <button class="mini-btn" id="dashGetData" type="button">Download data</button>
+                      <button class="mini-btn" id="dashImport" type="button">Import a file</button>
+                    </div>
                   </div>
                   <div class="canvas-empty-note" id="dashLibraryNote" hidden>
                     <button class="text-link" id="dashLibrary" type="button">Open your recordings →</button>

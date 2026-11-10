@@ -1986,13 +1986,13 @@ function setPlotLink(on: boolean) {
 function updateDashboardEmptyActions(): void {
   const hasData = sessions.length > 0;
   const title = document.getElementById('dashboardEmptyTitle');
-  const copy = document.getElementById('dashboardEmptyCopy');
+  const sub = document.getElementById('dashboardEmptySubtitle');
   const note = document.getElementById('dashLibraryNote');
   if (title) title.textContent = hasData ? 'No rig connected.' : 'Start with something real.';
-  if (copy) {
-    copy.textContent = hasData
-      ? 'Your saved recordings are still here. Replay one, open the library, or connect a rig for live readings.'
-      : 'No hardware needed. Replay a real recording, download a public dataset, import a CSV, or connect your own e-nose.';
+  if (sub) {
+    sub.textContent = hasData
+      ? 'Your recordings are still here — replay one, open the library, or connect a rig for live readings.'
+      : 'Replay a real recording, download a public dataset, import a CSV, or connect your own e-nose.';
   }
   if (note) note.hidden = !hasData;
 }
@@ -14319,12 +14319,16 @@ function pauseReplay() {
 
 async function toggleReplay() {
   if (replayPlaying) { pauseReplay(); return; }
+  const fresh = !replaySeries;
   if (!replaySeries) {
     await loadReplay();
     if (!replaySeries) return;
   }
+  // loadReplay() already rewinds to 0 for a fresh recording. Resuming a paused
+  // playback must keep replayLastTs so it continues from where it left off
+  // instead of restarting from the beginning.
+  if (fresh) replayLastTs = null;
   replayPlaying = true;
-  replayLastTs = null;
   const btn = document.getElementById('replayPlay');
   if (btn) btn.textContent = '❚❚ Pause';
 }
