@@ -28,6 +28,26 @@ export interface HostEnvironment {
   humidity: number | null;
 }
 
+/** A process sensor is not a gas channel. pH, dissolved oxygen, and redox are
+ *  primary process measurements; they must never enter the MOX anomaly array.
+ *  The host exposes them separately so a Vial can gate its own verdict on a
+ *  calibrated process reading without contaminating the gas detector. */
+export interface HostProcessReading {
+  id: string;
+  label: string;
+  quantity: string;
+  unit: string;
+  value: number | null;
+  at: number | null;
+  source: 'probe' | 'manual' | 'none';
+  calibration: {
+    state: 'calibrated' | 'stale' | 'uncalibrated' | 'unknown';
+    at: number | null;
+    slope: number | null;
+  };
+  health: 'ok' | 'drift' | 'open' | 'short' | 'unknown';
+}
+
 export interface HostBaseline {
   state: BaselineState;
   progress: number;
@@ -98,6 +118,10 @@ export interface VialHostSnapshot {
   samplingMode: SamplingMode;
   channels: HostChannel[];
   environment: HostEnvironment | null;
+  /** Process sensors by id (e.g. `ph`). Null or absent when none are
+   *  connected. These are deliberately outside `channels` and outside the
+   *  gas anomaly detector. */
+  process?: Record<string, HostProcessReading> | null;
   baseline: HostBaseline;
   anomaly: HostAnomaly;
   classifier: HostClassifier;
@@ -163,6 +187,7 @@ export function emptyHostSnapshot(now = Date.now()): VialHostSnapshot {
     samplingMode: 'unknown',
     channels: [],
     environment: null,
+    process: null,
     baseline: { state: 'none', progress: 0, ageSec: null },
     anomaly: {
       state: 'unknown',

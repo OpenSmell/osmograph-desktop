@@ -4526,6 +4526,10 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
       health: healthEnumFor(i),
     })),
     environment: lastEnv ? { temperature: lastEnv.temperature, humidity: lastEnv.humidity } : null,
+    // Process sensors (pH, DO, redox) are not gas channels and are not part of
+    // the MOX detector. The live probe path is not wired yet; the contract is
+    // here so a Vial can consume it without treating pH as a gas coordinate.
+    process: null,
     baseline: {
       state: warming ? 'warming' : anomalyState === 'unknown' ? 'none' : 'ready',
       progress: baselineProgress,

@@ -63,6 +63,24 @@ export interface VialDetectionVerdict {
   reason?: string | null;
 }
 
+/** A primary process measurement (pH, dissolved oxygen, redox). It is exposed
+ *  separately from the gas channels and must not be fed into the MOX array. */
+export interface VialProcessReading {
+  id: string;
+  label: string;
+  quantity: string;
+  unit: string;
+  value: number | null;
+  at: number | null;
+  source: 'probe' | 'manual' | 'none';
+  calibration: {
+    state: 'calibrated' | 'stale' | 'uncalibrated' | 'unknown';
+    at: number | null;
+    slope: number | null;
+  };
+  health: 'ok' | 'drift' | 'open' | 'short' | 'unknown';
+}
+
 /** The host-applied window: raw values, a settled fingerprint, and (when the
  *  profile declares transforms) a baseline-relative response per channel. */
 export interface VialSeriesWindow {
@@ -89,6 +107,7 @@ export interface VialSnapshot {
   samplingMode: 'timeseries' | 'trial' | 'unknown';
   channels: Array<{ id: string; label: string; kind: string; unit?: string; health?: string }>;
   environment: { temperature: number | null; humidity: number | null } | null;
+  process?: Record<string, VialProcessReading> | null;
   baseline: { state: 'none' | 'warming' | 'ready' | 'stale'; progress: number; ageSec: number | null };
   anomaly: {
     state: 'unknown' | 'normal' | 'warning' | 'critical';

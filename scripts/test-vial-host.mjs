@@ -52,4 +52,21 @@ assert.match(invalid.errors.join(' '), /source/);
 
 assert.equal(Host.homeContributionFor({ id: 'x', name: 'x' }, idle), null);
 
-console.log('PASS vial host contract — idle, warming, attention, classifier, refusal');
+const empty = Host.emptyHostSnapshot(123);
+assert.equal(empty.process, null, 'process sensors must be separate from gas channels');
+const withProcess = {
+  ...empty,
+  process: {
+    ph: {
+      id: 'ph', label: 'pH', quantity: 'pH', unit: 'pH', value: 7.01, at: 123,
+      source: 'probe',
+      calibration: { state: 'calibrated', at: 120, slope: 0.98 },
+      health: 'ok',
+    },
+  },
+};
+assert.equal(withProcess.process.ph.value, 7.01);
+assert.equal(withProcess.process.ph.calibration.state, 'calibrated');
+assert.equal(empty.channels.length, 0, 'pH must not be inserted into the gas channel array');
+
+console.log('PASS vial host contract — idle, warming, attention, classifier, refusal, process sensors');

@@ -1,5 +1,18 @@
 # Osmograph Changelog
 
+## v0.1.2-beta.4 — no-rig card, replay resume, process-sensor contract
+- The no-rig Home card is compact: one primary **Connect a rig** action and a
+  secondary row, instead of two equal-weight button columns.
+- Replay pause/play resumes from the current position. Only a fresh load rewinds
+  to the start.
+- The Vial host snapshot now carries an optional `process` block for pH,
+  dissolved oxygen, and redox. Process readings are separate from the gas
+  channels and from the MOX anomaly array; a Vial can gate an at-target call on
+  a calibrated probe and fall back to its manual log. A mixed-rig ingest filter
+  is still pending, so a process channel must not be placed in the OSM array.
+- This build includes the fixes committed after beta.3. It is a beta prerelease;
+  the signed updater path is unchanged.
+
 ## v0.1.2-beta.3 — Vial Home, transforms, and window fit
 - Home Vial switching is order-independent. The Vials page now has a Home Vial picker and a
   per-card **Use as Home** action; the Home ribbon, Fleet dropdown, picker, and cards all use the
