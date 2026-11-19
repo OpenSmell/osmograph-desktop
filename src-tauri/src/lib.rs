@@ -245,6 +245,20 @@ fn handle_reader_line(
         let _ = app.emit("bootloader-detected", line.to_string());
     }
 
+    // A complete `.osmell` record is one JSON object per line. Route it to the
+    // frontend intact so per-slot QC runs against the locked schema instead of
+    // being reconstructed from a numeric channel array. Invalid JSON falls
+    // through to the normal OSM / lenient numeric parse below.
+    let trimmed = line.trim_start();
+    if trimmed.starts_with('{') {
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
+            if value.is_object() {
+                let _ = app.emit("serial-record", SerialRecordEvent { raw_line: line.to_string() });
+                return;
+            }
+        }
+    }
+
     let now = now_secs();
     let detect_and_publish = |n: usize, source: &str| {
         if (1..=MAX_CHANNELS).contains(&n) {
@@ -442,6 +456,15 @@ fn connect_serial(
     });
 
     Ok(format!("Connected to {} at {} baud, {} channels", port, baud_rate, n_channels))
+}
+
+/// A complete `.osmell` live record emitted by the Smell Monitor firmware as a
+/// single newline-terminated JSON object. Routed straight to the frontend so
+/// Osmograph can run per-slot QC against the locked schema rather than
+/// reconstructing structure from a numeric channel array.
+#[derive(Clone, Serialize)]
+struct SerialRecordEvent {
+    raw_line: String,
 }
 
 #[derive(Clone, Serialize)]

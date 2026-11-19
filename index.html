@@ -215,6 +215,8 @@
     .status-dot.ok { background: var(--green); }
     .status-dot.warn { background: var(--yellow); }
     .status-dot.crit { background: var(--red); animation: pulse 1s infinite; }
+  .qc-flag { font-size: 11px; padding: 2px 6px; border-radius: 2px; margin: 6px 0 0 0; display: inline-block; background: #eaf4ea; color: var(--green); }
+  .qc-flag.show { background: var(--red); color: #fff; animation: pulse 1s infinite; }
     @keyframes pulse { 50% { opacity: 0.4; } }
 
     select, input[type="text"], input[type="number"] {
@@ -4314,6 +4316,7 @@
                 <div class="metric"><div class="k">Triggered CH</div><div class="v" id="mCh">0/6</div></div>
                 <div class="metric"><div class="k">Alert Level</div><div class="v" id="mAlert">0</div></div>
               </div>
+              <div class="qc-flag" id="qcFlags">QC clean</div>
               <button class="text-link anomaly-events" id="anomalyEvents" type="button">Event history →</button>
             </div>
 

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { computeQcFlags, resetQcState, type QcFlag, type QcReport, type QcSlotState } from './qc';
 import { getVersion } from '@tauri-apps/api/app';
 import { DATASET_CATALOG, REFERENCE_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
 import * as Domain from './domainPacks';
@@ -342,6 +343,12 @@ let connected = false;
 let activeMode: 'serial' | 'wifi' | 'ble' = 'serial';
 let activePort = '';
 let activeBaud = 0;
+
+// Live QC state (one set of rolling baselines per slot). Reset whenever the
+// link is adopted or dropped so baselines never carry across rigs.
+const qcStates = new Map<number, QcSlotState>()
+let qcPrevEnv: { temperature_c: number | null; humidity_pct: number | null } | null = null
+let qcLastReport: QcReport | null = null
 type SerialPortInfo = { name: string; description: string; kind: string; hw_type: string; manufacturer: string };
 let knownPorts: SerialPortInfo[] = [];
 let channelCount = 0;
@@ -13726,6 +13733,9 @@ function adoptLiveLink(): void {
   devTap('link', { connected: true, adopted: true, mode: activeMode });
   lastDataAt = Date.now();
   resetLiveBaseline();
+  resetQcState(qcStates);
+  qcPrevEnv = null;
+  qcLastReport = null;
   syncOpenVialDetectors(true);
   const btn = document.getElementById('connectBtn');
   if (btn) btn.textContent = 'Disconnect';
@@ -13784,6 +13794,100 @@ listen<{ code: number; message: string }>('serial-error', (event) => {
   }
 });
 
+// === `.osmell` live record + live QC ===
+// The Smell Monitor firmware publishes one newline-terminated JSON record per
+// completed cycle (see proto.cpp). Rust routes it here intact so Osmograph runs
+// the rule-based QC checks against the locked schema and surfaces red flags.
+// The same record's analog channels are also fed into the live detector so the
+// existing plot / fingerprint / anomaly path keeps working unchanged.
+listen<{ raw_line: string }>('serial-record', (event) => {
+  let record: unknown
+  try { record = JSON.parse(event.payload.raw_line) } catch {
+    console.warn('Dropped unparseable .osmell record')
+    return
+  }
+  const r = record as {
+    format?: string
+    version?: string
+    hardware_id?: string
+    timestamp_ms?: number
+    cycle: { id: number; phase: string; duration_s: number }
+    environment: { temperature_c: number | null; humidity_pct: number | null; sensor_id: string }
+    slots: Array<{
+      index: number
+      sensor_type: string
+      sensor_model: string | null
+      eeprom_id: string | null
+      calibration_date: string | null
+      readings: { analog_value_v: number | null; digital_value: number | null; unit: string }
+      qc_flags: QcFlag[]
+    }>
+    user_metadata?: { label?: string; notes?: string }
+  }
+  if (!r || !r.cycle || !r.environment || !Array.isArray(r.slots)) {
+    console.warn('Dropped .osmell record missing cycle/environment/slots')
+    return
+  }
+
+  // Run the five rule-based QC checks and keep the latest report for the HUD.
+  const { report, prevEnvOut } = computeQcFlags(r, qcStates, qcPrevEnv)
+  qcLastReport = report
+  qcPrevEnv = prevEnvOut
+
+  // Pump the analog channels into the live detector / fingerprint exactly like
+  // a plain numeric stream, so nothing else in the app has to change.
+  const analogChannels = r.slots
+    .filter((s) => s.readings.analog_value_v !== null)
+    .map((s) => s.readings.analog_value_v!)
+  if (analogChannels.length > 0) {
+    ingestReading(analogChannels)
+  }
+
+  // Mirror into the Vial host state so open Vials see the same QC-aware record.
+  try {
+    (window as any).__OSMOGRAPH_HOST_STATE__ = {
+      ...((window as any).__OSMOGRAPH_HOST_STATE__ || {}),
+      readings: analogChannels,
+      channels: analogChannels,
+      channelMeta: r.slots.map((s, i) => ({
+        name: `S${s.index}`,
+        kind: s.sensor_type === 'MOX' ? 'analog_mox' : 'mems_index',
+      })),
+      env: r.environment,
+      qc: qcLastReport,
+      connected: true,
+      timestamp: r.timestamp_ms ?? Date.now(),
+    }
+    if ((window as any).__OSMOGRAPH_VIAL_HOST__) {
+      const host = (window as any).__OSMOGRAPH_VIAL_HOST__
+      if (typeof host.emit === 'function') {
+        host.emit('tick', (window as any).__OSMOGRAPH_HOST_STATE__)
+        host.emit('data', (window as any).__OSMOGRAPH_HOST_STATE__)
+      }
+    }
+  } catch (e) {
+    console.warn('Failed to pump QC host state:', e)
+  }
+
+  // Stamp the QC readout (red pill when any flag is raised).
+  try {
+    const qcEl = document.getElementById('qcFlags')
+    if (qcEl) {
+      const flat = Object.values(report.slots).flat()
+      const all = [...new Set([...flat, ...report.envFlags])]
+      if (all.length) {
+        qcEl.textContent = 'QC: ' + all.join(', ')
+        qcEl.className = 'qc-flag show'
+      } else {
+        qcEl.textContent = 'QC clean'
+        qcEl.className = 'qc-flag'
+      }
+    }
+  } catch {
+    /* best-effort UI stamp */
+  }
+});
+
 listen<{ title: string; message: string }>('error-dialogue', (event) => {
   console.error(`${event.payload.title}: ${event.payload.message}`);
   const { title, message } = event.payload;
@@ -13799,6 +13903,9 @@ function dropLink(reason: string) {
   bootloaderHinted = false;
   autoChannels = 0;
   channelKinds = [];
+  resetQcState(qcStates);
+  qcPrevEnv = null;
+  qcLastReport = null;
   renderEnvReadout(null);
   bootFlashShown = false;
   document.getElementById('bootBanner')?.classList.remove('show');
