@@ -31,11 +31,17 @@ export const SHT31_RH_DELTA_PCT = 15
 // divider; 0.0 V or 3.3 V for two consecutive cycles = disconnected/shorted.
 export const ADC_RAIL_V = 3.3
 export const ADC_EPSILON_V = 0.005
+// flow_stagnation: intake voltage that does not move beyond this band between
+// two consecutive cycles is treated as a stuck cell / blocked flow. A live MOX
+// cell always shows more than a millivolt of movement in moving air; a single
+// flat sample is noise, two in a row is a fault.
+export const STAGNATION_FLAT_V = 0.001
 
 export interface QcSlotState {
   lastAnalogV: number | null
   lastIntakeAnalogV: number | null
   saturatedConsecutive: number
+  intakeFlatCount: number
 }
 
 export interface QcReport {
@@ -98,11 +104,20 @@ export function slotQc(
     state.saturatedConsecutive = 0
   }
 
-  // 5. flow_stagnation — intake phase: MOX resistance should drop as gas is
-  //    absorbed (negative derivative). Flat or rising = no flow / dead cell.
+  // 5. flow_stagnation — intake phase: a live cell moves with the air it
+  //    samples. Two consecutive intake readings that stay inside a 1 mV band
+  //    mean the cell is dead or the flow path is blocked. Flat *clean air* is
+  //    normal only if the cell still shows sub-mV noise, so we test movement,
+  //    not direction.
   if (cycle.phase === "intake" && av !== null) {
-    if (state.lastIntakeAnalogV !== null && av - state.lastIntakeAnalogV >= 0) {
-      flags.push("flow_stagnation")
+    if (state.lastIntakeAnalogV !== null) {
+      const moved = Math.abs(av - state.lastIntakeAnalogV) > STAGNATION_FLAT_V
+      if (moved) {
+        state.intakeFlatCount = 0
+      } else {
+        state.intakeFlatCount += 1
+        if (state.intakeFlatCount >= 2) flags.push("flow_stagnation")
+      }
     }
     state.lastIntakeAnalogV = av
   }
@@ -151,7 +166,7 @@ export function computeQcFlags(
 
   for (const slot of record.slots) {
     let state = states.get(slot.index)
-    if (!state) { state = { lastAnalogV: null, lastIntakeAnalogV: null, saturatedConsecutive: 0 }; states.set(slot.index, state) }
+    if (!state) { state = { lastAnalogV: null, lastIntakeAnalogV: null, saturatedConsecutive: 0, intakeFlatCount: 0 }; states.set(slot.index, state) }
     const { flags, state: next } = slotQc(slot.index, slot, record.environment, record.cycle, state)
     states.set(slot.index, next)
     // Environmental faults apply to every reading taken in that cycle.

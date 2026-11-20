@@ -349,6 +349,12 @@ let activeBaud = 0;
 const qcStates = new Map<number, QcSlotState>()
 let qcPrevEnv: { temperature_c: number | null; humidity_pct: number | null } | null = null
 let qcLastReport: QcReport | null = null
+// Flags are accumulated across the phases of one cycle so a fault raised in
+// intake/hold stays on the HUD through the quiet `report` phase. Reset when a
+// new cycle id arrives or the link is adopted/dropped.
+let qcCycleId = -1
+let qcCycleSlots = new Map<number, QcFlag[]>()
+let qcCycleEnv: QcFlag[] = []
 type SerialPortInfo = { name: string; description: string; kind: string; hw_type: string; manufacturer: string };
 let knownPorts: SerialPortInfo[] = [];
 let channelCount = 0;
@@ -13736,6 +13742,9 @@ function adoptLiveLink(): void {
   resetQcState(qcStates);
   qcPrevEnv = null;
   qcLastReport = null;
+  qcCycleId = -1;
+  qcCycleSlots = new Map();
+  qcCycleEnv = [];
   syncOpenVialDetectors(true);
   const btn = document.getElementById('connectBtn');
   if (btn) btn.textContent = 'Disconnect';
@@ -13831,7 +13840,17 @@ listen<{ raw_line: string }>('serial-record', (event) => {
 
   // Run the five rule-based QC checks and keep the latest report for the HUD.
   const { report, prevEnvOut } = computeQcFlags(r, qcStates, qcPrevEnv)
-  qcLastReport = report
+  if (r.cycle.id !== qcCycleId) {
+    qcCycleId = r.cycle.id
+    qcCycleSlots = new Map()
+    qcCycleEnv = []
+  }
+  for (const [idx, flags] of Object.entries(report.slots)) {
+    const key = Number(idx)
+    qcCycleSlots.set(key, [...new Set([...(qcCycleSlots.get(key) || []), ...flags])])
+  }
+  qcCycleEnv = [...new Set([...qcCycleEnv, ...report.envFlags])]
+  qcLastReport = { slots: Object.fromEntries(qcCycleSlots), envFlags: qcCycleEnv }
   qcPrevEnv = prevEnvOut
 
   // Pump the analog channels into the live detector / fingerprint exactly like
@@ -13873,8 +13892,8 @@ listen<{ raw_line: string }>('serial-record', (event) => {
   try {
     const qcEl = document.getElementById('qcFlags')
     if (qcEl) {
-      const flat = Object.values(report.slots).flat()
-      const all = [...new Set([...flat, ...report.envFlags])]
+      const flat = Object.values(qcLastReport.slots).flat()
+      const all = [...new Set([...flat, ...qcLastReport.envFlags])]
       if (all.length) {
         qcEl.textContent = 'QC: ' + all.join(', ')
         qcEl.className = 'qc-flag show'
@@ -13906,6 +13925,9 @@ function dropLink(reason: string) {
   resetQcState(qcStates);
   qcPrevEnv = null;
   qcLastReport = null;
+  qcCycleId = -1;
+  qcCycleSlots = new Map();
+  qcCycleEnv = [];
   renderEnvReadout(null);
   bootFlashShown = false;
   document.getElementById('bootBanner')?.classList.remove('show');
