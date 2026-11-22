@@ -13995,24 +13995,27 @@ listen<{ raw_line: string }>('serial-record', (event) => {
     }
   }
 
-  // Pump the analog channels into the live detector / fingerprint exactly like
-  // a plain numeric stream, so nothing else in the app has to change.
-  const analogChannels = r.slots
-    .filter((s) => s.readings.analog_value_v !== null)
-    .map((s) => s.readings.analog_value_v!)
-  if (analogChannels.length > 0) {
-    ingestReading(analogChannels)
+  // Pump normalized feature values into the live detector / fingerprint.
+  // Only ready channels contribute; warming/fault channels are excluded.
+  const featureChannels = normalizedSlots
+    .filter((s) => s.state === 'ready' && s.feature !== null)
+    .map((s) => s.feature!)
+  if (featureChannels.length > 0) {
+    ingestReading(featureChannels)
   }
 
   // Mirror into the Vial host state so open Vials see the same QC-aware record.
   try {
     (window as any).__OSMOGRAPH_HOST_STATE__ = {
       ...((window as any).__OSMOGRAPH_HOST_STATE__ || {}),
-      readings: analogChannels,
-      channels: analogChannels,
-      channelMeta: r.slots.map((s, i) => ({
-        name: `S${s.index}`,
-        kind: s.sensor_type === 'MOX' ? 'analog_mox' : 'mems_index',
+      readings: featureChannels,
+      channels: featureChannels,
+      channelMeta: normalizedSlots.map((s, i) => ({
+        name: s.model || `S\${s.index}`,
+        kind: s.type,
+        unit: s.readings.unit,
+        state: s.state,
+        feature: s.feature,
       })),
       env: r.environment,
       qc: qcLastReport,
