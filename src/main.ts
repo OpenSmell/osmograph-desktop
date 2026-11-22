@@ -2251,6 +2251,7 @@ async function updateSensorHealth() {
       return `<div class="health-cell" title="${h.status} · mean ${h.mean.toFixed(1)}">
         <span class="hd-dot" style="background:${color}"></span>
         <span class="hd-name">${chNames[i % chNames.length] || `CH${i + 1}`}</span>
+        <span class="hd-type" style="background:${SENSOR_TYPE_COLORS[channelKinds[i] ?? 'analog_mox'] ?? 'var(--text-3)'}">${(channelKinds[i] ?? 'analog_mox').replace(/_/g,'-').slice(0,4).toUpperCase()}</span>
         <span class="hd-mean">${h.mean.toFixed(0)}</span>
       </div>`;
     }).join('') + '</div>';
@@ -2283,6 +2284,7 @@ function renderFleetHealth(health: SensorHealthInfoApi[]) {
     return `<div class="health-card" style="border-color:${statusColor}66">
       <div class="hc-head">
         <span class="hc-name" title="${name} — channel ${h.channel + 1}">${name}</span>
+        <span class="hc-type" style="background:${SENSOR_TYPE_COLORS[channelKinds[h.channel] ?? 'analog_mox'] ?? 'var(--text-3)'}">${(channelKinds[h.channel] ?? 'analog_mox').replace(/_/g,'-').slice(0,4).toUpperCase()}</span>
         <span class="hc-status" style="color:${statusColor}">${esc(h.status)}</span>
       </div>
       <div class="hc-score" style="color:${statusColor}">${score}</div>
