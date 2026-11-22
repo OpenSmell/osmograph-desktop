@@ -303,6 +303,40 @@ function sensorTypeOf(i: number): SensorType {
   if (i >= 0 && i < channelSensorTypes.length) return channelSensorTypes[i];
   return inferSensorType(chNames[i] || `CH${i + 1}`);
 }
+
+/** Per-channel warmup state. MOX needs ~300s, NDIR ~60s, etc. */
+let channelWarmupState: ('warming' | 'ready' | 'fault')[] = [];
+let channelWarmupElapsed: number[] = [];
+
+/** Warmup seconds required per sensor type. */
+const SENSOR_WARMUP_S: Record<SensorType, number> = {
+  mox: 300,
+  electrochemical: 90,
+  ndir: 60,
+  pas: 30,
+  pid: 120,
+  galvanic: 60,
+  catalyticBead: 90,
+  qcm: 120,
+  saw: 120,
+  cantilever: 300,
+  polymer: 300,
+  solidElectrolyte: 300,
+  phIsfet: 60,
+  envTrh: 10,
+  mems: 30,
+  miris: 600,
+  other: 600,
+  unknown: 600,
+};
+
+function sensorWarmupState(i: number, cycleDurationS: number): 'warming' | 'ready' | 'fault' {
+  const st = sensorTypeOf(i);
+  const required = SENSOR_WARMUP_S[st] ?? 600;
+  channelWarmupElapsed[i] = (channelWarmupElapsed[i] ?? 0) + cycleDurationS;
+  if (channelWarmupElapsed[i] >= required) return 'ready';
+  return 'warming';
+}
 function inferKind(name: string): ChannelKind {
   const n = name.toUpperCase();
   if (/SGP|BME|CCS|MICS|MEMS|DIGITAL/.test(n)) return 'mems_index';
@@ -1616,7 +1650,10 @@ function buildLegend() {
     const meta = KIND_META[k];
     const st = sensorTypeOf(i);
     const stColor = SENSOR_TYPE_COLORS[st] ?? 'var(--text-3)';
-    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) · ${st} — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span><span class="tl-type" style="background:${stColor}">${st.replace(/_/g,'-').slice(0,4).toUpperCase()}</span>${name}<span class="tl-unit">${meta.unit}</span><span class="tl-edit" title="Rename this channel / set its sensor kind and type">✎</span></span>`;
+    const ws = channelWarmupState[i] ?? 'warming';
+    const wsLabel = ws === 'warming' ? 'WARMING' : ws === 'fault' ? 'FAULT' : 'READY';
+    const wsColor = ws === 'warming' ? 'var(--amber)' : ws === 'fault' ? 'var(--red)' : 'var(--green)';
+    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) · ${st} · ${ws} — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span><span class="tl-type" style="background:${stColor}">${st.replace(/_/g,'-').slice(0,4).toUpperCase()}</span><span class="tl-warmup" style="background:${wsColor}">${wsLabel}</span>${name}<span class="tl-unit">${meta.unit}</span><span class="tl-edit" title="Rename this channel / set its sensor kind and type">✎</span></span>`;
   }).join('');
   updatePlotScaleNote();
   el.querySelectorAll<HTMLElement>('.tl-chip').forEach((chip) => {
@@ -3755,6 +3792,9 @@ function setChannelCount(n: number, names?: string[]) {
   if (next === channelCount && !names) return;
   channelCount = next;
   channelKinds = [];
+  channelSensorTypes = [];
+  channelWarmupState = [];
+  channelWarmupElapsed = [];
   if (names && names.length === next) {
     chNames = names;
   } else {
@@ -4053,6 +4093,9 @@ function applyCustomNames() {
     chNames = [...names];
   }
   channelKinds = [];
+  channelSensorTypes = [];
+  channelWarmupState = [];
+  channelWarmupElapsed = [];
   // NOTE: renaming must NEVER reallocate the live buffers. This runs on every
   // serial-info/serial-auto event, and wiping traceData there blanked the plot
   // on each INFO (the old `traceData = newTraceChannels(...)` reset caused a
@@ -13924,6 +13967,21 @@ listen<{ raw_line: string }>('serial-record', (event) => {
   qcCycleEnv = [...new Set([...qcCycleEnv, ...report.envFlags])]
   qcLastReport = { slots: Object.fromEntries(qcCycleSlots), envFlags: qcCycleEnv }
   qcPrevEnv = prevEnvOut
+
+  // Track per-channel warmup state. Sensors need warmup cycles before data
+  // is trustworthy; show warming state in the legend until the required
+  // duration has elapsed for that sensor type.
+  const cycleDurS = r.cycle.duration_s ?? 0
+  for (const s of r.slots) {
+    const idx = s.index
+    if (idx >= 0) {
+      channelWarmupState[idx] = sensorWarmupState(idx, cycleDurS)
+      // Mirror sensor type from the record if not yet set
+      if (!channelSensorTypes[idx] && s.sensor_type) {
+        channelSensorTypes[idx] = s.sensor_type as SensorType
+      }
+    }
+  }
 
   // Pump the analog channels into the live detector / fingerprint exactly like
   // a plain numeric stream, so nothing else in the app has to change.
