@@ -241,6 +241,18 @@ const KIND_META: Record<ChannelKind, { unit: string; tag: string }> = {
 const KIND_GLYPH: Record<ChannelKind, string> = {
   analog_mox: '∿', mems_index: '◍', env_temp: '◇', env_hum: '≋', fan: '→',
 };
+// Sensor type colors for multi-type rig support
+const SENSOR_TYPE_COLORS: Record<string, string> = {
+  mox: 'hsl(200 90% 45%)',
+  electrochemical: 'hsl(280 90% 45%)',
+  ndir: 'hsl(140 90% 45%)',
+  pid: 'hsl(340 90% 45%)',
+  qcm: 'hsl(300 90% 45%)',
+  phIsfet: 'hsl(40 90% 45%)',
+  envTrh: 'hsl(180 90% 45%)',
+  other: 'hsl(0 0% 50%)',
+  unknown: 'hsl(0 0% 70%)',
+};
 let channelKinds: ChannelKind[] = [];
 function inferKind(name: string): ChannelKind {
   const n = name.toUpperCase();
