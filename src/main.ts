@@ -253,7 +253,56 @@ const SENSOR_TYPE_COLORS: Record<string, string> = {
   other: 'hsl(0 0% 50%)',
   unknown: 'hsl(0 0% 70%)',
 };
+
+/** Sensor type taxonomy (17 types, mirrors opensmell-js SENSOR_TYPES). */
+export type SensorType =
+  | 'mox'
+  | 'electrochemical'
+  | 'ndir'
+  | 'pas'
+  | 'pid'
+  | 'galvanic'
+  | 'catalyticBead'
+  | 'qcm'
+  | 'saw'
+  | 'cantilever'
+  | 'polymer'
+  | 'solidElectrolyte'
+  | 'phIsfet'
+  | 'envTrh'
+  | 'mems'
+  | 'miris'
+  | 'other'
+  | 'unknown';
+
 let channelKinds: ChannelKind[] = [];
+/** Per-channel sensor type (17-type OpenSmell sensor taxonomy). */
+let channelSensorTypes: SensorType[] = [];
+function inferSensorType(name: string): SensorType {
+  const n = name.toUpperCase();
+  if (/SGP|BME|CCS|MEMS|DIGITAL/.test(n)) return 'mems';
+  if (/TEMP|DHT.*T/.test(n)) return 'envTrh';
+  if (/HUM/.test(n)) return 'envTrh';
+  if (/FAN|RPM/.test(n)) return 'mox';
+  if (/CO2|CO₂|NDIR/.test(n)) return 'ndir';
+  if (/PID|photoionization/.test(n)) return 'pid';
+  if (/H2S|electrochemical|EC[-_]/i.test(n)) return 'electrochemical';
+  if (/O2|O₂|oxygen|galvanic/i.test(n)) return 'galvanic';
+  if (/LEL|combustible|catalytic|pellistor/i.test(n)) return 'catalyticBead';
+  if (/QCM|quartz/i.test(n)) return 'qcm';
+  if (/SAW|surface.acoustic/i.test(n)) return 'saw';
+  if (/cantilever/i.test(n)) return 'cantilever';
+  if (/polymer|chemiresist/i.test(n)) return 'polymer';
+  if (/zirconia|solid.electrolyte/i.test(n)) return 'solidElectrolyte';
+  if (/pH|ISFET/i.test(n)) return 'phIsfet';
+  if (/miris/i.test(n)) return 'miris';
+  if (/MQ|TGS|MICS|ZnO|SnO2|VOC|Alcohol|LPG|Methane|CH4|Ammonia|Hydrogen|CO$/i.test(n)) return 'mox';
+  return 'unknown';
+}
+function sensorTypeOf(i: number): SensorType {
+  if (i >= 0 && i < channelSensorTypes.length) return channelSensorTypes[i];
+  return inferSensorType(chNames[i] || `CH${i + 1}`);
+}
 function inferKind(name: string): ChannelKind {
   const n = name.toUpperCase();
   if (/SGP|BME|CCS|MICS|MEMS|DIGITAL/.test(n)) return 'mems_index';
@@ -1565,7 +1614,9 @@ function buildLegend() {
   el.innerHTML = chNames.map((name, i) => {
     const k = kindOf(i);
     const meta = KIND_META[k];
-    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span>${name}<span class="tl-unit">${meta.unit}</span><span class="tl-edit" title="Rename this channel / set its sensor kind">✎</span></span>`;
+    const st = sensorTypeOf(i);
+    const stColor = SENSOR_TYPE_COLORS[st] ?? 'var(--text-3)';
+    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) · ${st} — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span><span class="tl-type" style="background:${stColor}">${st.replace(/_/g,'-').slice(0,4).toUpperCase()}</span>${name}<span class="tl-unit">${meta.unit}</span><span class="tl-edit" title="Rename this channel / set its sensor kind and type">✎</span></span>`;
   }).join('');
   updatePlotScaleNote();
   el.querySelectorAll<HTMLElement>('.tl-chip').forEach((chip) => {
@@ -1589,12 +1640,17 @@ function buildLegend() {
 function editChannelInline(chip: HTMLElement, c: number) {
   const old = chNames[c] || `CH${c + 1}`;
   const k = kindOf(c);
-  const options = (Object.keys(KIND_META) as ChannelKind[])
+  const st = sensorTypeOf(c);
+  const kindOptions = (Object.keys(KIND_META) as ChannelKind[])
     .map(kind => `<option value="${kind}" ${kind === k ? 'selected' : ''}>${KIND_META[kind].tag} · ${KIND_META[kind].unit}</option>`)
     .join('');
-  chip.innerHTML = `<input class="tl-edit-input" type="text" value="${esc(old)}" data-ch="${c}" aria-label="Channel name" /><select class="tl-edit-kind" data-ch="${c}" aria-label="Sensor kind">${options}</select>`;
+  const typeOptions = Object.entries(SENSOR_TYPE_COLORS)
+    .map(([t, color]) => `<option value="${t}" ${t === st ? 'selected' : ''} style="background:${color}">${t.replace(/_/g,'-').toUpperCase()}</option>`)
+    .join('');
+  chip.innerHTML = `<input class="tl-edit-input" type="text" value="${esc(old)}" data-ch="${c}" aria-label="Channel name" /><select class="tl-edit-kind" data-ch="${c}" aria-label="Sensor kind">${kindOptions}</select><select class="tl-edit-type" data-ch="${c}" aria-label="Sensor type">${typeOptions}</select>`;
   const nameIn = chip.querySelector('.tl-edit-input') as HTMLInputElement;
   const kindSel = chip.querySelector('.tl-edit-kind') as HTMLSelectElement;
+  const typeSel = chip.querySelector('.tl-edit-type') as HTMLSelectElement;
   nameIn.focus();
   nameIn.select();
   let done = false;
@@ -1602,14 +1658,13 @@ function editChannelInline(chip: HTMLElement, c: number) {
     if (done) return;
     done = true;
     const nm = nameIn.value.trim() || old;
-    // Keep every channel's name: build the full list from what's displayed,
-    // then swap this one, so a single-legend edit never blanks the others.
     const list = chNames.slice();
     while (list.length <= c) list.push(`CH${list.length + 1}`);
     list[c] = nm;
     hardwareProfile.customChannelNames = list;
     persistHardwareProfile();
     channelKinds[c] = kindSel.value as ChannelKind;
+    channelSensorTypes[c] = typeSel.value as SensorType;
     const nameInput = document.getElementById('channelNamesInput') as HTMLInputElement | null;
     if (nameInput) nameInput.value = list.join(', ');
     applyCustomNames();
@@ -1626,17 +1681,20 @@ function editChannelInline(chip: HTMLElement, c: number) {
     if (e.key === 'Escape') { e.preventDefault(); cancel(); }
     else if (e.key === 'Enter') { e.preventDefault(); commit(); }
   });
-  // Clicking the kind dropdown opens focus on it AFTER the name input is no
-  // longer focused — don't commit the old kind on that blur; the select's own
-  // change/blur commits instead. Abstracting to a short timer keeps clicks
-  // inside the chip from closing the editor underneath the pointer.
+  typeSel.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+    else if (e.key === 'Enter') { e.preventDefault(); commit(); }
+  });
   const safeCommit = () => { if (done) return; commit(); };
   nameIn.addEventListener('blur', () => {
-    if (document.activeElement === kindSel) return;
+    if (document.activeElement === kindSel || document.activeElement === typeSel) return;
     window.setTimeout(safeCommit, 30);
   });
   kindSel.addEventListener('change', commit);
   kindSel.addEventListener('blur', () => { window.setTimeout(safeCommit, 30); });
+  typeSel.addEventListener('change', commit);
+  typeSel.addEventListener('blur', () => { window.setTimeout(safeCommit, 30); });
 }
 function syncLegendState(chip: HTMLElement, c: number) {
   chip.classList.toggle('tl-off', hiddenChannels.has(c));
