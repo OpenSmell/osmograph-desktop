@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { computeQcFlags, resetQcState, type QcFlag, type QcReport, type QcSlotState } from './qc';
+import { normalizeRecord, resetSlotStates } from './sensors/ingest';
+import { type SlotState } from './sensors/base';
 import { getVersion } from '@tauri-apps/api/app';
 import { DATASET_CATALOG, REFERENCE_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
 import * as Domain from './domainPacks';
@@ -442,6 +444,7 @@ let activeBaud = 0;
 // Live QC state (one set of rolling baselines per slot). Reset whenever the
 // link is adopted or dropped so baselines never carry across rigs.
 const qcStates = new Map<number, QcSlotState>()
+let qcSlotStates = new Map<number, SlotState>()
 let qcPrevEnv: { temperature_c: number | null; humidity_pct: number | null } | null = null
 let qcLastReport: QcReport | null = null
 // Flags are accumulated across the phases of one cycle so a fault raised in
@@ -13967,6 +13970,15 @@ listen<{ raw_line: string }>('serial-record', (event) => {
   qcCycleEnv = [...new Set([...qcCycleEnv, ...report.envFlags])]
   qcLastReport = { slots: Object.fromEntries(qcCycleSlots), envFlags: qcCycleEnv }
   qcPrevEnv = prevEnvOut
+
+  // Normalize every slot through its sensor-type handler (multi-type support)
+  const { slots: normalizedSlots, states: nextQcSlotStates } = normalizeRecord(
+    r,
+    qcSlotStates,
+    r.cycle.phase,
+    r.cycle.duration_s
+  )
+  qcSlotStates = nextQcSlotStates
 
   // Track per-channel warmup state. Sensors need warmup cycles before data
   // is trustworthy; show warming state in the legend until the required

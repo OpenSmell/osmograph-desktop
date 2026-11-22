@@ -182,6 +182,6 @@ export function computeQcFlags(
   }
 }
 
-export function resetQcState(states: Map<number, QcSlotState>): void {
+export function resetQcState<T>(states: Map<number, T>): void {
   states.clear()
 }
