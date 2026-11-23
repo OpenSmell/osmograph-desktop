@@ -1,0 +1,426 @@
+<style>
+  .aq { --bg:#060c12; --panel:#0b141d; --panel2:#101b26; --line:#1d3347; --line2:#2a4b66; --ink:#d7e8f5; --muted:#7f98ad; --dim:#4f677a; --cyan:#42d3ff; --cyan2:#7de7ff; --green:#53d38d; --yellow:#f0c35a; --red:#ff6b6b; --mono:ui-monospace,SFMono-Regular,Menlo,monospace; --sans:Inter,ui-sans-serif,system-ui,-apple-system,sans-serif; color:var(--ink); font-family:var(--sans); height:100%; min-height:530px; box-sizing:border-box; padding:12px; background:radial-gradient(1200px 400px at 20% -10%, rgba(66,211,255,.12), transparent 60%), linear-gradient(180deg,#071018 0%,#060c12 100%); }
+  .aq * { box-sizing:border-box; }
+  .aq .shell { display:grid; grid-template-columns:1.35fr 1fr; grid-template-rows:auto auto 1fr; gap:10px; height:100%; }
+  .aq .panel { background:linear-gradient(180deg,rgba(16,27,38,.96),rgba(11,20,29,.96)); border:1px solid var(--line); position:relative; overflow:hidden; }
+  .aq .panel::before { content:""; position:absolute; inset:0; background:linear-gradient(90deg,transparent,rgba(66,211,255,.04),transparent); pointer-events:none; }
+  .aq .head { grid-column:1/-1; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 12px; }
+  .aq .title { display:flex; flex-direction:column; gap:2px; }
+  .aq .kicker { font-family:var(--mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--cyan); }
+  .aq h1 { margin:0; font-size:20px; font-weight:650; letter-spacing:-.02em; }
+  .aq .sub { font-size:11px; color:var(--muted); }
+  .aq .status { display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end; }
+  .aq .pill { font-family:var(--mono); font-size:9px; letter-spacing:.08em; text-transform:uppercase; padding:4px 8px; border:1px solid var(--line2); color:var(--muted); background:rgba(66,211,255,.03); white-space:nowrap; }
+  .aq .pill.live { color:var(--cyan2); border-color:rgba(66,211,255,.45); box-shadow:inset 0 0 0 1px rgba(66,211,255,.08); }
+  .aq .pill.warn { color:var(--yellow); border-color:rgba(240,195,90,.45); }
+  .aq .pill.bad { color:var(--red); border-color:rgba(255,107,107,.45); }
+  .aq .pill.ok { color:var(--green); border-color:rgba(83,211,141,.45); }
+  .aq .hero { padding:12px; display:grid; grid-template-columns:180px 1fr; gap:12px; align-items:stretch; }
+  .aq .gauge { border:1px solid var(--line); background:radial-gradient(circle at 50% 45%, rgba(66,211,255,.08), transparent 62%); padding:10px; display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:170px; }
+  .aq .ring { width:132px; height:132px; position:relative; }
+  .aq .ring svg { width:100%; height:100%; transform:rotate(-90deg); }
+  .aq .ring .bg { fill:none; stroke:#132334; stroke-width:10; }
+  .aq .ring .fg { fill:none; stroke:var(--cyan); stroke-width:10; stroke-linecap:round; stroke-dasharray:339.292; stroke-dashoffset:339.292; transition:stroke-dashoffset .5s ease, stroke .3s ease; filter:drop-shadow(0 0 6px rgba(66,211,255,.35)); }
+  .aq .ring .center { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; }
+  .aq .big { font-family:var(--mono); font-size:28px; font-weight:700; line-height:1; }
+  .aq .band { font-family:var(--mono); font-size:9px; letter-spacing:.12em; text-transform:uppercase; color:var(--muted); margin-top:5px; }
+  .aq .gauge-note { margin-top:8px; font-size:10px; color:var(--muted); text-align:center; line-height:1.35; }
+  .aq .summary { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+  .aq .metric { border:1px solid var(--line); background:rgba(7,16,24,.35); padding:8px; min-width:0; }
+  .aq .metric .k { font-family:var(--mono); font-size:8px; letter-spacing:.1em; text-transform:uppercase; color:var(--dim); margin-bottom:4px; }
+  .aq .metric .v { font-size:17px; font-weight:650; font-variant-numeric:tabular-nums; line-height:1.1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .aq .metric .h { font-size:10px; color:var(--muted); margin-top:4px; line-height:1.3; min-height:26px; }
+  .aq .advice { padding:10px 12px; }
+  .aq .sec { font-family:var(--mono); font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); margin-bottom:8px; display:flex; justify-content:space-between; gap:8px; }
+  .aq .advice-main { font-size:13px; line-height:1.45; margin-bottom:8px; }
+  .aq .advice-main strong { color:var(--cyan2); font-weight:600; }
+  .aq .advice-list { display:grid; gap:6px; }
+  .aq .advice-item { font-size:11px; color:var(--muted); line-height:1.4; padding-left:10px; position:relative; }
+  .aq .advice-item::before { content:""; position:absolute; left:0; top:.55em; width:4px; height:4px; background:var(--cyan); box-shadow:0 0 6px rgba(66,211,255,.5); }
+  .aq .channels { padding:10px 12px; overflow:auto; }
+  .aq .chan-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .aq .chan { border:1px solid var(--line); background:rgba(7,16,24,.3); padding:8px; min-width:0; }
+  .aq .chan-top { display:flex; justify-content:space-between; gap:8px; align-items:baseline; margin-bottom:4px; }
+  .aq .chan-name { font-size:11px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .aq .chan-kind { font-family:var(--mono); font-size:8px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
+  .aq .chan-val { font-family:var(--mono); font-size:18px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .aq .chan-unit { font-size:10px; color:var(--muted); margin-left:3px; }
+  .aq .chan-sub { font-size:10px; color:var(--muted); margin-top:2px; display:flex; justify-content:space-between; gap:8px; }
+  .aq .spark { width:100%; height:34px; display:block; margin-top:6px; background:rgba(66,211,255,.02); border:1px solid rgba(29,51,71,.7); }
+  .aq .spark path { fill:none; stroke:var(--cyan); stroke-width:1.8; vector-effect:non-scaling-stroke; }
+  .aq .spark .base { stroke:rgba(127,152,173,.25); stroke-width:1; stroke-dasharray:3 3; }
+  .aq .events { padding:10px 12px; overflow:auto; }
+  .aq .event { border-left:2px solid var(--line2); padding:6px 0 6px 10px; margin-bottom:6px; }
+  .aq .event.warn { border-left-color:var(--yellow); }
+  .aq .event.bad { border-left-color:var(--red); }
+  .aq .event.good { border-left-color:var(--green); }
+  .aq .event .t { font-family:var(--mono); font-size:9px; color:var(--dim); }
+  .aq .event .m { font-size:11px; color:var(--ink); line-height:1.35; margin-top:2px; }
+  .aq .empty { font-size:11px; color:var(--muted); line-height:1.5; padding:10px 0; }
+  .aq .foot { grid-column:1/-1; padding:8px 12px; font-size:10px; color:var(--dim); display:flex; justify-content:space-between; gap:12px; }
+  @media (max-width: 900px) { .aq .shell { grid-template-columns:1fr; grid-template-rows:auto auto auto auto auto; } .aq .hero { grid-template-columns:1fr; } .aq .gauge { min-height:150px; } }
+</style>
+<div class="aq">
+  <div class="shell">
+    <div class="panel head">
+      <div class="title">
+        <div class="kicker">OpenSmell / Air Workspace</div>
+        <h1>Indoor Air Quality</h1>
+        <div class="sub" id="aqSub">Waiting for host data. Connect a rig or replay a recording.</div>
+      </div>
+      <div class="status">
+        <span class="pill" id="aqSource">No source</span>
+        <span class="pill" id="aqBaseline">Baseline</span>
+        <span class="pill" id="aqAnomaly">Anomaly</span>
+      </div>
+    </div>
+
+    <div class="panel hero">
+      <div class="gauge">
+        <div class="ring">
+          <svg viewBox="0 0 120 120" aria-hidden="true">
+            <circle class="bg" cx="60" cy="60" r="54"></circle>
+            <circle class="fg" id="aqRing" cx="60" cy="60" r="54"></circle>
+          </svg>
+          <div class="center">
+            <div class="big" id="aqScore">--</div>
+            <div class="band" id="aqBand">NO DATA</div>
+          </div>
+        </div>
+        <div class="gauge-note" id="aqGaugeNote">Advisory score from available channels. Not official EPA AQI.</div>
+      </div>
+      <div class="summary">
+        <div class="metric"><div class="k">CO2</div><div class="v" id="mCo2">--</div><div class="h" id="hCo2">Ventilation context when a CO2 sensor is present.</div></div>
+        <div class="metric"><div class="k">VOC / Gas</div><div class="v" id="mVoc">--</div><div class="h" id="hVoc">Change indicator; not a specific chemical ID.</div></div>
+        <div class="metric"><div class="k">Temp</div><div class="v" id="mTemp">--</div><div class="h" id="hTemp">Comfort and sensor-context channel.</div></div>
+        <div class="metric"><div class="k">Humidity</div><div class="v" id="mRh">--</div><div class="h" id="hRh">Affects comfort and MOX/VOC response.</div></div>
+        <div class="metric"><div class="k">Particulates</div><div class="v" id="mPm">--</div><div class="h" id="hPm">Shown only when a PM channel is present.</div></div>
+        <div class="metric"><div class="k">Confidence</div><div class="v" id="mConf">--</div><div class="h" id="hConf">Host anomaly confidence on the current stream.</div></div>
+      </div>
+    </div>
+
+    <div class="panel advice">
+      <div class="sec"><span>Guidance</span><span id="aqAdviceStamp">advisory</span></div>
+      <div class="advice-main" id="aqAdviceMain">Bring live air data into view. This workspace will summarize what the current sensors can and cannot tell you.</div>
+      <div class="advice-list" id="aqAdviceList">
+        <div class="advice-item">Use CO2 for ventilation context, VOC/MOX for change detection, and PM for particulates when available.</div>
+        <div class="advice-item">Let sensors warm up before acting on trends.</div>
+      </div>
+    </div>
+
+    <div class="panel channels">
+      <div class="sec"><span>Live Channels</span><span id="aqChanCount">0 channels</span></div>
+      <div class="chan-grid" id="aqChannels"><div class="empty">No channels reported by the host yet.</div></div>
+    </div>
+
+    <div class="panel events">
+      <div class="sec"><span>Recent Events</span><span id="aqEventCount">0</span></div>
+      <div id="aqEvents"><div class="empty">No recent events. Sustained changes will appear here.</div></div>
+    </div>
+
+    <div class="panel foot">
+      <div>Advisory workspace. Not EPA AQI, not a medical device, not a life-safety system.</div>
+      <div id="aqFoot">host-owned data · sandboxed UI</div>
+    </div>
+  </div>
+</div>
+<script>
+(function () {
+  "use strict";
+  var last = null;
+  var events = [];
+  var lastEventKey = "";
+  var lastEventAt = 0;
+
+  function byId(id) { return document.getElementById(id); }
+  function fmt(v, d) {
+    if (v === null || v === undefined || !isFinite(v)) return "--";
+    var n = Number(v);
+    if (Math.abs(n) >= 1000 && d === 0) return n.toFixed(0);
+    return n.toFixed(d == null ? 1 : d);
+  }
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function pct(v) { return Math.round(clamp(v, 0, 1) * 100); }
+
+  function setPill(id, text, cls) {
+    var el = byId(id);
+    el.textContent = text;
+    el.className = "pill" + (cls ? " " + cls : "");
+  }
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#42d3ff";
+  }
+
+  function channelValue(series, idx) {
+    if (!series || !series.values || !series.values[idx]) return null;
+    var arr = series.values[idx];
+    for (var i = arr.length - 1; i >= 0; i--) {
+      var v = arr[i];
+      if (v !== null && v !== undefined && isFinite(v)) return Number(v);
+    }
+    return null;
+  }
+
+  function sparkPath(values, w, h) {
+    var pts = [];
+    for (var i = 0; i < values.length; i++) {
+      var v = values[i];
+      if (v !== null && v !== undefined && isFinite(v)) pts.push({ i: i, v: Number(v) });
+    }
+    if (pts.length < 2) return "";
+    var min = pts[0].v, max = pts[0].v;
+    for (var j = 1; j < pts.length; j++) { if (pts[j].v < min) min = pts[j].v; if (pts[j].v > max) max = pts[j].v; }
+    var span = max - min || 1;
+    var d = "";
+    for (var k = 0; k < pts.length; k++) {
+      var x = (pts[k].i / Math.max(1, values.length - 1)) * w;
+      var y = h - ((pts[k].v - min) / span) * (h - 6) - 3;
+      d += (k === 0 ? "M" : "L") + x.toFixed(2) + " " + y.toFixed(2) + " ";
+    }
+    return d;
+  }
+
+  function kindOf(ch) {
+    var k = (ch.kind || "").toLowerCase();
+    var id = (ch.id || "").toLowerCase();
+    var label = (ch.label || "").toLowerCase();
+    var u = (ch.unit || "").toLowerCase();
+    if (k.indexOf("co2") >= 0 || id.indexOf("co2") >= 0 || label.indexOf("co2") >= 0) return "co2";
+    if (k.indexOf("voc") >= 0 || k.indexOf("tvoc") >= 0 || id.indexOf("voc") >= 0 || label.indexOf("voc") >= 0) return "voc";
+    if (k.indexOf("pm") >= 0 || id.indexOf("pm") >= 0 || label.indexOf("pm") >= 0) return "pm";
+    if (k.indexOf("temp") >= 0 || u === "c" || u === "°c") return "temp";
+    if (k.indexOf("hum") >= 0 || k.indexOf("rh") >= 0 || u === "%rh" || u === "%") return "rh";
+    if (k.indexOf("pressure") >= 0 || u === "hpa" || u === "pa") return "pressure";
+    return k || "sensor";
+  }
+
+  function findChannel(snapshot, series, kinds) {
+    for (var i = 0; i < snapshot.channels.length; i++) {
+      var ch = snapshot.channels[i];
+      var kind = kindOf(ch);
+      for (var j = 0; j < kinds.length; j++) {
+        if (kind === kinds[j]) return { ch: ch, idx: i, kind: kind, value: channelValue(series, i) };
+      }
+    }
+    return null;
+  }
+
+  function scoreFromCO2(v) {
+    if (v == null) return null;
+    if (v <= 800) return 95;
+    if (v <= 1000) return 85;
+    if (v <= 1200) return 72;
+    if (v <= 1500) return 55;
+    if (v <= 2000) return 38;
+    return 20;
+  }
+  function scoreFromVOC(v, unit) {
+    if (v == null) return null;
+    var u = (unit || "").toLowerCase();
+    if (u.indexOf("ppb") >= 0 || u.indexOf("ug/m3") >= 0 || u.indexOf("µg/m3") >= 0) {
+      if (v <= 150) return 92; if (v <= 300) return 78; if (v <= 500) return 62; if (v <= 1000) return 42; return 25;
+    }
+    var a = Math.abs(v);
+    if (a <= 0.2) return 90; if (a <= 0.5) return 75; if (a <= 1.0) return 60; if (a <= 2.0) return 45; return 30;
+  }
+  function scoreFromPM(v) {
+    if (v == null) return null;
+    if (v <= 5) return 95; if (v <= 12) return 82; if (v <= 35) return 62; if (v <= 55) return 42; return 22;
+  }
+  function scoreFromRH(v) {
+    if (v == null) return null;
+    if (v >= 30 && v <= 50) return 92;
+    if (v >= 25 && v <= 60) return 78;
+    if (v >= 20 && v <= 70) return 60;
+    return 40;
+  }
+
+  function overallBand(score) {
+    if (score == null) return { label: "NO DATA", color: cssVar("--dim"), note: "Advisory score from available channels. Not official EPA AQI." };
+    if (score >= 85) return { label: "GOOD", color: cssVar("--green"), note: "Available sensors look stable. Keep context and ventilation in view." };
+    if (score >= 70) return { label: "FAIR", color: cssVar("--cyan"), note: "Minor drift or comfort issue. Watch trends and sources." };
+    if (score >= 55) return { label: "WATCH", color: cssVar("--yellow"), note: "Consider ventilation or source inspection." };
+    if (score >= 40) return { label: "POOR", color: "#ff9f43", note: "Take action: ventilate, inspect sources, confirm with primary measurements." };
+    return { label: "ALERT", color: cssVar("--red"), note: "High concern from available sensors. Follow safety procedure; this is not a life-safety system." };
+  }
+
+  function pushEvent(level, message) {
+    var now = Date.now();
+    var key = level + "|" + message;
+    if (key === lastEventKey && now - lastEventAt < 60000) return;
+    lastEventKey = key;
+    lastEventAt = now;
+    events.unshift({ at: now, level: level, message: message });
+    if (events.length > 8) events.length = 8;
+  }
+
+  function renderEvents() {
+    var box = byId("aqEvents");
+    byId("aqEventCount").textContent = String(events.length);
+    if (!events.length) {
+      box.innerHTML = '<div class="empty">No recent events. Sustained changes will appear here.</div>';
+      return;
+    }
+    box.innerHTML = events.map(function (e) {
+      var cls = e.level === "bad" ? "bad" : e.level === "warn" ? "warn" : "good";
+      var t = new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+      return '<div class="event ' + cls + '"><div class="t">' + t + '</div><div class="m">' + e.message + '</div></div>';
+    }).join("");
+  }
+
+  function advice(snapshot, co2, voc, rh, temp, pm, score) {
+    var items = [];
+    var main = "Live readings are available. Use them as operational context, not certified air-quality measurements.";
+    var stamp = "advisory";
+
+    if (snapshot.source === "none") {
+      main = "No active source. Connect a rig or open a recording to evaluate indoor air conditions.";
+      items.push("This workspace needs host-owned sensor data; it does not estimate air quality without sensors.");
+      return { main: main, items: items, stamp: "idle" };
+    }
+    if (snapshot.baseline.state !== "ready") {
+      main = "Baseline is still forming. Wait for stable readings before treating changes as air events.";
+      items.push("Warmup and baseline stability matter for MOX/VOC sensors and for anomaly detection.");
+      stamp = "warming";
+    }
+    if (co2 && co2.value != null) {
+      if (co2.value > 1500) { items.push("CO2 is high for ventilation context. Increase fresh air or reduce occupancy, then watch the trend."); stamp = "action"; }
+      else if (co2.value > 1000) { items.push("CO2 is elevated. Ventilation may be insufficient for current occupancy."); }
+      else { items.push("CO2 is in a typical ventilation range for many indoor spaces."); }
+    } else {
+      items.push("No CO2 channel detected. Add NDIR CO2 for ventilation context.");
+    }
+    if (voc && voc.value != null) {
+      var va = Math.abs(voc.value);
+      if (va >= 2.0) { items.push("VOC/gas response is strongly elevated relative to baseline. Inspect sources and ventilate; do not identify the chemical from this signal alone."); stamp = "action"; }
+      else if (va >= 0.8) { items.push("VOC/gas response is changing. Log possible sources: cleaning, cooking, occupancy, materials, or sensor drift."); }
+      else { items.push("VOC/gas response is relatively stable on available channels."); }
+    } else {
+      items.push("No VOC/MOX channel detected. Add SGP30/SGP40/BME680/MQ135 for change detection.");
+    }
+    if (rh && rh.value != null) {
+      if (rh.value < 25 || rh.value > 60) items.push("Humidity is outside a common comfort range and can affect MOX/VOC sensor behavior.");
+    }
+    if (temp && temp.value != null) {
+      if (temp.value < 18 || temp.value > 27) items.push("Temperature is outside a common comfort range; interpret sensor trends with context.");
+    }
+    if (pm && pm.value != null) {
+      if (pm.value > 35) { items.push("Particulate reading is elevated. Reduce source exposure and confirm with a calibrated PM instrument if needed."); stamp = "action"; }
+    }
+    if (snapshot.anomaly && snapshot.anomaly.state === "critical") {
+      main = "<strong>Sustained anomaly detected.</strong> Check ventilation and sources, then confirm with primary measurements before making safety claims.";
+      stamp = "alert";
+    } else if (snapshot.anomaly && snapshot.anomaly.state === "warning") {
+      main = "<strong>Change detected.</strong> Review recent sources, occupancy, and ventilation; the array indicates change, not chemical identity.";
+      if (stamp !== "alert") stamp = "watch";
+    } else if (score != null && score >= 85) {
+      main = "<strong>Available sensors look stable.</strong> Continue logging context so changes are interpretable.";
+    }
+    if (!items.length) items.push("No specific advisory beyond normal monitoring.");
+    return { main: main, items: items.slice(0, 4), stamp: stamp };
+  }
+
+  function render(payload) {
+    last = payload;
+    var snapshot = payload.snapshot;
+    var series = payload.series;
+    var channels = snapshot.channels || [];
+
+    setPill("aqSource", snapshot.source === "live" ? "Live" : snapshot.source === "replay" ? "Replay" : "No source", snapshot.source === "live" ? "live" : "");
+    var bState = snapshot.baseline ? snapshot.baseline.state : "none";
+    setPill("aqBaseline", "Baseline " + bState, bState === "ready" ? "ok" : bState === "warming" ? "warn" : "");
+    var aState = snapshot.anomaly ? snapshot.anomaly.state : "unknown";
+    setPill("aqAnomaly", "Anomaly " + aState, aState === "critical" ? "bad" : aState === "warning" ? "warn" : aState === "normal" ? "ok" : "");
+
+    byId("aqSub").textContent = snapshot.source === "none"
+      ? "Waiting for host data. Connect a rig or replay a recording."
+      : (snapshot.source === "live" ? "Live host stream. " : "Replay/captured stream. ") + channels.length + " channel(s) reported.";
+
+    var co2 = findChannel(snapshot, series, ["co2"]);
+    var voc = findChannel(snapshot, series, ["voc", "tvoc", "mox", "gas"]);
+    var temp = findChannel(snapshot, series, ["temp", "temperature"]);
+    var rh = findChannel(snapshot, series, ["rh", "humidity"]);
+    var pm = findChannel(snapshot, series, ["pm", "pm25", "pm10", "particulate"]);
+
+    var scores = [];
+    var sCo2 = co2 ? scoreFromCO2(co2.value) : null; if (sCo2 != null) scores.push(sCo2);
+    var sVoc = voc ? scoreFromVOC(voc.value, voc.ch.unit) : null; if (sVoc != null) scores.push(sVoc);
+    var sPm = pm ? scoreFromPM(pm.value) : null; if (sPm != null) scores.push(sPm);
+    var sRh = rh ? scoreFromRH(rh.value) : null; if (sRh != null) scores.push(sRh * 0.5); // comfort/context, lower weight
+    var score = scores.length ? scores.reduce(function (a, b) { return a + b; }, 0) / scores.length : null;
+    if (snapshot.anomaly && snapshot.anomaly.state === "critical") score = score == null ? 30 : Math.min(score, 35);
+    else if (snapshot.anomaly && snapshot.anomaly.state === "warning") score = score == null ? 55 : Math.min(score, 60);
+
+    var band = overallBand(score);
+    byId("aqScore").textContent = score == null ? "--" : String(Math.round(score));
+    byId("aqBand").textContent = band.label;
+    byId("aqBand").style.color = band.color;
+    byId("aqGaugeNote").textContent = band.note;
+    var ring = byId("aqRing");
+    var circ = 339.292;
+    var frac = score == null ? 0 : clamp(score / 100, 0, 1);
+    ring.style.strokeDashoffset = String(circ * (1 - frac));
+    ring.style.stroke = band.color;
+    ring.style.filter = "drop-shadow(0 0 6px " + band.color + "55)";
+
+    byId("mCo2").textContent = co2 && co2.value != null ? fmt(co2.value, 0) + " ppm" : "--";
+    byId("hCo2").textContent = co2 ? (co2.value > 1200 ? "Elevated ventilation indicator." : "Ventilation context from live CO2.") : "No CO2 channel detected.";
+    byId("mVoc").textContent = voc && voc.value != null ? fmt(voc.value, Math.abs(voc.value) < 10 ? 2 : 0) + (voc.ch.unit ? " " + voc.ch.unit : "") : "--";
+    byId("hVoc").textContent = voc ? "Change indicator; not chemical ID." : "No VOC/MOX channel detected.";
+    byId("mTemp").textContent = temp && temp.value != null ? fmt(temp.value, 1) + (temp.ch.unit || "°C") : (snapshot.environment && snapshot.environment.temperature != null ? fmt(snapshot.environment.temperature, 1) + "°C" : "--");
+    byId("hTemp").textContent = "Comfort and sensor context.";
+    byId("mRh").textContent = rh && rh.value != null ? fmt(rh.value, 0) + (rh.ch.unit || "%") : (snapshot.environment && snapshot.environment.humidity != null ? fmt(snapshot.environment.humidity, 0) + "%" : "--");
+    byId("hRh").textContent = "Humidity affects comfort and VOC sensors.";
+    byId("mPm").textContent = pm && pm.value != null ? fmt(pm.value, 0) + (pm.ch.unit ? " " + pm.ch.unit : "") : "--";
+    byId("hPm").textContent = pm ? "Particulate channel detected." : "No PM channel detected.";
+    var conf = snapshot.anomaly ? snapshot.anomaly.confidence : null;
+    byId("mConf").textContent = conf == null ? "--" : pct(conf) + "%";
+    byId("hConf").textContent = snapshot.anomaly ? ("State: " + snapshot.anomaly.state) : "No anomaly state.";
+
+    var adv = advice(snapshot, co2, voc, rh, temp, pm, score);
+    byId("aqAdviceMain").innerHTML = adv.main;
+    byId("aqAdviceStamp").textContent = adv.stamp;
+    byId("aqAdviceList").innerHTML = adv.items.map(function (it) { return '<div class="advice-item">' + it + '</div>'; }).join("");
+
+    var chanBox = byId("aqChannels");
+    byId("aqChanCount").textContent = channels.length + " channel" + (channels.length === 1 ? "" : "s");
+    if (!channels.length) {
+      chanBox.innerHTML = '<div class="empty">No channels reported by the host yet.</div>';
+    } else {
+      chanBox.innerHTML = channels.map(function (ch, i) {
+        var v = channelValue(series, i);
+        var arr = (series && series.values && series.values[i]) ? series.values[i].slice(-80) : [];
+        var path = sparkPath(arr, 240, 34);
+        var kind = kindOf(ch);
+        var unit = ch.unit ? ' <span class="chan-unit">' + ch.unit + '</span>' : "";
+        var sub = kind.toUpperCase();
+        if (ch.health) sub += " · " + ch.health;
+        var lastTxt = v == null ? "no data" : "latest " + fmt(v, Math.abs(v) < 10 ? 3 : 1);
+        return '<div class="chan"><div class="chan-top"><div class="chan-name" title="' + (ch.label || ch.id) + '">' + (ch.label || ch.id) + '</div><div class="chan-kind">' + sub + '</div></div>'
+          + '<div class="chan-val">' + (v == null ? "--" : fmt(v, Math.abs(v) < 10 ? 3 : 1)) + unit + '</div>'
+          + '<div class="chan-sub"><span>' + ch.id + '</span><span>' + lastTxt + '</span></div>'
+          + '<svg class="spark" viewBox="0 0 240 34" preserveAspectRatio="none"><path class="base" d="M0 30 L240 30"></path>' + (path ? '<path d="' + path + '"></path>' : '') + '</svg></div>';
+      }).join("");
+    }
+
+    if (snapshot.anomaly && snapshot.anomaly.state === "warning") pushEvent("warn", "Sustained change detected by host anomaly detector. Inspect context and ventilation.");
+    if (snapshot.anomaly && snapshot.anomaly.state === "critical") pushEvent("bad", "Critical anomaly state. Ventilate/inspect sources and follow safety procedures as needed.");
+    if (snapshot.baseline && snapshot.baseline.state === "ready" && events.length === 0) pushEvent("good", "Baseline ready. Trend readings are now more interpretable.");
+    renderEvents();
+
+    byId("aqFoot").textContent = (snapshot.source || "none") + " · " + (snapshot.samplingMode || "unknown") + " · host-owned data";
+  }
+
+  function boot() {
+    if (!window.osmograph || typeof window.osmograph.onData !== "function") {
+      byId("aqSub").textContent = "Vial runtime unavailable.";
+      return;
+    }
+    window.osmograph.onData(render);
+    window.osmograph.ready();
+  }
+
+  boot();
+})();
+</script>

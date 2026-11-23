@@ -617,7 +617,11 @@ export function loadCustomPacks(): DomainPack[] {
     return parsed
       .map(coercePack)
       .filter(pack => validateDomainPack(pack, true).passed)
-      .filter(pack => (!pack.ui || !!pack.sourceUrl) && (!pack.homeUi || !!pack.sourceUrl));
+      .filter(pack => {
+        const uiOk = !pack.ui || !!pack.sourceUrl || !!loadDomainUi(pack.id, pack.version);
+        const homeOk = !pack.homeUi || !!pack.sourceUrl || !!loadDomainUi(`${pack.id}::home`, pack.version);
+        return uiOk && homeOk;
+      });
   } catch {
     return [];
   }

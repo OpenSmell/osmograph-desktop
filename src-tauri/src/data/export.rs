@@ -149,6 +149,11 @@ pub fn export_session_osmell(
             "groupId": label,
             "recordedAt": recorded_at,
             "durationMs": (parsed.time.last().copied().unwrap_or(0.0) * 1000.0).clamp(0.0, f64::MAX),
+            "notes": rec.notes,
+        },
+        "user_metadata": {
+            "label": rec.substance,
+            "notes": rec.notes,
         },
         "software": {"recorder": "Osmograph"},
         "provenance": {
@@ -306,6 +311,11 @@ pub fn export_recipe_run_osmell(
             "groupId": label,
             "recordedAt": Some(rec.timestamp * 1000.0),
             "durationMs": duration_ms,
+            "notes": rec.notes,
+        },
+        "user_metadata": {
+            "label": rec.substance,
+            "notes": rec.notes,
         },
         "software": {"recorder": "Osmograph"},
         "provenance": {

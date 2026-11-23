@@ -1,0 +1,188 @@
+{
+  "schema": "osmograph.domain-pack/2",
+  "id": "opensmell.air-quality",
+  "name": "Indoor Air Quality",
+  "version": "0.1.0",
+  "minHost": "0.1.1",
+  "author": "@opensmell",
+  "license": "MIT",
+  "risk": "high",
+  "domain": "air-quality",
+  "tagline": "Live indoor air context from the sensors you actually have.",
+  "summary": "An indoor air quality workspace for rigs with CO2, VOC, temperature, humidity, or particulate channels. It translates live sensor readings into ventilation and exposure context, tracks trends, and keeps the limits explicit: it is not a certified AQI monitor, not a medical device, and not a substitute for calibrated reference instruments.",
+  "scope": "Support repeated indoor air decisions: when to ventilate, when to inspect a source, and when to log a change. Use it on the same rig, with known sensors, and treat readings as operational context rather than regulatory measurements.",
+  "limits": [
+    "Not a certified air quality monitor, medical device, or regulatory compliance instrument. Do not use it for life-safety, legal, or clinical decisions.",
+    "Sensor readings depend on calibration, placement, warmup, humidity, cross-sensitivity, and sensor age. A low reading does not prove air is safe; a high reading does not identify the specific contaminant.",
+    "CO2, VOC, PM, temperature, and humidity are different measurements. This workspace does not convert them into an official EPA AQI unless your rig has the required calibrated pollutant sensors and a validated mapping."
+  ],
+  "anomaly": {
+    "baseline": {
+      "protocol": "first-n",
+      "warmupS": 120,
+      "r0WindowS": 60
+    },
+    "transforms": {
+      "conditioning": ["median3"],
+      "response": "delta-over-r0"
+    },
+    "detection": {
+      "enabled": true,
+      "sensitivity": 1.0,
+      "minChannels": 1,
+      "levelBudget": 0,
+      "levelRefS": 0,
+      "alertThreshold": 0.45,
+      "perChannelLimits": {},
+      "hysteresis": 0.15,
+      "escalation": {
+        "warningS": 30,
+        "criticalS": 120,
+        "emergencyS": 300,
+        "resetNormalS": 60
+      },
+      "farTargetPerMonth": null
+    },
+    "admissibility": {
+      "requireBaseline": "ready",
+      "minCoverage": 0.5
+    }
+  },
+  "citations": [
+    "World Health Organization. WHO global air quality guidelines: particulate matter (PM2.5 and PM10), ozone, nitrogen dioxide, sulfur dioxide and carbon monoxide. 2021.",
+    "ASHRAE Standard 62.1, Ventilation for Acceptable Indoor Air Quality. Use the current edition applicable to your jurisdiction and project.",
+    "US EPA. Air Quality Index (AQI) Basics. https://www.airnow.gov/aqi/aqi-basics/. Referenced to define official AQI; this workspace does not compute it."
+  ],
+  "home": {
+    "headline": "Indoor air, in context",
+    "detail": "Live CO2, VOC, and environment readings with ventilation guidance and explicit limits.",
+    "metrics": [
+      { "label": "Focus", "value": "CO2 · VOC · RH", "hint": "Uses the channels your rig reports." },
+      { "label": "Mode", "value": "Advisory", "hint": "Operational context, not certified AQI." },
+      { "label": "Action", "value": "Ventilate / Inspect", "hint": "Respond with the primary measurement when needed." }
+    ],
+    "actions": [
+      { "id": "open", "label": "Open workspace", "kind": "open-workspace" },
+      { "id": "check", "label": "Open Check", "kind": "open-check" }
+    ],
+    "limits": [
+      "Not a certified monitor or medical device.",
+      "Readings are sensor- and rig-dependent; confirm with calibrated instruments for safety decisions."
+    ],
+    "sources": ["WHO AQG 2021", "ASHRAE 62.1"]
+  },
+  "ui": {
+    "runtime": "sandbox/1",
+    "entry": "ui.html",
+    "height": 560
+  },
+  "widgets": [
+    {
+      "type": "hero",
+      "art": "generic",
+      "title": "Indoor Air Quality",
+      "subtitle": "Operational air context, not a certified AQI meter.",
+      "note": "OpenSmell Vial · sandboxed UI · host-owned data"
+    },
+    {
+      "type": "risk",
+      "level": "high",
+      "headline": "Air readings need context before action.",
+      "body": "A sensor change can mean ventilation, occupancy, a source event, sensor drift, or humidity interference. Use this workspace to decide when to ventilate or inspect, then confirm with the appropriate primary measurement before making a safety or compliance claim.",
+      "always": [
+        "Treat CO2, VOC, PM, temperature, and humidity as different measurements with different failure modes.",
+        "Let sensors warm up and record placement, calibration date, and known sources before comparing sessions.",
+        "Ventilate or remove people from obvious hazard situations first; do not wait for a dashboard score."
+      ],
+      "never": [
+        "Do not present this as an EPA AQI, medical-grade, or regulatory compliance reading.",
+        "Do not treat a VOC index or MOX response as a specific chemical identification or concentration without calibration.",
+        "Do not ignore symptoms, alarms, or known hazards because the dashboard looks normal."
+      ]
+    },
+    {
+      "type": "metrics",
+      "title": "What this workspace can claim",
+      "items": [
+        { "label": "Can", "value": "Track change", "hint": "Detect meaningful changes on the same rig over time." },
+        { "label": "Can", "value": "Guide ventilation", "hint": "Use CO2/humidity/VOC trends as operational prompts." },
+        { "label": "Cannot", "value": "Certify safety", "hint": "No regulatory AQI, no medical or life-safety claim." }
+      ]
+    },
+    {
+      "type": "tracking",
+      "title": "Air log",
+      "description": "Record the context that changes interpretation: occupancy, ventilation, sources, and sensor state.",
+      "fields": [
+        { "id": "location", "label": "Location", "type": "text", "placeholder": "Lab, office, classroom" },
+        { "id": "occupancy", "label": "Occupancy", "type": "number", "placeholder": "People in room" },
+        { "id": "ventilation", "label": "Ventilation", "type": "select", "options": ["closed", "natural", "mechanical", "mixed", "unknown"] }
+      ],
+      "logFields": [
+        { "id": "observation", "label": "Observation", "type": "text", "placeholder": "odor, haze, open window, source" },
+        { "id": "action", "label": "Action", "type": "select", "options": ["none", "ventilate", "inspect source", "leave area", "calibrate/check sensor"] },
+        { "id": "note", "label": "Note", "type": "text", "placeholder": "what changed?" }
+      ],
+      "logLabel": "Add observation"
+    },
+    {
+      "type": "rules",
+      "title": "Decision rules",
+      "rules": [
+        { "when": "CO2 rises above your ventilation target on a calibrated CO2 sensor", "then": "Increase ventilation or reduce occupancy, then confirm the trend returns toward baseline.", "severity": "warn" },
+        { "when": "VOC or MOX response rises sharply without a known source", "then": "Inspect for sources, ventilate, and do not identify the chemical from the array alone.", "severity": "warn" },
+        { "when": "A sensor is warming up, dead, saturated, or recently moved/calibrated", "then": "Do not use its readings for decisions until it is stable and its status is understood.", "severity": "stop" },
+        { "when": "People have symptoms, a combustion/gas alarm triggers, or there is visible smoke/haze", "then": "Follow safety procedure immediately. This workspace is not a life-safety system.", "severity": "stop" }
+      ]
+    },
+    {
+      "type": "docs",
+      "title": "Field notes"
+    },
+    {
+      "type": "rig",
+      "title": "Use this with your rig",
+      "body": "Connect a rig with CO2, VOC, temperature, humidity, or particulate channels. The workspace uses host-owned live readings and flags when the baseline is not ready. Compare recordings in Check on the same rig.",
+      "cta": "Open Check"
+    }
+  ],
+  "docs": [
+    {
+      "id": "how",
+      "title": "How to use this workspace",
+      "body": [
+        "Place sensors in the breathing zone or a representative location, away from direct vents, windows, sun, and point sources unless you are intentionally measuring a source.",
+        "Allow warmup. CO2 NDIR sensors can be usable quickly, but many MOX/VOC sensors need a stable warmup and baseline period before changes are meaningful.",
+        "Use trends and context together. A rising CO2 trend during occupancy usually means ventilation; a VOC spike after cleaning usually means a source event. Log the context before acting."
+      ]
+    },
+    {
+      "id": "limits",
+      "title": "What it cannot tell you",
+      "body": [
+        "It cannot certify compliance with EPA AQI, WHO guidelines, OSHA limits, or building code. Those require appropriate calibrated instruments and methods.",
+        "It cannot identify a specific VOC or gas from an uncalibrated MOX response. Treat VOC signals as change indicators unless you have a calibrated target gas model.",
+        "It cannot make a room safe. Ventilation, source control, maintenance, and calibrated safety detectors are the primary controls."
+      ]
+    },
+    {
+      "id": "sensors",
+      "title": "Sensor roles",
+      "body": [
+        "CO2 (NDIR, e.g. SCD30/SCD4x): useful for ventilation and occupancy context. It is not a direct measure of all pollutants.",
+        "VOC/MOX (e.g. SGP30/SGP40/BME680/MQ135): useful for detecting changes and source events. Cross-sensitive to humidity, temperature, and many compounds.",
+        "Temperature and humidity: context channels. They affect comfort, sensor response, and interpretation.",
+        "Particulate matter (PM): if present, treat as a separate pollutant class. PM sensors need their own placement and cleaning considerations."
+      ]
+    },
+    {
+      "id": "refs",
+      "title": "References",
+      "body": [
+        "World Health Organization. WHO global air quality guidelines: particulate matter (PM2.5 and PM10), ozone, nitrogen dioxide, sulfur dioxide and carbon monoxide. 2021.",
+        "ASHRAE Standard 62.1, Ventilation for Acceptable Indoor Air Quality. Use the current edition applicable to your jurisdiction/project.",
+        "US EPA. Air Quality Index (AQI) Basics. https://www.airnow.gov/aqi/aqi-basics/ — included to clarify what an official AQI is; this workspace does not compute official EPA AQI."
+      ]
+    }
+  ]
+}

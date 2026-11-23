@@ -2615,6 +2615,20 @@ fn rename_session(state: State<AppState>, file_id: String, new_name: String) -> 
     Ok(())
 }
 
+/// Update user notes on a recorded session. Notes are persisted in the
+/// session index and do not rename files or change the substance label.
+#[tauri::command]
+fn update_session_notes(state: State<AppState>, file_id: String, notes: String) -> Result<(), String> {
+    let dir = state.recordings_dir.lock().map_err(|e| e.to_string())?.clone();
+    let mut index = state.session_index.lock().map_err(|e| e.to_string())?;
+    let Some(record) = index.records.iter_mut().find(|r| r.file_id == file_id) else {
+        return Err("Session not found in the library.".to_string());
+    };
+    record.notes = notes;
+    let _ = index.save(&dir);
+    Ok(())
+}
+
 /// Delete every recorded session from disk and reset the library index.
 /// Used by the "Reset & Forget" flow so a user can wipe the local library
 /// without hunting individual files.
@@ -4233,6 +4247,7 @@ pub fn run() {    env_logger::init();
             remove_session,
             set_collection_hidden,
             rename_session,
+            update_session_notes,
             clear_recordings,
             analyze_recording,
             export_session_copy,

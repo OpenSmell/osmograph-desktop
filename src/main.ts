@@ -582,6 +582,7 @@ interface SessionRecord {
   preparation?: string;
   role?: string;
   label: string;
+  notes?: string;
   format: string;
   duration: string;
   sensors: number;
@@ -2549,6 +2550,10 @@ function inspectSession(s: SessionRecord) {
     </div>
   `;
   document.getElementById('inspectorDetails')!.innerHTML = details;
+  const notesEl = document.getElementById('inspNotes') as HTMLTextAreaElement | null;
+  if (notesEl) notesEl.value = s.notes || '';
+  const notesStatus = document.getElementById('inspNotesStatus');
+  if (notesStatus) notesStatus.textContent = s.notes ? 'Saved' : '';
   if (s.quality_report) {
     renderQualityReport(s.quality_report);
   }
@@ -10871,6 +10876,10 @@ document.getElementById('inspDelete')!.addEventListener('click', async () => {
     selectedSession = null;
     renderLibrary();
     document.getElementById('inspectorDetails')!.textContent = 'Select a session';
+    const inspNotes = document.getElementById('inspNotes') as HTMLTextAreaElement | null;
+    if (inspNotes) inspNotes.value = '';
+    const inspNotesStatus = document.getElementById('inspNotesStatus');
+    if (inspNotesStatus) inspNotesStatus.textContent = '';
     inspectorFpToken++;
     inspectorSeries = null;
     inspectorFingerprint = null;
@@ -10891,6 +10900,21 @@ document.getElementById('inspExport')!.addEventListener('click', async () => {
     await flashStatus('libStatus', msg, 'var(--green)');
   } catch (e) {
     await flashStatus('libStatus', `Export failed: ${e}`, 'var(--red)');
+  }
+});
+
+document.getElementById('inspSaveNotes')?.addEventListener('click', async () => {
+  const s = await selectedSessionRecord();
+  if (!s || !s.file_id) return;
+  const notes = (document.getElementById('inspNotes') as HTMLTextAreaElement | null)?.value ?? '';
+  const status = document.getElementById('inspNotesStatus');
+  try {
+    await invoke('update_session_notes', { fileId: s.file_id, notes });
+    s.notes = notes;
+    if (status) status.textContent = 'Saved';
+  } catch (e) {
+    if (status) status.textContent = 'Save failed';
+    await flashStatus('libStatus', `Notes save failed: ${e}`, 'var(--red)');
   }
 });
 
@@ -15653,9 +15677,51 @@ const SENSOR_LIBRARY: Record<string, {
 };
 
 // Per-channel calibration state, persisted to localStorage so it survives reloads.
-type CalibEntry = { model: string; r0: number; a: number; b: number; enabled: boolean };
+// MOX uses r0/a/b; other sensor types use type-specific fields.
+type CalibEntry = {
+  model: string;
+  enabled: boolean;
+  // MOX
+  r0: number; a: number; b: number;
+  // Electrochemical / Galvanic
+  sensitivity_nA_per_ppm?: number;
+  zero_offset_ua?: number;
+  // NDIR / PID / general linear
+  offset?: number;
+  scale?: number;
+  // Piezo (QCM/SAW/Cantilever)
+  baseline_frequency_hz?: number;
+  // pH / ISFET
+  ph_offset_mv?: number;
+  ph_slope_mv_per_ph?: number;
+};
 const CALIB_KEY = 'osmograph.calibration';
 let calibrationPerChannel: CalibEntry[] = [];
+
+function defaultCalibForType(st: SensorType, model: string): CalibEntry {
+  const lib = SENSOR_LIBRARY[model];
+  const base: CalibEntry = {
+    model,
+    enabled: st === 'mox' ? !!lib : true,
+    r0: lib?.r0_typ ?? 0,
+    a: lib?.a ?? 1,
+    b: lib?.b ?? -1,
+  };
+  if (st === 'electrochemical' || st === 'galvanic') {
+    base.sensitivity_nA_per_ppm = 1;
+    base.zero_offset_ua = 0;
+  } else if (st === 'ndir' || st === 'pid' || st === 'catalyticBead') {
+    base.offset = 0;
+    base.scale = 1;
+  } else if (st === 'qcm' || st === 'saw' || st === 'cantilever') {
+    base.baseline_frequency_hz = 0;
+  } else if (st === 'phIsfet') {
+    base.ph_offset_mv = 0;
+    base.ph_slope_mv_per_ph = -59.16;
+  }
+  return base;
+}
+
 function loadCalibration() {
   try {
     const raw = localStorage.getItem(CALIB_KEY);
@@ -15667,14 +15733,13 @@ function persistCalibration() {
   try { localStorage.setItem(CALIB_KEY, JSON.stringify(calibrationPerChannel)); } catch { /* ignore */ }
 }
 
-// Ensure the calibration array covers every active channel with library defaults.
+// Ensure the calibration array covers every active channel with type-aware defaults.
 function ensureCalibrationLength() {
   while (calibrationPerChannel.length < chNames.length) {
-    const model = chNames[calibrationPerChannel.length] || `CH${calibrationPerChannel.length + 1}`;
-    const lib = SENSOR_LIBRARY[model];
-    calibrationPerChannel.push(lib
-      ? { model, r0: lib.r0_typ, a: lib.a, b: lib.b, enabled: true }
-      : { model, r0: 0, a: 1, b: -1, enabled: false });
+    const i = calibrationPerChannel.length;
+    const model = chNames[i] || `CH${i + 1}`;
+    const st = sensorTypeOf(i);
+    calibrationPerChannel.push(defaultCalibForType(st, model));
   }
 }
 
@@ -15693,46 +15758,73 @@ function renderCalibration() {
   const table = document.getElementById('calibTable');
   if (!table) return;
   if (chNames.length === 0) { table.innerHTML = '<span class="hint">No channels configured.</span>'; return; }
-  table.innerHTML = [
-    '<div class="calib-row calib-head">',
-    '<span>CH</span><span>Sensor</span><span>R₀ (Ω)</span><span>a</span><span>b</span><span>Apply</span>',
-    '</div>',
-    ...chNames.map((name, i) => {
-      const c = calibrationPerChannel[i];
-      const lib = SENSOR_LIBRARY[name];
-      const opts = Object.keys(SENSOR_LIBRARY).map(m =>
-        `<option value="${m}" ${c.model === m ? 'selected' : ''}>${m}</option>`).join('');
-      const modelSel = `<select class="calib-model" data-ch="${i}">${lib ? `<option value="${name}">${name}</option>` : ''}${opts}</select>`;
-      return `<div class="calib-row">
-        <span class="calib-ch" style="color:${channelColor(i)}">CH${i + 1}</span>
-        ${modelSel}
-        <input class="calib-r0"  type="number" min="0" step="any" value="${c.r0}"  data-ch="${i}" />
-        <input class="calib-a"   type="number" min="0" step="any" value="${c.a}"   data-ch="${i}" />
-        <input class="calib-b"   type="number" step="any" value="${c.b}" data-ch="${i}" />
-        <span class="calib-toggle"><input class="calib-on" type="checkbox" data-ch="${i}" ${c.enabled ? 'checked' : ''} /></span>
-      </div>`;
-    }).join('')
-  ].join('');
+
+  const field = (i: number, key: keyof CalibEntry, label: string, step = 'any', min?: string) => {
+    const c = calibrationPerChannel[i] as any;
+    const val = c?.[key] ?? '';
+    return `<label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-3)"><span>${label}</span><input class="calib-field" data-ch="${i}" data-key="${String(key)}" type="number" step="${step}" ${min !== undefined ? `min="${min}"` : ''} value="${val}" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:2px 4px;font-size:11px" /></label>`;
+  };
+
+  table.innerHTML = chNames.map((name, i) => {
+    const c = calibrationPerChannel[i];
+    const st = sensorTypeOf(i);
+    const stColor = SENSOR_TYPE_COLORS[st] ?? 'var(--text-3)';
+    const lib = SENSOR_LIBRARY[name];
+    const opts = Object.keys(SENSOR_LIBRARY).map(m =>
+      `<option value="${m}" ${c.model === m ? 'selected' : ''}>${m}</option>`).join('');
+    const modelSel = `<select class="calib-model" data-ch="${i}" style="background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:2px 4px;font-size:11px">${lib ? `<option value="${name}">${name}</option>` : ''}${opts}<option value="${c.model}" ${!lib && !SENSOR_LIBRARY[c.model] ? 'selected' : ''}>${c.model}</option></select>`;
+
+    let fieldsHtml = '';
+    if (st === 'mox' || st === 'mems' || st === 'unknown' || st === 'other') {
+      fieldsHtml = `${field(i, 'r0', 'R₀ (Ω)', 'any', '0')}${field(i, 'a', 'a', 'any', '0')}${field(i, 'b', 'b')}`;
+    } else if (st === 'electrochemical' || st === 'galvanic') {
+      fieldsHtml = `${field(i, 'sensitivity_nA_per_ppm', 'Sensitivity (nA/ppm)')}${field(i, 'zero_offset_ua', 'Zero offset (µA)')}`;
+    } else if (st === 'ndir' || st === 'pid' || st === 'catalyticBead' || st === 'pas') {
+      fieldsHtml = `${field(i, 'offset', 'Offset')}${field(i, 'scale', 'Scale')}`;
+    } else if (st === 'qcm' || st === 'saw' || st === 'cantilever') {
+      fieldsHtml = `${field(i, 'baseline_frequency_hz', 'Baseline freq (Hz)', 'any', '0')}`;
+    } else if (st === 'phIsfet') {
+      fieldsHtml = `${field(i, 'ph_offset_mv', 'Offset (mV)')}${field(i, 'ph_slope_mv_per_ph', 'Slope (mV/pH)')}`;
+    } else {
+      fieldsHtml = `${field(i, 'offset', 'Offset')}${field(i, 'scale', 'Scale')}`;
+    }
+
+    return `<div class="calib-row" style="display:grid;gap:6px;padding:8px;border:1px solid var(--border);background:var(--bg-1)">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="calib-ch" style="color:${channelColor(i)};font-weight:600">CH${i + 1}</span>
+        <span style="font-size:10px;color:var(--text-2)">${name}</span>
+        <span style="font-size:9px;padding:1px 5px;color:#fff;background:${stColor};border-radius:3px;text-transform:uppercase">${st.replace(/_/g, '-')}</span>
+        <span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:10px;color:var(--text-3)">Apply <input class="calib-on" type="checkbox" data-ch="${i}" ${c.enabled ? 'checked' : ''} /></span>
+      </div>
+      <div style="display:grid;grid-template-columns:minmax(120px,1fr) repeat(auto-fit,minmax(110px,1fr));gap:6px;align-items:end">
+        <label style="display:flex;flex-direction:column;gap:2px;font-size:10px;color:var(--text-3)"><span>Model</span>${modelSel}</label>
+        ${fieldsHtml}
+      </div>
+    </div>`;
+  }).join('');
 
   table.querySelectorAll<HTMLSelectElement>('.calib-model').forEach(sel => {
     sel.addEventListener('change', () => {
       const i = Number(sel.dataset.ch);
       const m = sel.value;
       const lib = SENSOR_LIBRARY[m];
-      calibrationPerChannel[i] = lib
-        ? { model: m, r0: lib.r0_typ, a: lib.a, b: lib.b, enabled: true }
-        : { model: m, r0: calibrationPerChannel[i].r0, a: calibrationPerChannel[i].a, b: calibrationPerChannel[i].b, enabled: calibrationPerChannel[i].enabled };
+      const st = sensorTypeOf(i);
+      if (lib) {
+        calibrationPerChannel[i] = { ...defaultCalibForType(st, m), model: m, r0: lib.r0_typ, a: lib.a, b: lib.b, enabled: true };
+      } else {
+        calibrationPerChannel[i] = { ...calibrationPerChannel[i], model: m };
+      }
       renderCalibration();
     });
   });
-  table.querySelectorAll<HTMLInputElement>('.calib-r0,.calib-a,.calib-b').forEach(inp => {
+  table.querySelectorAll<HTMLInputElement>('.calib-field').forEach(inp => {
     inp.addEventListener('input', () => {
       const i = Number(inp.dataset.ch);
-      const c = calibrationPerChannel[i];
-      if (!c) return;
-      if (inp.classList.contains('calib-r0')) c.r0 = Number(inp.value);
-      if (inp.classList.contains('calib-a')) c.a = Number(inp.value);
-      if (inp.classList.contains('calib-b')) c.b = Number(inp.value);
+      const key = inp.dataset.key as keyof CalibEntry;
+      const c = calibrationPerChannel[i] as any;
+      if (!c || !key) return;
+      const v = Number(inp.value);
+      c[key] = Number.isFinite(v) ? v : 0;
     });
   });
   table.querySelectorAll<HTMLInputElement>('.calib-on').forEach(cb => {
@@ -15978,10 +16070,47 @@ onPresetChange('auto');
 renderHardwareProfile();
 applyCustomNames();
 renderSensorLibrary();
+async function seedBundledVials(): Promise<void> {
+  const bundled = [
+    { id: 'opensmell.air-quality', manifest: '/vials/air-quality/vial.json', ui: '/vials/air-quality/ui.html' },
+  ];
+  for (const entry of bundled) {
+    try {
+      if (Domain.domainPackById(entry.id)) continue;
+      const manifestRes = await fetch(entry.manifest, { headers: { Accept: 'application/json' } });
+      if (!manifestRes.ok) continue;
+      const manifestText = await manifestRes.text();
+      const result = Domain.inspectDomainPackJson(manifestText, new URL(entry.manifest, window.location.origin).toString());
+      if (!result.validation.passed) {
+        console.warn('Bundled vial failed gate:', entry.id, result.validation.errors);
+        continue;
+      }
+      const pack = result.pack;
+      if (pack.ui?.entry) {
+        const uiRes = await fetch(entry.ui, { headers: { Accept: 'text/html' } });
+        if (!uiRes.ok) {
+          console.warn('Bundled vial UI missing:', entry.id);
+          continue;
+        }
+        const uiHtml = await uiRes.text();
+        VialRuntime.assertSandboxableUi(uiHtml);
+        Domain.saveDomainUi(pack.id, pack.version, uiHtml, new URL(entry.ui, window.location.origin).toString());
+      }
+      Domain.saveCustomPack(pack);
+      Domain.installDomainPack(pack.id);
+      if (activeVialsTab) renderVials();
+      renderVialHome();
+    } catch (err) {
+      console.warn('Bundled vial seed failed:', entry.id, err);
+    }
+  }
+}
+
 // Core UI is wired and the window is interactive — hand control over now and
 // let the idempotent data fills below finish behind the fading boot overlay.
 bootLog('core wired');
 bootDone();
+void seedBundledVials();
 
 updateBuzzerPreviews();
 updateOledPreview();

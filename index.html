@@ -4616,6 +4616,14 @@
               <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
             </div>
             <div class="inspector-section">
+              <h4>Notes</h4>
+              <textarea id="inspNotes" placeholder="Label, observations, conditions, decisions..." style="width:100%;min-height:56px;resize:vertical;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:6px 8px;font-size:11px;font-family:var(--font-mono);line-height:1.4;"></textarea>
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+                <span id="inspNotesStatus" style="font-size:10px;color:var(--text-3)"></span>
+                <button id="inspSaveNotes" class="mini-btn" type="button">Save notes</button>
+              </div>
+            </div>
+            <div class="inspector-section">
               <div class="insp-fp-head">
                 <h4>Response fingerprint</h4>
                 <span class="fp-mode-switch" role="group" aria-label="Fingerprint view">
@@ -5133,14 +5141,12 @@
           <div class="sys-panel" id="sys-calibration">
             <h2>Calibration &amp; Sensor Library</h2>
             <p class="hint" style="margin-bottom:10px">
-              Enter each sensor&rsquo;s calibration constants (R₀, sensitivity <b>a</b>, exponent <b>b</b>) so raw
-              resistance is turned into a ppm estimate and a relative quality score. Values are stored locally
-              on this device and applied live to the trace, features and quality analysis.
+              Configure calibration per channel based on sensor type. MOX sensors use R₀/a/b curves; electrochemical sensors use sensitivity and zero offset; NDIR/PID use offset/scale; piezo sensors use baseline frequency; pH/ISFET use offset and slope. Values are stored locally on this device.
               <button id="calibInfo" type="button" style="padding:1px 6px;margin-left:6px;font-size:11px;vertical-align:middle"
                 title="How these constants are sourced">?</button>
             </p>
             <div class="card">
-              <h3>Per-Channel Calibration Constants</h3>
+              <h3>Per-Channel Calibration</h3>
               <div id="calibTable" style="display:grid;gap:6px;margin-top:8px"></div>
               <div class="form-row" style="margin-top:10px">
                 <button id="calibSave">Save Constants</button>
