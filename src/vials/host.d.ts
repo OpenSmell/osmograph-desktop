@@ -8,6 +8,7 @@ export interface VialChannel {
   index: number;
   name: string;
   kind?: string;
+  sensorKind?: string;
   unit?: string;
 }
 
@@ -105,7 +106,7 @@ export interface VialSnapshot {
   takenAt: number;
   source: 'live' | 'replay' | 'dataset' | 'none';
   samplingMode: 'timeseries' | 'trial' | 'unknown';
-  channels: Array<{ id: string; label: string; kind: string; unit?: string; health?: string }>;
+  channels: Array<{ id: string; label: string; kind: string; sensorKind?: string; unit?: string; health?: string }>;
   environment: { temperature: number | null; humidity: number | null } | null;
   process?: Record<string, VialProcessReading> | null;
   baseline: { state: 'none' | 'warming' | 'ready' | 'stale'; progress: number; ageSec: number | null };

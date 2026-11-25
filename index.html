@@ -61,21 +61,6 @@
       --hairline: 1px;
     }
 
-    /* === Toggle switch === */
-    .switch { position: relative; display: inline-block; width: 40px; height: 22px; }
-    .switch input { opacity: 0; width: 0; height: 0; }
-    .switch span {
-      position: absolute; cursor: pointer; inset: 0;
-      background: var(--bg-4); border: 1px solid var(--border); border-radius: 22px;
-      transition: background .15s;
-    }
-    .switch span:before {
-      content: ""; position: absolute; height: 16px; width: 16px; left: 2px; top: 2px;
-      background: var(--text-3); border-radius: 50%; transition: transform .15s, background .15s;
-    }
-    .switch input:checked + span { background: var(--green-dim); border-color: var(--green); }
-    .switch input:checked + span:before { transform: translateX(18px); background: var(--green); }
-
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
@@ -4616,11 +4601,60 @@
               <div id="inspectorDetails" style="font-size:11px;color:var(--text-2)">Select a session</div>
             </div>
             <div class="inspector-section">
+              <h4>Session metadata</h4>
+              <div style="display:flex;flex-wrap:wrap;gap:8px">
+                <div style="flex:1;min-width:140px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Label</label>
+                  <input type="text" id="inspLabel" placeholder="Session label" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px;font-family:var(--font)" />
+                </div>
+                <div style="flex:1;min-width:140px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Location</label>
+                  <input type="text" id="inspLocation" placeholder="Lab, office, classroom" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px;font-family:var(--font)" />
+                </div>
+                <div style="flex:1;min-width:120px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Occupancy</label>
+                  <input type="number" id="inspOccupancy" placeholder="People" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px;font-family:var(--font)" />
+                </div>
+                <div style="flex:1;min-width:140px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Ventilation</label>
+                  <select id="inspVentilation" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px">
+                    <option value="">Select</option>
+                    <option value="closed">Closed</option>
+                    <option value="natural">Natural</option>
+                    <option value="mechanical">Mechanical</option>
+                    <option value="mixed">Mixed</option>
+                    <option value="unknown">Unknown</option>
+                  </select>
+                </div>
+              </div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:6px">
+                <div style="flex:1;min-width:160px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Observation</label>
+                  <input type="text" id="inspObservation" placeholder="odor, haze, open window" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px;font-family:var(--font)" />
+                </div>
+                <div style="flex:1;min-width:160px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Action</label>
+                  <select id="inspAction" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px">
+                    <option value="">Select</option>
+                    <option value="none">None</option>
+                    <option value="ventilate">Ventilate</option>
+                    <option value="inspect source">Inspect source</option>
+                    <option value="leave area">Leave area</option>
+                    <option value="calibrate/check sensor">Calibrate/check sensor</option>
+                  </select>
+                </div>
+                <div style="flex:2;min-width:200px">
+                  <label style="font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:0.08em">Note</label>
+                  <input type="text" id="inspNote" placeholder="what changed?" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:4px 6px;font-size:11px;font-family:var(--font)" />
+                </div>
+              </div>
+            </div>
+            <div class="inspector-section">
               <h4>Notes</h4>
-              <textarea id="inspNotes" placeholder="Label, observations, conditions, decisions..." style="width:100%;min-height:56px;resize:vertical;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:6px 8px;font-size:11px;font-family:var(--font-mono);line-height:1.4;"></textarea>
+              <textarea id="inspNotes" placeholder="Free-form notes..." style="width:100%;min-height:56px;resize:vertical;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:6px 8px;font-size:11px;font-family:var(--font-mono);line-height:1.4;"></textarea>
               <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
                 <span id="inspNotesStatus" style="font-size:10px;color:var(--text-3)"></span>
-                <button id="inspSaveNotes" class="mini-btn" type="button">Save notes</button>
+                <button id="inspSaveNotes" class="mini-btn" type="button">Save metadata</button>
               </div>
             </div>
             <div class="inspector-section">
@@ -5071,6 +5105,31 @@
             <div class="card">
               <h3>Channel Mapping</h3>
               <div id="channelMapping"></div>
+            </div>
+          </div>
+
+          <!-- Sensor Mapping Panel -->
+          <div class="sys-panel" id="sys-sensor-mapping">
+            <h2>Sensor Mapping</h2>
+            <p class="hint" style="margin-bottom:10px">
+              Map each physical slot to a sensor type/model so Osmograph loads
+              the correct units, calibration curve, and expected range. Change
+              a mapping and it applies immediately to live and recorded data.
+            </p>
+            <div class="card">
+              <div class="form-row" style="margin-bottom:8px">
+                <label style="flex:1"><strong>Auto-discover from hardware</strong></label>
+                <select id="sensorAutoDiscover" style="max-width:180px">
+                  <option value="off">Off — manual mapping only</option>
+                  <option value="on">On — read sensor ID from slot EEPROM / I²C</option>
+                </select>
+                <span class="hint">Hardware ID read is not yet wired to breakout boards; manual mapping is the V1 path.</span>
+              </div>
+              <div id="sensorMappingTable" style="display:grid;gap:4px"></div>
+              <div class="form-row" style="margin-top:10px">
+                <button id="sensorMappingApply">Apply Mappings</button>
+                <span class="hint" id="sensorMappingStatus" style="align-self:center"></span>
+              </div>
             </div>
           </div>
 
@@ -5588,6 +5647,28 @@ Confidence: 97.3%</div>
               <h3>Privacy</h3>
               <p class="hint">Sessions, calibration and hardware profile are stored only on this device. Anything shared to
                 the community (data hub / HF sync / sensor models) is sent only when you explicitly choose to submit it.</p>
+            </div>
+            <div class="card">
+              <h3>Connection Troubleshooting</h3>
+              <p class="hint" style="margin-bottom:6px">USB / serial, WiFi, and BLE are all implemented — if a rig won't connect or stream, start here.</p>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <div style="border:1px solid var(--border);background:var(--bg-1);padding:8px;font-size:10px;color:var(--text-2);line-height:1.5">
+                  <strong>USB / Serial</strong><br/>
+                  • No COM ports? Install the board's USB-serial driver (CH340, CP210x, FTDI, or ESP32 built-in).<br/>
+                  • Port appears but connect fails? Close Arduino IDE / PuTTY / any other serial monitor holding the port.<br/>
+                  • Connected but no data? Check baud rate; use 0 channels for auto-detect.<br/>
+                  • Bootloader banner? The device needs flashing — use the Flash button in the connection banner.
+                </div>
+                <div style="border:1px solid var(--border);background:var(--bg-1);padding:8px;font-size:10px;color:var(--text-2);line-height:1.5">
+                  <strong>WiFi</strong><br/>
+                  • Address format: <code>host:port</code> (e.g. <code>192.168.4.1:8080</code>).<br/>
+                  • Connect fails? Verify the device is on the same network and the port is open.<br/>
+                  <strong>BLE</strong><br/>
+                  • Scan first, then select a device from the dropdown.<br/>
+                  • One connection at a time — USB, WiFi, and BLE are mutually exclusive.<br/>
+                  • Warmup: MOX ~300 s, NDIR ~60 s, pH/ISFET ~60 s. Channels show WARMING until ready.
+                </div>
+              </div>
             </div>
           </div>
 

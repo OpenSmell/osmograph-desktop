@@ -84,6 +84,13 @@ export interface NormalizedSlot {
   qcFlags: QcRuleId[]
   // Engineering-unit feature value, or null if not yet ready / fault.
   feature: number | null
+  // ── Sensor profile metadata (resolved from the sensor profile registry) ──
+  profileKind?: string | null          // resolved SensorKind string
+  profileUnit?: string | null          // engineering unit from profile (authoritative)
+  profileMin?: number | null           // expected operating minimum
+  profileMax?: number | null           // expected operating maximum
+  profileCurve?: CalibrationData | null // normalized curve params for this channel
+  vendorModel?: string | null          // matched vendor/model string
 }
 
 export interface SlotState {

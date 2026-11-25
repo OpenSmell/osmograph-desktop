@@ -18,6 +18,7 @@
     "test:vial-host": "node scripts/test-vial-host.mjs",
     "test:vial-air-quality": "node scripts/validate-vial.mjs public/vials/air-quality",
     "test:vial-runtime": "node --experimental-strip-types scripts/test-vial-runtime.mjs",
+    "test:sensor-mixed": "npx tsx scripts/test-sensor-mixed.mjs",
     "test:updates-ui": "node scripts/test-updates-ui.mjs"
   },
   "dependencies": {

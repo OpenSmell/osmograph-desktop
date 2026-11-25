@@ -14,6 +14,7 @@ import {
   type SensorType,
 } from './base'
 import { sensorTypeRegistry } from './registry'
+import { sensorProfiles, inferKindFromModel } from './profiles'
 
 // Map legacy v1.0 sensor_type strings to v1.1 enum values where possible.
 const LEGACY_TYPE_MAP: Record<string, SensorType> = {
@@ -117,7 +118,46 @@ export function normalizeSlot(
 
   // Carry over handler-mutated state (e.g. flatFrequencyCount for piezo).
   // The handler mutates the passed-in state object directly, so we just return it.
-  return { slot: normalized, state: nextState }
+  return { slot: attachProfile(normalized, raw ?? {}), state: nextState }
+}
+
+// Attach sensor-profile metadata (units, min/max, curve, vendor model) to a
+// normalized slot. Called after the type handler resolves the raw slot.
+function attachProfile(normalized: NormalizedSlot, raw: any): NormalizedSlot {
+  const model = normalized.model ?? raw?.sensor_model ?? null
+  const kind = model ? inferKindFromModel(model) : (normalized.type as unknown as import('./profiles').SensorKind)
+  const profile = kind === 'unknown'
+    ? (model ? sensorProfiles.getByModel(model) : null) ?? sensorProfiles.get('unknown')
+    : sensorProfiles.get(kind)
+
+  if (profile) {
+    normalized.profileKind = profile.kind
+    normalized.profileUnit = profile.unit ?? normalized.readings.unit
+    normalized.profileMin = profile.min
+    normalized.profileMax = profile.max
+    normalized.vendorModel = model ?? null
+
+    // Map profile curve params onto CalibrationData shape where applicable.
+    const c = profile.curve
+    normalized.profileCurve = {
+      r0_ohm: c.r0_typ ?? null,
+      load_resistor_ohm: c.load_resistor_ohm ?? null,
+      sensitivity_nA_per_ppm: c.sensitivity_nA_per_ppm ?? null,
+      zero_offset_ua: c.zero_offset_ua ?? null,
+      baseline_frequency_hz: c.baseline_frequency_hz ?? null,
+      ph_offset_mv: c.ph_offset_mv ?? null,
+      ph_slope_mv_per_ph: c.ph_slope_mv_per_ph ?? null,
+      offset: c.a ?? null,
+      scale: c.b ?? null,
+    }
+
+    // Use the profile unit as authoritative when the handler left it raw.
+    if (!normalized.readings.unit || normalized.readings.unit === 'raw' || normalized.readings.unit === 'V') {
+      normalized.readings.unit = profile.unit
+    }
+  }
+
+  return normalized
 }
 
 // Normalize all slots in a .osmell record.

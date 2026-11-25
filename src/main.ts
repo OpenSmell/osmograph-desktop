@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { computeQcFlags, resetQcState, type QcFlag, type QcReport, type QcSlotState } from './qc';
 import { normalizeRecord, resetSlotStates } from './sensors/ingest';
 import { type SlotState } from './sensors/base';
+import { sensorProfiles, inferKindFromModel } from './sensors/profiles';
 import { getVersion } from '@tauri-apps/api/app';
 import { DATASET_CATALOG, REFERENCE_CATALOG, type DatasetEntry, type DatasetFormat } from './datasets';
 import * as Domain from './domainPacks';
@@ -1141,7 +1142,8 @@ function drawCrosshairReadout(vals: { name: string; v: number }[] | null) {
   const n = vals.slice(0, 12).map(({ name, v }) => {
     const c = chNames.indexOf(name);
     const color = channelColor(c >= 0 ? c : 0);
-    const unit = KIND_META[kindOf(c >= 0 ? c : 0)].unit;
+    const profile = c >= 0 ? sensorProfiles.get(inferKindFromModel(chNames[c]) as any) : null;
+    const unit = profile ? profile.unit : KIND_META[kindOf(c >= 0 ? c : 0)].unit;
     const label = Math.abs(v) >= 1000 ? `${(v / 1000).toFixed(2)}k` : v.toFixed(2);
     const ppm = c >= 0 ? calibratedPPM(c, v) : null;
     // The datasheet curve is an order-of-magnitude heuristic at best, so the
@@ -1657,7 +1659,23 @@ function buildLegend() {
     const ws = channelWarmupState[i] ?? 'warming';
     const wsLabel = ws === 'warming' ? 'WARMING' : ws === 'fault' ? 'FAULT' : 'READY';
     const wsColor = ws === 'warming' ? 'var(--amber)' : ws === 'fault' ? 'var(--red)' : 'var(--green)';
-    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${meta.unit}) · ${st} · ${ws} — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span><span class="tl-type" style="background:${stColor}">${st.replace(/_/g,'-').slice(0,4).toUpperCase()}</span><span class="tl-warmup" style="background:${wsColor}">${wsLabel}</span>${name}<span class="tl-unit">${meta.unit}</span><span class="tl-edit" title="Rename this channel / set its sensor kind and type">✎</span></span>`;
+    // Prefer the profile unit (from sensor mapping) over the kind unit.
+    const profile = sensorProfiles.get(inferKindFromModel(name) as any);
+    const unit = profile ? profile.unit : meta.unit;
+    let rangeBadge = '';
+    let warmupBar = '';
+    if (profile) {
+      if (profile.min != null || profile.max != null) {
+        const lo = profile.min != null ? String(profile.min) : '—';
+        const hi = profile.max != null ? String(profile.max) : '—';
+        rangeBadge = `<span style="font-size:8px;padding:1px 5px;border:1px solid var(--border);background:var(--bg-3);color:var(--text-2);margin-left:6px" title="Expected range ${lo} – ${hi}">${lo}–${hi}</span>`;
+      }
+      const wp = channelWarmupElapsed[i] ?? 0;
+      const pct = Math.min(100, Math.round((wp / profile.warmupSeconds) * 100));
+      const ready = channelWarmupState[i] === 'ready';
+      warmupBar = `<span style="display:inline-block;width:34px;height:6px;background:var(--bg-3);border:1px solid var(--border);margin-left:6px;vertical-align:middle;font-size:0" title="Warmup ${wp}s / ${profile.warmupSeconds}s"><span style="height:100%;width:${pct}%;background:${ready ? 'var(--green)' : 'var(--cyan)'}"></span></span>`;
+    }
+    return `<span class="tl-chip" data-ch="${i}" title="${name} · ${meta.tag} (${unit}) · ${st} · ${ws} — hover to isolate, click the eye to toggle, ✎ to rename"><span class="swatch" style="background:${channelColor(i)}"></span><span class="tl-eye" title="Show / hide this sensor">◉</span><span class="tl-kind" title="${meta.tag}">${KIND_GLYPH[k]}</span><span class="tl-type" style="background:${stColor}">${st.replace(/_/g,'-').slice(0,4).toUpperCase()}</span><span class="tl-warmup" style="background:${wsColor}">${wsLabel}</span>${name}<span class="tl-unit">${unit}</span>${rangeBadge}${warmupBar}<span class="tl-edit" title="Rename this channel / set its sensor kind and type">✎</span></span>`;
   }).join('');
   updatePlotScaleNote();
   el.querySelectorAll<HTMLElement>('.tl-chip').forEach((chip) => {
@@ -2550,8 +2568,26 @@ function inspectSession(s: SessionRecord) {
     </div>
   `;
   document.getElementById('inspectorDetails')!.innerHTML = details;
+
+  // Populate structured session metadata fields from stored notes.
+  const meta = parseSessionMetadata(s.notes);
+  const labelEl = document.getElementById('inspLabel') as HTMLInputElement | null;
+  if (labelEl) labelEl.value = s.label || '';
+  const locEl = document.getElementById('inspLocation') as HTMLInputElement | null;
+  if (locEl) locEl.value = meta.location || '';
+  const occEl = document.getElementById('inspOccupancy') as HTMLInputElement | null;
+  if (occEl) occEl.value = meta.occupancy != null ? String(meta.occupancy) : '';
+  const ventEl = document.getElementById('inspVentilation') as HTMLSelectElement | null;
+  if (ventEl) ventEl.value = meta.ventilation || '';
+  const obsEl = document.getElementById('inspObservation') as HTMLInputElement | null;
+  if (obsEl) obsEl.value = meta.observation || '';
+  const actEl = document.getElementById('inspAction') as HTMLSelectElement | null;
+  if (actEl) actEl.value = meta.action || '';
+  const noteEl = document.getElementById('inspNote') as HTMLInputElement | null;
+  if (noteEl) noteEl.value = meta.note || '';
+
   const notesEl = document.getElementById('inspNotes') as HTMLTextAreaElement | null;
-  if (notesEl) notesEl.value = s.notes || '';
+  if (notesEl) notesEl.value = meta.freeform || s.notes || '';
   const notesStatus = document.getElementById('inspNotesStatus');
   if (notesStatus) notesStatus.textContent = s.notes ? 'Saved' : '';
   if (s.quality_report) {
@@ -2559,6 +2595,62 @@ function inspectSession(s: SessionRecord) {
   }
   void renderRigHealth(s);
   void renderInspectorFingerprint(s);
+}
+
+/** Parse structured key/value session metadata from stored notes text.
+ *  Format: one `key: value` per line, blank line separates free-form body. */
+function parseSessionMetadata(notes: string | undefined): {
+  location?: string; occupancy?: number | null; ventilation?: string;
+  observation?: string; action?: string; note?: string; freeform: string;
+} {
+  const out: { location?: string; occupancy?: number | null; ventilation?: string;
+    observation?: string; action?: string; note?: string; freeform: string } = { freeform: '' };
+  if (!notes) return out;
+  const lines = notes.split('\n');
+  let inBody = false;
+  const body: string[] = [];
+  for (const line of lines) {
+    if (!inBody && line.trim() === '') { inBody = true; continue; }
+    if (!inBody) {
+      const m = line.match(/^([a-zA-Z]+):\s*(.*)$/);
+      if (m) {
+        const key = m[1].toLowerCase();
+        const val = m[2].trim();
+        if (key === 'location') out.location = val;
+        else if (key === 'occupancy') out.occupancy = Number(val) || null;
+        else if (key === 'ventilation') out.ventilation = val;
+        else if (key === 'observation') out.observation = val;
+        else if (key === 'action') out.action = val;
+        else if (key === 'note') out.note = val;
+        else body.push(line);
+      } else {
+        body.push(line);
+      }
+    } else {
+      body.push(line);
+    }
+  }
+  out.freeform = body.join('\n').trim();
+  return out;
+}
+
+/** Serialize structured session metadata + freeform notes into notes text. */
+function serializeSessionMetadata(meta: {
+  label?: string; location?: string; occupancy?: number | null; ventilation?: string;
+  observation?: string; action?: string; note?: string; freeform: string;
+}): string {
+  const lines: string[] = [];
+  if (meta.location) lines.push(`location: ${meta.location}`);
+  if (meta.occupancy != null) lines.push(`occupancy: ${meta.occupancy}`);
+  if (meta.ventilation) lines.push(`ventilation: ${meta.ventilation}`);
+  if (meta.observation) lines.push(`observation: ${meta.observation}`);
+  if (meta.action) lines.push(`action: ${meta.action}`);
+  if (meta.note) lines.push(`note: ${meta.note}`);
+  const head = lines.join('\n');
+  const body = meta.freeform.trim();
+  if (head && body) return `${head}\n\n${body}`;
+  if (head) return head;
+  return body;
 }
 
 // === Quality Report Panel (Python `quality_panel.py` parity) ===
@@ -3793,6 +3885,7 @@ function setChannelCount(n: number, names?: string[]) {
     if (pc) pc.textContent = 'auto';
     updateRailCoord();
     refreshCalibrationViews();
+    renderSensorMappingTable();
     syncOpenVialDetectors();
     return;
   }
@@ -3818,6 +3911,7 @@ function setChannelCount(n: number, names?: string[]) {
   if (pc) pc.textContent = String(next);
   updateRailCoord();
   refreshCalibrationViews();
+  renderSensorMappingTable();
   syncOpenVialDetectors();
 }
 
@@ -4114,8 +4208,140 @@ function applyCustomNames() {
   if (pc) pc.textContent = String(channelCount);
   updateRailCoord();
   refreshCalibrationViews();
+  renderSensorMappingTable();
 }
 
+// === Sensor Mapping (per-slot type/model assignment) ===
+
+type SensorMapping = { type: SensorType; model: string };
+let sensorMappings = new Map<number, SensorMapping>();
+
+function loadSensorMappings() {
+  try {
+    const raw = localStorage.getItem('osmograph.sensorMappings.v1');
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, { type: SensorType; model: string }>;
+      for (const [slot, m] of Object.entries(parsed)) {
+        sensorMappings.set(Number(slot), m);
+      }
+    }
+  } catch { /* defaults */ }
+}
+function persistSensorMappings() {
+  try {
+    const obj: Record<string, { type: SensorType; model: string }> = {};
+    for (const [slot, m] of sensorMappings) obj[String(slot)] = m;
+    localStorage.setItem('osmograph.sensorMappings.v1', JSON.stringify(obj));
+  } catch { /* ignore */ }
+}
+
+function resolveMappingForChannel(c: number): { type: SensorType; model: string } | null {
+  const mapped = sensorMappings.get(c);
+  if (mapped) return mapped;
+  // Fall back to inference from channel name.
+  const name = chNames[c] || `CH${c + 1}`;
+  const kind = inferKindFromModel(name);
+  // Map SensorKind -> SensorType (same string set).
+  const type = kind as SensorType;
+  return { type, model: name };
+}
+
+function applySensorMappings() {
+  // Apply mappings to channel names + types + calibration defaults.
+  for (let c = 0; c < channelCount; c++) {
+    const m = resolveMappingForChannel(c);
+    if (m) {
+      chNames[c] = m.model;
+      channelSensorTypes[c] = m.type;
+    }
+  }
+  // Ensure calibration length covers all channels with type-aware defaults.
+  ensureCalibrationLength();
+  persistSensorMappings();
+  buildLegend();
+  refreshCalibrationViews();
+  const st = document.getElementById('sensorMappingStatus');
+  if (st) { st.textContent = 'Mappings applied.'; st.style.color = 'var(--green)'; }
+  setTimeout(() => { if (st) st.textContent = ''; }, 2000);
+}
+
+function renderSensorMappingTable() {
+  const el = document.getElementById('sensorMappingTable');
+  if (!el) return;
+  if (channelCount === 0) {
+    el.innerHTML = '<span class="hint">No channels configured. Connect a device or choose a preset.</span>';
+    return;
+  }
+  const kinds = sensorProfiles.all().map(p => p.kind);
+  const typeOptions = kinds.map(k => {
+    const p = sensorProfiles.get(k)!;
+    return `<option value="${k}">${p.kind.replace(/([a-z])([A-Z])/g, '$1 $2').toUpperCase()} · ${p.unit}</option>`;
+  }).join('');
+
+  let html = '<div style="display:grid;grid-template-columns:40px 1fr 1fr 120px 100px 80px;gap:6px;font-size:11px;color:var(--text-2);margin-bottom:6px"><div>SLOT</div><div>NAME / MODEL</div><div>SENSOR TYPE</div><div>UNIT</div><div>RANGE</div><div>WARMUP</div></div>';
+  for (let c = 0; c < channelCount; c++) {
+    const m = resolveMappingForChannel(c);
+    const profile = m ? sensorProfiles.get(m.type as any) : null;
+    const unit = profile ? profile.unit : 'raw';
+    let rangeHtml = '—';
+    if (profile) {
+      if (profile.min != null && profile.max != null) rangeHtml = `${profile.min} – ${profile.max}`;
+      else if (profile.min != null) rangeHtml = `≥${profile.min}`;
+      else if (profile.max != null) rangeHtml = `≤${profile.max}`;
+    }
+    const warmup = profile ? profile.warmupSeconds : 600;
+    const mapped = sensorMappings.has(c) ? ' ✓' : '';
+    const name = chNames[c] || `CH${c + 1}`;
+    const rangeStyle = rangeHtml !== '—' ? 'font-size:9px;padding:1px 5px;border:1px solid var(--border);background:var(--bg-3);color:var(--text-2)' : 'color:var(--text-3)';
+    html += `<div style="display:grid;grid-template-columns:40px 1fr 1fr 120px 100px 80px;gap:6px;align-items:center;padding:6px 8px;border:1px solid var(--border);background:var(--bg-1)">
+      <div style="font-weight:700;color:var(--text-1);font-size:12px">CH${c + 1}${mapped}</div>
+      <input type="text" class="sm-name" data-ch="${c}" value="${name.replace(/"/g,'&quot;')}" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:3px 6px;font-size:11px" />
+      <select class="sm-type" data-ch="${c}" style="width:100%;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:3px 6px;font-size:11px">${typeOptions}</select>
+      <div style="font-size:10px;color:var(--text-2);font-weight:600">${unit}</div>
+      <span style="${rangeStyle}">${rangeHtml}</span>
+      <div style="display:inline-block;width:34px;height:6px;background:var(--bg-3);border:1px solid var(--border);margin-left:6px;vertical-align:middle;font-size:0" title="${warmup}s warmup"><div style="height:100%;width:0%;background:var(--cyan)"></div></div>
+    </div>`;
+  }
+  el.innerHTML = html;
+
+  el.querySelectorAll<HTMLInputElement>('.sm-name').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const c = Number(inp.dataset.ch);
+      const m = resolveMappingForChannel(c);
+      if (m) { m.model = inp.value; sensorMappings.set(c, m); }
+      chNames[c] = inp.value;
+      applySensorMappings();
+    });
+  });
+  el.querySelectorAll<HTMLSelectElement>('.sm-type').forEach(sel => {
+    const c = Number(sel.dataset.ch);
+    sel.addEventListener('change', () => {
+      const type = sel.value as SensorType;
+      const profile = sensorProfiles.get(type as any);
+      const model = profile ? profile.vendorModels[0] : `CH${c + 1}`;
+      sensorMappings.set(c, { type, model });
+      chNames[c] = model;
+      channelSensorTypes[c] = type;
+      applySensorMappings();
+    });
+    // Set current selection.
+    const mapped = resolveMappingForChannel(c);
+    if (mapped) sel.value = mapped.type;
+  });
+}
+
+function wireSensorMapping() {
+  const autoEl = document.getElementById('sensorAutoDiscover') as HTMLSelectElement | null;
+  autoEl?.addEventListener('change', () => {
+    // Stored but not yet wired to hardware ID read (V1: manual only).
+    persistSensorMappings();
+  });
+  const applyEl = document.getElementById('sensorMappingApply') as HTMLButtonElement | null;
+  applyEl?.addEventListener('click', () => { applySensorMappings(); });
+}
+
+// Load mappings on init.
+loadSensorMappings();
 // === Preset Change ===
 function onPresetChange(preset: string) {
   activePreset = preset;
@@ -4140,6 +4366,7 @@ function onPresetChange(preset: string) {
   if (pc) pc.textContent = String(channelCount);
   updateRailCoord();
   refreshCalibrationViews();
+  renderSensorMappingTable();
   const detail = document.getElementById('presetDetail');
   if (detail) {
     detail.innerHTML = `<div style="font-size:11px;color:var(--text-2)">
@@ -4653,14 +4880,18 @@ function currentHostSnapshot(runtime: ActiveVialRuntime | null = null): VialHost
     // Every source is an ordered sample stream today. 'unknown' is honest when
     // there is no source at all; a discrete trial mode does not exist yet.
     samplingMode: source === 'none' ? 'unknown' : 'timeseries',
-    channels: chNames.map((name, i) => ({
-      id: `ch${i}`,
-      label: name,
-      kind: kindOf(i),
-      unit: KIND_META[kindOf(i)].unit,
-      // The Rust rolling-window verdict; 'unknown' while unmeasured.
-      health: healthEnumFor(i),
-    })),
+    channels: chNames.map((name, i) => {
+      const profile = sensorProfiles.get(inferKindFromModel(name) as any);
+      return {
+        id: `ch${i}`,
+        label: name,
+        kind: kindOf(i),
+        sensorKind: profile ? profile.kind : inferKindFromModel(name),
+        unit: profile ? profile.unit : KIND_META[kindOf(i)].unit,
+        // The Rust rolling-window verdict; 'unknown' while unmeasured.
+        health: healthEnumFor(i),
+      };
+    }),
     environment: lastEnv ? { temperature: lastEnv.temperature, humidity: lastEnv.humidity } : null,
     // Process sensors (pH, DO, redox) are not gas channels and are not part of
     // the MOX detector. The live probe path is not wired yet; the contract is
@@ -10906,11 +11137,23 @@ document.getElementById('inspExport')!.addEventListener('click', async () => {
 document.getElementById('inspSaveNotes')?.addEventListener('click', async () => {
   const s = await selectedSessionRecord();
   if (!s || !s.file_id) return;
-  const notes = (document.getElementById('inspNotes') as HTMLTextAreaElement | null)?.value ?? '';
+  const labelEl = document.getElementById('inspLabel') as HTMLInputElement | null;
+  const notesEl = document.getElementById('inspNotes') as HTMLTextAreaElement | null;
   const status = document.getElementById('inspNotesStatus');
   try {
-    await invoke('update_session_notes', { fileId: s.file_id, notes });
-    s.notes = notes;
+    // Label is a top-level session field; structured metadata goes into notes.
+    if (labelEl) s.label = labelEl.value.trim() || s.label;
+    const meta = serializeSessionMetadata({
+      location: (document.getElementById('inspLocation') as HTMLInputElement | null)?.value.trim() || undefined,
+      occupancy: (() => { const v = (document.getElementById('inspOccupancy') as HTMLInputElement | null)?.value.trim(); return v ? Number(v) : null; })(),
+      ventilation: (document.getElementById('inspVentilation') as HTMLSelectElement | null)?.value || undefined,
+      observation: (document.getElementById('inspObservation') as HTMLInputElement | null)?.value.trim() || undefined,
+      action: (document.getElementById('inspAction') as HTMLSelectElement | null)?.value || undefined,
+      note: (document.getElementById('inspNote') as HTMLInputElement | null)?.value.trim() || undefined,
+      freeform: notesEl?.value ?? '',
+    });
+    s.notes = meta;
+    await invoke('update_session_notes', { fileId: s.file_id, notes: meta });
     if (status) status.textContent = 'Saved';
   } catch (e) {
     if (status) status.textContent = 'Save failed';
@@ -15389,6 +15632,8 @@ type HardwareProfile = {
   sensorOnLowSide: boolean;
   /// User-specified channel names (any count) — overrides preset names when set.
   customChannelNames?: string[];
+  /// Per-slot sensor type/model mappings (sensor mapping UI).
+  sensorMappings?: Record<number, { type: SensorType; model: string }>;
   /// Fitted I²C devices besides the OLED (MEMS/env breakouts on the SDA/SCL
   /// bus). The blueprint pre-flight uses this to flag a duplicate-address clash
   /// before flashing — two devices on one address produce a dead bus.
@@ -15544,6 +15789,11 @@ function exportHardwareProfile() {
       manufacturer: 'OpenSmell Desktop',
       model: hardwareProfile.name || 'Custom rig',
       firmware_version: 'desktop-0.1.0',
+      sensor_mappings: hardwareProfile.sensorMappings
+        ? Object.fromEntries(
+            Object.entries(hardwareProfile.sensorMappings).map(([k, v]) => [k, v])
+          )
+        : {},
       board: {
         family: 'esp32',
         name: 'ESP32 (DevKit-V1 / WROOM-32)',
@@ -15556,9 +15806,17 @@ function exportHardwareProfile() {
       channels: Array.from({ length: chCount }, (_, i) => {
         const c = calibrationPerChannel[i];
         const s = SENSOR_LIBRARY[model(i)];
+        const kind = inferKindFromModel(model(i));
+        const profile = sensorProfiles.get(kind as any);
         return {
           channel_id: i,
           sensor_model: model(i),
+          sensor_kind: kind,
+          profile_unit: profile ? profile.unit : null,
+          profile_min: profile ? profile.min : null,
+          profile_max: profile ? profile.max : null,
+          warmup_seconds: profile ? profile.warmupSeconds : null,
+          interface: profile ? profile.interface : null,
           target_gases: s ? s.target.split('/').map(x => x.trim().toLowerCase()) : [],
           material: 'SnO2',
           nominal_sensitivity_a: c?.a ?? s?.a ?? null,
@@ -15645,6 +15903,14 @@ async function importHardwareProfile() {
     if (chs.length > 0) {
       const names = chs.map((c: any) => c.sensor_model || `CH${c.channel_id + 1}`);
       setChannelCount(names.length, names);
+      // Restore sensor mappings from the imported profile.
+      const smRaw = (sp.sensor_mappings ?? {}) as Record<string, { type: string; model: string }>;
+      sensorMappings = new Map<number, { type: SensorType; model: string }>();
+      for (const [slot, m] of Object.entries(smRaw)) {
+        sensorMappings.set(Number(slot), { type: m.type as SensorType, model: m.model as string });
+      }
+      persistSensorMappings();
+      applySensorMappings();
     }
     persistHardwareProfile();
     renderHardwareProfile();
@@ -16069,6 +16335,7 @@ wireHardwareProfile();
 onPresetChange('auto');
 renderHardwareProfile();
 applyCustomNames();
+wireSensorMapping();
 renderSensorLibrary();
 async function seedBundledVials(): Promise<void> {
   const bundled = [
