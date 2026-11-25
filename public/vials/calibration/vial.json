@@ -1,0 +1,174 @@
+{
+  "schema": "osmograph.domain-pack/2",
+  "id": "opensmell.calibration",
+  "name": "Calibration & QA",
+  "version": "0.1.0",
+  "minHost": "0.1.1",
+  "author": "@opensmell",
+  "license": "MIT",
+  "risk": "low",
+  "domain": "calibration",
+  "tagline": "Guided sensor calibration and quality assurance.",
+  "summary": "Walks through zero/span calibration per channel, validates sensor health, and exports a clean calibration report. Advisory only — not a certified calibration service.",
+  "scope": "Supports one-time and repeat calibration of gas sensors on a known rig. Use before deploying anomaly detection or comparative measurements.",
+  "limits": [
+    "Not a certified calibration service. Results depend on the quality of your reference gas and setup.",
+    "MOX sensors require stable warmup (~300 s) before calibration is meaningful.",
+    "NDIR/PID/electrochemical sensors need their own reference gas and flow path.",
+    "Export is a record of what you did; it does not prove accuracy."
+  ],
+  "anomaly": {
+    "baseline": {
+      "protocol": "first-n",
+      "warmupS": 300,
+      "r0WindowS": 60
+    },
+    "transforms": {
+      "conditioning": ["median3"],
+      "response": "delta-over-r0"
+    },
+    "detection": {
+      "enabled": true,
+      "sensitivity": 1.0,
+      "minChannels": 1,
+      "levelBudget": 0,
+      "levelRefS": 0,
+      "alertThreshold": 0.45,
+      "perChannelLimits": {},
+      "hysteresis": 0.15,
+      "escalation": {
+        "warningS": 30,
+        "criticalS": 120,
+        "emergencyS": 300,
+        "resetNormalS": 60
+      },
+      "farTargetPerMonth": null
+    },
+    "admissibility": {
+      "requireBaseline": "ready",
+      "minCoverage": 0.5
+    }
+  },
+  "citations": [
+    "OpenSmell sensor profiles — per-type units, ranges, and warmup times.",
+    "OSM-VP-001 Flow Acceptance Specifications — acceptance criteria for built units."
+  ],
+  "home": {
+    "headline": "Calibration & QA",
+    "detail": "Guided zero/span calibration per channel with sensor health validation and export.",
+    "metrics": [
+      { "label": "Mode", "value": "Advisory", "hint": "Operational context, not certified calibration." },
+      { "label": "Action", "value": "Calibrate / Verify", "hint": "Step through zero and span per channel." }
+    ],
+    "actions": [
+      { "id": "open", "label": "Open workspace", "kind": "open-workspace" },
+      { "id": "check", "label": "Open Check", "kind": "open-check" }
+    ],
+    "limits": [
+      "Not a certified calibration service.",
+      "Readings are sensor- and rig-dependent; confirm with calibrated instruments for safety decisions."
+    ],
+    "sources": []
+  },
+  "ui": {
+    "runtime": "sandbox/1",
+    "entry": "ui.html",
+    "height": 620
+  },
+  "widgets": [
+    {
+      "type": "hero",
+      "art": "generic",
+      "title": "Calibration & QA",
+      "subtitle": "Guided sensor calibration and quality assurance",
+      "note": "OpenSmell Vial · sandboxed UI · host-owned data"
+    },
+    {
+      "type": "risk",
+      "level": "low",
+      "headline": "Calibration is only as good as your reference gas.",
+      "body": "A calibration curve transfers trust from a known concentration to your sensor. If the reference gas is wrong, the calibration is wrong.",
+      "always": [
+        "Use clean, zero-grade air for the zero step.",
+        "Use a known concentration gas for the span step.",
+        "Let sensors warm up fully before starting.",
+        "Record temperature and humidity — they affect calibration."
+      ],
+      "never": [
+        "Do not use exhaled breath as a reference gas.",
+        "Do not calibrate against an uncalibrated sensor.",
+        "Do not present calibration output as certified or traceable."
+      ]
+    },
+    {
+      "type": "tracking",
+      "title": "Calibration log",
+      "description": "Record the conditions that affect calibration: reference gas, concentration, flow rate, temperature, humidity.",
+      "fields": [
+        { "id": "referenceGas", "label": "Reference gas", "type": "select", "options": ["zero air", "span gas (custom)", "ambient air"] },
+        { "id": "concentration", "label": "Concentration (ppm)", "type": "number", "placeholder": "e.g. 400" },
+        { "id": "flowRate", "label": "Flow rate (L/min)", "type": "number", "placeholder": "e.g. 1.0" },
+        { "id": "temperature", "label": "Temperature (°C)", "type": "number", "placeholder": "e.g. 22" },
+        { "id": "humidity", "label": "Humidity (%RH)", "type": "number", "placeholder": "e.g. 45" }
+      ],
+      "logFields": [
+        { "id": "observation", "label": "Observation", "type": "text", "placeholder": "stable drift, sensor swap, new cartridge" },
+        { "id": "action", "label": "Action", "type": "select", "options": ["none", "adjust R₀", "replace sensor", "re-zero", "re-span"] },
+        { "id": "note", "label": "Note", "type": "text", "placeholder": "what changed?" }
+      ],
+      "logLabel": "Add calibration entry"
+    },
+    {
+      "type": "rules",
+      "title": "Calibration decision rules",
+      "rules": [
+        { "when": "Baseline drift exceeds ±5% over 10 minutes in clean air", "then": "Do not calibrate. Check for leaks, temperature swings, or sensor drift first.", "severity": "warn" },
+        { "when": "Channel is saturated (flat at rail) during span step", "then": "Reduce concentration or check load resistor. Do not force a fit.", "severity": "stop" },
+        { "when": "Sensor has not completed warmup", "then": "Wait. Calibration before warmup is meaningless.", "severity": "stop" },
+        { "when": "Post-calibration check reads within ±10% of reference", "then": "Calibration accepted. Export report and proceed.", "severity": "ok" }
+      ]
+    },
+    {
+      "type": "docs",
+      "title": "Field notes"
+    },
+    {
+      "type": "rig",
+      "title": "Use this with your rig",
+      "body": "Connect a rig with at least one gas sensor channel. The vial reads per-channel warmup, baseline, and QC state from Osmograph and guides you through zero/span calibration. Compare recordings in Check on the same rig.",
+      "cta": "Open workspace"
+    }
+  ],
+  "docs": [
+    {
+      "id": "how",
+      "title": "How to calibrate",
+      "body": [
+        "Connect your rig and let sensors warm up fully (MOX: ~300 s, NDIR: ~60 s).",
+        "Expose to clean zero-grade air and record the baseline (zero step).",
+        "Expose to a known concentration span gas and record the response (span step).",
+        "The vial fits the curve and exports a calibration report with R₀, slope, and residuals.",
+        "Repeat on a schedule — sensors drift. Recalibrate after sensor replacement or major temperature change."
+      ]
+    },
+    {
+      "id": "limits",
+      "title": "What it cannot do",
+      "body": [
+        "It cannot certify traceability to NIST or any national standard.",
+        "It cannot calibrate without a reference gas of known concentration.",
+        "It cannot make an uncalibrated sensor trustworthy for safety decisions.",
+        "It cannot compensate for cross-sensitivity to humidity or other gases."
+      ]
+    },
+    {
+      "id": "refs",
+      "title": "References",
+      "body": [
+        "OpenSmell sensor profiles — per-type units, ranges, and warmup times.",
+        "OSM-VP-001 Flow Acceptance Specifications — acceptance criteria for built units.",
+        "Manufacturer datasheet for your specific sensor model."
+      ]
+    }
+  ]
+}

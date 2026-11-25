@@ -1,0 +1,37 @@
+{
+  "schema": "osmograph.vial-index/1",
+  "name": "OpenSmell Vial Index",
+  "description": "Installable domain Vials for Osmograph. Fetch this index to list and install Vials without a server.",
+  "generatedAt": "2026-11-25T00:00:00Z",
+  "vials": [
+    {
+      "id": "opensmell.air-quality",
+      "name": "Indoor Air Quality",
+      "version": "0.1.0",
+      "author": "@opensmell",
+      "license": "MIT",
+      "risk": "high",
+      "domain": "air-quality",
+      "tagline": "Live indoor air context from the sensors you actually have.",
+      "summary": "An indoor air quality workspace for rigs with CO2, VOC, temperature, humidity, or particulate channels. Advisory only — not a certified AQI monitor.",
+      "manifestUrl": "/vials/air-quality/vial.json",
+      "uiUrl": "/vials/air-quality/ui.html",
+      "installedByDefault": true
+    },
+    {
+      "id": "opensmell.calibration",
+      "name": "Calibration & QA",
+      "version": "0.1.0",
+      "author": "@opensmell",
+      "license": "MIT",
+      "risk": "low",
+      "domain": "calibration",
+      "tagline": "Guided sensor calibration and quality assurance.",
+      "summary": "Walks through zero/span calibration per channel, validates sensor health, and exports a clean calibration report. Advisory only — not a certified calibration service.",
+      "manifestUrl": "/vials/calibration/vial.json",
+      "uiUrl": "/vials/calibration/ui.html",
+      "installedByDefault": true
+    }
+  ],
+  "note": "Add your own Vials to this index by hosting a manifest JSON and UI HTML, then adding an entry here. Osmograph verifies every manifest through its local gate before install. Link only — never rehost restrictive datasets."
+}

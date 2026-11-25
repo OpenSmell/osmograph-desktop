@@ -7835,6 +7835,38 @@ async function loadVialRegistry(): Promise<void> {
   }
 }
 
+async function loadVialIndex(): Promise<void> {
+  if (indexLoading || indexLoaded) return;
+  indexLoading = true;
+  indexError = '';
+  try {
+    const res = await fetch('/vials/index.json', { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`The Vial Index returned HTTP ${res.status}.`);
+    const data = await res.json();
+    if (!data || !Array.isArray(data.vials)) throw new Error('The Vial Index is malformed.');
+    indexEntries = data.vials.map((e: any) => ({
+      id: String(e.id || ''),
+      name: String(e.name || ''),
+      version: String(e.version || '0.0.0'),
+      author: String(e.author || ''),
+      license: String(e.license || ''),
+      risk: String(e.risk || 'medium'),
+      domain: String(e.domain || 'custom'),
+      tagline: String(e.tagline || ''),
+      summary: String(e.summary || ''),
+      manifestUrl: String(e.manifestUrl || ''),
+      uiUrl: String(e.uiUrl || ''),
+      installedByDefault: !!e.installedByDefault,
+    })).filter((e: VialIndexEntry) => e.id && e.name && e.manifestUrl);
+  } catch (err) {
+    indexError = err instanceof Error ? err.message : 'The Vial Index could not be reached.';
+  } finally {
+    indexLoading = false;
+    indexLoaded = true;
+    if (activeVialsTab === 'aromatory') renderDomainArea();
+  }
+}
+
 function renderDomainArea(): void {
   const installedHost = document.getElementById('domainInstalledList');
   const catalogHost = document.getElementById('domainCatalog');
@@ -7868,9 +7900,57 @@ function renderDomainArea(): void {
       ${updates.length ? `<div class="vials-section-head" style="margin-top:14px"><span>Updates</span><span class="coord-tag">${updates.length} newer version${updates.length === 1 ? '' : 's'} pinned in the registry</span></div>
       <div class="domain-grid">${updates.map(registryCardHtml).join('')}</div>` : ''}
       <div class="vials-section-head" style="margin-top:14px"><span>From the registry</span><span class="coord-tag">${registryNote}</span></div>
-      ${remote.length ? `<div class="domain-grid">${remote.map(registryCardHtml).join('')}</div>` : ''}`;
+      ${remote.length ? `<div class="domain-grid">${remote.map(registryCardHtml).join('')}</div>` : ''}
+      <div class="vials-section-head" style="margin-top:14px"><span>Vial Index (no server)</span><span class="coord-tag">${indexNoteText()}</span></div>
+      ${indexHtmlText()}`;
   }
   void loadVialRegistry();
+  void loadVialIndex();
+}
+
+function indexNoteText(): string {
+  if (indexLoading) return 'Loading the Vial Index…';
+  if (indexError) return `Index unavailable (${escapeHtmlText(indexError)}). Install from a URL instead.`;
+  const installedIds = new Set(Domain.loadInstalledIds());
+  const available = indexEntries.filter(e => !installedIds.has(e.id));
+  return available.length ? `${available.length} installable Vial${available.length === 1 ? '' : 's'} in the Index.` : 'Vial Index checked. All listed Vials are installed.';
+}
+
+function indexHtmlText(): string {
+  const installedIds = new Set(Domain.loadInstalledIds());
+  const available = indexEntries.filter(e => !installedIds.has(e.id));
+  if (indexLoading) {
+    return '<div class="domain-empty">Loading the Vial Index…</div>';
+  }
+  if (indexError) {
+    return `<div class="domain-empty">Index unavailable (${escapeHtmlText(indexError)}).</div>`;
+  }
+  if (available.length === 0) {
+    return '<div class="domain-empty">All Vials in the Index are installed. Check the registry for more author-hosted projects.</div>';
+  }
+  return `<div class="domain-grid">${available.map((e: VialIndexEntry) => indexCardHtml(e)).join('')}</div>`;
+}
+
+function indexCardHtml(e: VialIndexEntry): string {
+  const riskLabel = { low: 'Low', medium: 'Medium', high: 'High', critical: 'Critical' }[e.risk] || e.risk;
+  return `
+    <div class="domain-card domain-card--install">
+      <div class="domain-card-head">
+        <div class="domain-card-title">${escapeHtmlText(e.name)}</div>
+        <span class="domain-card-risk domain-card-risk--${e.risk}">${riskLabel}</span>
+      </div>
+      <div class="domain-card-meta">
+        <span>${escapeHtmlText(e.version)} · ${escapeHtmlText(e.author)}</span>
+        <span>${escapeHtmlText(e.domain)}</span>
+        <span>${escapeHtmlText(e.license)}</span>
+      </div>
+      <div class="domain-card-body">${escapeHtmlText(e.summary)}</div>
+      <div class="domain-card-actions">
+        <button class="mini-btn primary" type="button" data-index-install="${escapeHtmlText(e.id)}">Install</button>
+        <a class="text-link domain-source" href="${escapeHtmlText(e.manifestUrl)}" target="_blank" rel="noopener noreferrer">Manifest ↗</a>
+      </div>
+    </div>
+  `;
 }
 
 const DOMAIN_SECTION_LABEL: Record<string, string> = {
@@ -9136,6 +9216,31 @@ async function installDomainVial(id: string): Promise<void> {
     : `Installed ${pack.name}. Your log stays on this machine.`);
 }
 
+async function installVialFromIndexEntry(entry: VialIndexEntry, button: HTMLButtonElement): Promise<void> {
+  const previous = button.textContent || 'Install';
+  button.disabled = true;
+  button.textContent = 'Fetching…';
+  const wasInstalled = Domain.loadInstalledIds().includes(entry.id);
+  try {
+    const fetched = await fetchDomainManifest(entry.manifestUrl, 20000);
+    if (fetched.result.pack.id !== entry.id) {
+      throw new Error('The manifest id does not match its index entry. Refusing to install it.');
+    }
+    Domain.saveCustomPack(fetched.result.pack);
+    Domain.installDomainPack(fetched.result.pack.id);
+    renderVials();
+    renderVialHome();
+    openDomainWorkspace(fetched.result.pack.id);
+    const passed = fetched.result.validation.checks.filter(c => c.passed).length;
+    showToast(`${wasInstalled ? 'Updated' : 'Installed'} ${fetched.result.pack.name} to v${fetched.result.pack.version} from the Vial Index. ${passed}/${fetched.result.validation.checks.length} policy checks passed.`);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Could not install that Vial.';
+    showToast(message);
+    button.disabled = false;
+    button.textContent = previous;
+  }
+}
+
 function openDomainDocs(id: string): void {
   openDomainWorkspace(id);
   window.setTimeout(() => document.getElementById('domainDocs')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 60);
@@ -9493,6 +9598,12 @@ document.getElementById('vialsMain')?.addEventListener('click', (ev) => {
   }
   const install = target.closest<HTMLElement>('[data-domain-install]');
   if (install?.dataset.domainInstall) { void installDomainVial(install.dataset.domainInstall); return; }
+  const indexInstall = target.closest<HTMLButtonElement>('[data-index-install]');
+  if (indexInstall?.dataset.indexInstall) {
+    const entry = indexEntries.find(e => e.id === indexInstall.dataset.indexInstall);
+    if (entry) void installVialFromIndexEntry(entry, indexInstall);
+    return;
+  }
   const open = target.closest<HTMLElement>('[data-domain-open]');
   if (open?.dataset.domainOpen) { openDomainWorkspace(open.dataset.domainOpen); return; }
   const docs = target.closest<HTMLElement>('[data-domain-docs]');
@@ -9599,6 +9710,28 @@ let registryEntries: RegistryVialEntry[] = [];
 let registryLoading = false;
 let registryLoaded = false;
 let registryError = '';
+
+// Zero-infra Vial Index (Aromatory): a static JSON file listing installable
+// Vials. No server, no auth — just a manifest and UI assets on any static host.
+let indexEntries: VialIndexEntry[] = [];
+let indexLoading = false;
+let indexLoaded = false;
+let indexError = '';
+
+interface VialIndexEntry {
+  id: string;
+  name: string;
+  version: string;
+  author: string;
+  license: string;
+  risk: string;
+  domain: string;
+  tagline: string;
+  summary: string;
+  manifestUrl: string;
+  uiUrl: string;
+  installedByDefault?: boolean;
+}
 
 function syncVialsTabs(): void {
   const panes: Record<string, string> = {
@@ -16340,6 +16473,7 @@ renderSensorLibrary();
 async function seedBundledVials(): Promise<void> {
   const bundled = [
     { id: 'opensmell.air-quality', manifest: '/vials/air-quality/vial.json', ui: '/vials/air-quality/ui.html' },
+    { id: 'opensmell.calibration', manifest: '/vials/calibration/vial.json', ui: '/vials/calibration/ui.html' },
   ];
   for (const entry of bundled) {
     try {
